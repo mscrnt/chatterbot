@@ -110,6 +110,61 @@
     </div>
   {% endif %}
 
+  {# Soft profile — pronouns / location / demeanor / interests built by
+     the LLM extractor over time. Hidden when the LLM hasn't seen any
+     clear signal yet, to avoid an empty placeholder. #}
+  {% set _has_profile = user.pronouns or user.location or user.demeanor or user.interests %}
+  {% if _has_profile %}
+    {% set _dem_tone = {
+      'hype':       'danger',
+      'chill':      'success',
+      'supportive': 'success',
+      'snarky':     'warning',
+      'quiet':      'neutral',
+      'analytical': 'accent',
+      'unknown':    'neutral',
+    }.get(user.demeanor or 'unknown', 'neutral') %}
+    <section class="rounded-xl border border-accent/30 bg-accent/5 p-3 sm:p-4">
+      <header class="flex items-baseline justify-between gap-2 mb-2">
+        <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+          <i class="fa-solid fa-id-badge text-accent"></i> Profile
+        </h2>
+        {% if user.profile_updated_at %}
+          <span class="text-[10px] text-muted">refreshed {{ user.profile_updated_at | short_ts }}</span>
+        {% endif %}
+      </header>
+      <div class="flex flex-wrap items-center gap-2 text-sm">
+        {% if user.pronouns %}
+          <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-subtle bg-surface text-primary">
+            <i class="fa-solid fa-user text-[10px] text-muted"></i> {{ user.pronouns }}
+          </span>
+        {% endif %}
+        {% if user.location %}
+          <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-subtle bg-surface text-primary">
+            <i class="fa-solid fa-location-dot text-[10px] text-muted"></i> {{ user.location }}
+          </span>
+        {% endif %}
+        {% if user.demeanor and user.demeanor != 'unknown' %}
+          {% with label=user.demeanor, tone=_dem_tone, icon='fa-face-smile' %}
+            {% include "components/_pill.html" %}
+          {% endwith %}
+        {% endif %}
+      </div>
+      {% if user.interests %}
+        <div class="mt-2">
+          <p class="text-[11px] uppercase tracking-wider text-muted mb-1">interests</p>
+          <div class="flex flex-wrap gap-1">
+            {% for tag in user.interests %}
+              <span class="inline-flex items-center px-2 py-0.5 text-xs rounded-full border border-accent/30 bg-accent/15 text-accent">
+                {{ tag }}
+              </span>
+            {% endfor %}
+          </div>
+        </div>
+      {% endif %}
+    </section>
+  {% endif %}
+
   {# Stat tiles #}
   <section class="grid grid-cols-2 sm:grid-cols-4 gap-3">
     {% with icon='fa-dollar-sign', label='Lifetime Donated',

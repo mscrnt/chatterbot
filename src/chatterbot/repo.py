@@ -59,6 +59,15 @@ class User:
     # If non-null, this user has been merged into another (the parent).
     # Aggregations should follow the link before reporting on this row.
     merged_into: str | None = None
+    # Soft-profile fields built by the LLM profile extractor. The notes
+    # surface continues to carry hard, cited facts; this is the squishier
+    # "who is this person" view. Each is None until the LLM sees a clear
+    # signal in the user's chat history.
+    pronouns: str | None = None       # free text — "she/her", "they/them"
+    location: str | None = None       # free text — "Sydney" or "Australia"
+    demeanor: str | None = None       # constrained enum, see schemas.Demeanor
+    interests: list[str] | None = None  # deduped, capped, ordered by recency
+    profile_updated_at: str | None = None
 
 
 @dataclass
@@ -304,6 +313,15 @@ class ChatterRepo:
                 # rewritten to the parent at merge time, so the child row
                 # exists only for "merged from X" provenance.
                 ("merged_into", "TEXT"),
+                # LLM-built profile fields. Updated per summarization batch
+                # via a separate softer-rubric extractor. None means we
+                # haven't seen a clear signal yet — the profile pass never
+                # overwrites a known value with null.
+                ("pronouns",            "TEXT"),
+                ("location",            "TEXT"),
+                ("demeanor",            "TEXT"),  # constrained enum, see schemas.py
+                ("interests",           "TEXT"),  # JSON array, deduped
+                ("profile_updated_at",  "TEXT"),
             ):
                 if col not in _ucols:
                     cur.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
@@ -616,6 +634,70 @@ class ChatterRepo:
                     1 if is_mod else 0,
                     1 if is_vip else 0,
                     1 if is_founder else 0,
+                    twitch_id,
+                ),
+            )
+
+    def update_user_profile(
+        self,
+        twitch_id: str,
+        *,
+        pronouns: str | None = None,
+        location: str | None = None,
+        demeanor: str | None = None,
+        interests: list[str] | None = None,
+        max_interests: int = 12,
+    ) -> None:
+        """Merge LLM-extracted profile signals into the users row. Never
+        overwrites a known value with None — the extractor only emits a
+        field when it sees a clear signal, so silence on a field means
+        "no new information," not "clear it." Interests are union-merged
+        with existing entries (case-insensitive dedup) and capped."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT pronouns, location, demeanor, interests "
+                "FROM users WHERE twitch_id = ?",
+                (twitch_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return
+            new_pronouns = pronouns.strip() if pronouns and pronouns.strip() else row["pronouns"]
+            new_location = location.strip() if location and location.strip() else row["location"]
+            new_demeanor = demeanor.strip() if demeanor and demeanor.strip() else row["demeanor"]
+            existing_interests: list[str] = []
+            if row["interests"]:
+                try:
+                    parsed = json.loads(row["interests"])
+                    if isinstance(parsed, list):
+                        existing_interests = [str(x) for x in parsed if x]
+                except (TypeError, ValueError):
+                    pass
+            new_interests = list(existing_interests)
+            if interests:
+                seen_lower = {x.lower() for x in new_interests}
+                for entry in interests:
+                    if not entry:
+                        continue
+                    e = entry.strip()
+                    if not e or e.lower() in seen_lower:
+                        continue
+                    new_interests.append(e)
+                    seen_lower.add(e.lower())
+                # Newest first when over cap — keep most recent signals.
+                if len(new_interests) > max_interests:
+                    new_interests = new_interests[-max_interests:]
+            cur.execute(
+                """
+                UPDATE users SET
+                    pronouns = ?, location = ?, demeanor = ?,
+                    interests = ?, profile_updated_at = ?
+                WHERE twitch_id = ?
+                """,
+                (
+                    new_pronouns, new_location, new_demeanor,
+                    json.dumps(new_interests) if new_interests else None,
+                    _now_iso(),
                     twitch_id,
                 ),
             )
@@ -1939,13 +2021,23 @@ class ChatterRepo:
             cur.execute(
                 "SELECT twitch_id, name, first_seen, last_seen, opt_out, "
                 "sub_tier, sub_months, is_mod, is_vip, is_founder, "
-                "source, merged_into "
+                "source, merged_into, "
+                "pronouns, location, demeanor, interests, profile_updated_at "
                 "FROM users WHERE twitch_id = ?",
                 (twitch_id,),
             )
             r = cur.fetchone()
             if not r:
                 return None
+            interests_raw = r["interests"]
+            interests: list[str] | None = None
+            if interests_raw:
+                try:
+                    parsed = json.loads(interests_raw)
+                    if isinstance(parsed, list):
+                        interests = [str(x) for x in parsed if x]
+                except (TypeError, ValueError):
+                    interests = None
             return User(
                 twitch_id=r["twitch_id"],
                 name=r["name"],
@@ -1959,6 +2051,11 @@ class ChatterRepo:
                 is_founder=bool(r["is_founder"]),
                 source=r["source"] or "twitch",
                 merged_into=r["merged_into"],
+                pronouns=r["pronouns"],
+                location=r["location"],
+                demeanor=r["demeanor"],
+                interests=interests,
+                profile_updated_at=r["profile_updated_at"],
             )
 
     def get_user_aliases(self, user_id: str) -> list[Alias]:

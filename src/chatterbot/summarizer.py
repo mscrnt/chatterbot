@@ -27,11 +27,53 @@ from pydantic import ValidationError
 
 from .config import Settings
 from .llm.ollama_client import OllamaClient
-from .llm.schemas import NoteExtractionResponse, TopicEntry, TopicsResponse
+from .llm.schemas import (
+    NoteExtractionResponse,
+    ProfileExtractionResponse,
+    TopicEntry,
+    TopicsResponse,
+)
 from .repo import ChatterRepo
 from .threader import Threader
 
 logger = logging.getLogger(__name__)
+
+
+PROFILE_EXTRACTION_SYSTEM = """You build a soft profile of one chat viewer from their recent messages.
+
+This is DIFFERENT from note extraction. Notes are hard, cited facts. This is
+the squishier "who is this person" view — pronouns, location, vibe, things
+they care about — and partial signals are fine because they accumulate over
+many batches.
+
+Each input line is prefixed with the message id in square brackets, e.g.
+`[42] my cat Loki keeps walking on my keyboard`.
+
+Fields and rules:
+- `pronouns`: only set when the viewer explicitly used pronouns about
+  themselves ("she/her", "they/them", "i'm a guy"). Otherwise leave null.
+  Don't infer from username or display name.
+- `location`: only set when the viewer explicitly mentioned where they are
+  ("from Sydney", "I'm in Texas", "it's 2am here in Berlin"). Country,
+  region, city — whatever they said. Don't infer from time-of-day alone.
+  Otherwise leave null.
+- `demeanor`: pick ONE bucket that best fits the dominant tone of THIS
+  batch's messages. Acceptable buckets:
+    hype        — caps, exclamations, reacts strongly to clutch moments
+    chill       — measured, conversational, even-keeled
+    supportive  — encouraging, hype FOR others, positive replies
+    snarky      — dry/sarcastic humor, jokes at situations
+    quiet       — short, infrequent, mostly reactive
+    analytical  — technical commentary on gameplay/strategy
+    unknown     — genuinely can't tell, or messages are too thin
+- `interests`: 0 to 5 short tags they've shown interest in (specific games,
+  genres, hobbies, topics, communities). Lowercase, snake-case-ish OK.
+  Examples: "speedrunning", "resident evil", "cats", "metalcore",
+  "vintage cameras". Skip generic "twitch" / "chat" / "streaming".
+
+If you have no signal for a field, leave it null / empty. Empty fields are
+EXPECTED and NORMAL — don't fabricate.
+"""
 
 
 NOTE_EXTRACTION_SYSTEM = """You analyze recent Twitch chat messages from one viewer and extract short factual notes about that viewer.
@@ -176,13 +218,43 @@ class Summarizer:
                     list(entry.source_message_ids),
                 )
 
+            # Soft-profile extraction — separate LLM call with a softer
+            # rubric so we still build a useful "who is this" view even
+            # for chatters whose hard-fact note count stays at zero.
+            # Failures here are non-fatal; the notes pass already wrote.
+            profile_summary = "no fields"
+            try:
+                profile = await self.llm.generate_structured(
+                    prompt=prompt,
+                    system_prompt=PROFILE_EXTRACTION_SYSTEM,
+                    response_model=ProfileExtractionResponse,
+                )
+                await asyncio.to_thread(
+                    self.repo.update_user_profile, user_id,
+                    pronouns=profile.pronouns,
+                    location=profile.location,
+                    demeanor=profile.demeanor,
+                    interests=list(profile.interests),
+                )
+                bits = []
+                if profile.pronouns:  bits.append(f"pronouns={profile.pronouns}")
+                if profile.location:  bits.append(f"location={profile.location}")
+                if profile.demeanor:  bits.append(f"demeanor={profile.demeanor}")
+                if profile.interests: bits.append(f"interests={len(profile.interests)}")
+                profile_summary = ", ".join(bits) if bits else "no fields"
+            except ValidationError:
+                logger.exception("profile extraction validation failed for %s", user_id)
+            except Exception:
+                logger.exception("profile LLM generate failed for %s", user_id)
+
             last_id = rows[-1][0]
             await asyncio.to_thread(self.repo.set_watermark, user_id, last_id)
             logger.info(
-                "summarized user=%s msgs=%d -> notes=%d watermark=%d",
+                "summarized user=%s msgs=%d -> notes=%d profile=(%s) watermark=%d",
                 display_name,
                 len(rows),
                 len(response.notes),
+                profile_summary,
                 last_id,
             )
 

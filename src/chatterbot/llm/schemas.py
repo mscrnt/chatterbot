@@ -43,6 +43,50 @@ class NoteExtractionResponse(BaseModel):
     notes: list[NoteEntry] = Field(default_factory=list, max_length=3)
 
 
+# ---- per-user soft-profile extraction ----
+
+# Constrained vocabulary for the demeanor field. Six buckets, plus 'unknown'
+# as the "I genuinely couldn't tell" exit. Keep this list small — every new
+# value the LLM has to choose from raises false-classification risk.
+Demeanor = Literal[
+    "hype",        # loud, lots of caps, reacts strongly to clutch moments
+    "chill",       # measured, conversational, even-keeled
+    "supportive",  # encouraging, hype FOR others, often replies with positivity
+    "snarky",      # dry humor, sarcastic, jokes at situations
+    "quiet",       # short messages, infrequent, mostly reactive
+    "analytical",  # technical commentary on gameplay/strategy
+    "unknown",
+]
+
+InterestString = Annotated[
+    str,
+    StringConstraints(min_length=2, max_length=40, strip_whitespace=True),
+]
+ProfileFreeText = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=80, strip_whitespace=True),
+]
+
+
+class ProfileExtractionResponse(BaseModel):
+    """Reply for the soft-profile extractor that runs alongside notes.
+
+    Differs from notes by intent: notes capture only hard self-stated facts
+    with citations. Profile captures squishier identity signals — pronouns
+    when explicitly used, location when explicitly mentioned, demeanor as
+    an inferred bucket, and interests as a deduped list.
+
+    Every field is optional. None / empty means "no clear signal in this
+    batch" — the merger never overwrites an existing value with absence,
+    so partial signals across batches accumulate into a richer profile.
+    """
+
+    pronouns: ProfileFreeText | None = None
+    location: ProfileFreeText | None = None
+    demeanor: Demeanor | None = None
+    interests: list[InterestString] = Field(default_factory=list, max_length=5)
+
+
 # ---- channel topic snapshotter ----
 
 TopicTitle = Annotated[
