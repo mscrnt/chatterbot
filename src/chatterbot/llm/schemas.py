@@ -13,7 +13,7 @@ manual `json.loads` + dict-walking in summarizer / RAG / etc.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, StringConstraints
 
@@ -56,3 +56,38 @@ class TopicsResponse(BaseModel):
     what chat is currently discussing, each with the usernames driving it."""
 
     topics: list[TopicEntry] = Field(default_factory=list, max_length=5)
+
+
+# ---- moderation incident classifier ----
+
+ModCategory = Literal[
+    "harassment",
+    "hate_speech",
+    "threats",
+    "spam",
+    "doxxing",
+    "other",
+]
+
+Rationale = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=400, strip_whitespace=True),
+]
+
+
+class IncidentClassification(BaseModel):
+    """One flagged message. Only emitted when is_violation=true."""
+
+    message_id: int
+    is_violation: bool
+    severity: Literal[1, 2, 3]            # 1 minor / 2 warning / 3 serious
+    categories: list[ModCategory] = Field(default_factory=list, max_length=4)
+    rationale: Rationale
+
+
+class ModerationBatchResponse(BaseModel):
+    """Reply for `moderator._review_batch`. The classifier reviews a batch of
+    chat messages and returns ONLY the ones that violate the rubric. Returning
+    an empty list is the expected, common case when chat is calm."""
+
+    classifications: list[IncidentClassification] = Field(default_factory=list)

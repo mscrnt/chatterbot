@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Moderation · chatterbot{% endblock %}
+{% block content %}
+<div class="space-y-3">
+  <header class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-2">
+    <div>
+      <h1 class="text-xl sm:text-2xl font-semibold inline-flex items-center gap-2">
+        <i class="fa-solid fa-shield-halved text-accent"></i> Moderation
+      </h1>
+      <p class="text-xs text-muted mt-1">
+        Advisory only. Flagged messages live here for your review — chatterbot
+        never times anyone out or bans anyone.
+      </p>
+    </div>
+    <div>
+      <label class="block text-xs uppercase tracking-wider text-muted mb-1">Status</label>
+      <select name="status"
+              class="tap bg-surface border border-subtle rounded px-3 text-base text-primary focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out"
+              hx-get="/moderation?partial=1"
+              hx-target="#incidents-area" hx-swap="outerHTML"
+              hx-trigger="change">
+        <option value="open"      {% if status=='open' %}selected{% endif %}>open</option>
+        <option value="reviewed"  {% if status=='reviewed' %}selected{% endif %}>reviewed</option>
+        <option value="dismissed" {% if status=='dismissed' %}selected{% endif %}>dismissed</option>
+        <option value="all"       {% if status=='all' %}selected{% endif %}>all</option>
+      </select>
+    </div>
+  </header>
+  {% include "partials/incidents_list.html" %}
+</div>
+{% endblock %}

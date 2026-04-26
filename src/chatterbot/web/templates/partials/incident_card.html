@@ -1,0 +1,75 @@
+{% set sev_tone = {1: 'neutral', 2: 'warning', 3: 'danger'}[row.incident.severity] %}
+{% set sev_label = {1: 'minor', 2: 'warning', 3: 'serious'}[row.incident.severity] %}
+{% set status_tone = {'open': 'warning', 'reviewed': 'success', 'dismissed': 'neutral'}[row.incident.status] %}
+{% set status_icon = {'open': 'fa-flag', 'reviewed': 'fa-circle-check', 'dismissed': 'fa-eye-slash'}[row.incident.status] %}
+<article id="incident-{{ row.incident.id }}"
+         class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 space-y-2">
+  <header class="flex items-center justify-between gap-2 flex-wrap">
+    <div class="inline-flex items-center gap-2">
+      {% with name=row.user_name or '?', size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+      {% if row.incident.user_id %}
+        <a href="/users/{{ row.incident.user_id }}" class="text-accent hover:underline font-medium">{{ row.user_name or '(unknown)' }}</a>
+      {% else %}
+        <span class="text-primary">{{ row.user_name or '(unknown)' }}</span>
+      {% endif %}
+      <span class="text-xs text-muted">· {{ row.incident.ts | short_ts }}</span>
+    </div>
+    <div class="inline-flex items-center gap-1 flex-wrap">
+      {% with label=sev_label, tone=sev_tone, icon='fa-triangle-exclamation' %}{% include "components/_pill.html" %}{% endwith %}
+      {% with label=row.incident.status, tone=status_tone, icon=status_icon %}{% include "components/_pill.html" %}{% endwith %}
+    </div>
+  </header>
+
+  {% if row.message_content %}
+    <blockquote class="border-l-2 border-danger/60 pl-3 text-sm text-primary break-words italic">
+      {{ row.message_content }}
+    </blockquote>
+  {% else %}
+    <p class="text-xs text-muted italic">[original message no longer in DB]</p>
+  {% endif %}
+
+  {% if row.incident.categories %}
+    <div class="flex flex-wrap gap-1">
+      {% for c in row.incident.categories %}
+        {% with label=c, tone='accent' %}{% include "components/_pill.html" %}{% endwith %}
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {% if row.incident.rationale %}
+    <p class="text-sm text-muted leading-relaxed">
+      <i class="fa-solid fa-robot text-accent text-xs"></i>
+      {{ row.incident.rationale }}
+    </p>
+  {% endif %}
+
+  <div class="flex flex-wrap gap-2 pt-1">
+    {% if row.incident.status != 'reviewed' %}
+    <form hx-post="/moderation/{{ row.incident.id }}/status"
+          hx-target="#incident-{{ row.incident.id }}" hx-swap="outerHTML">
+      <input type="hidden" name="new_status" value="reviewed">
+      <button class="tap inline-flex items-center gap-2 px-3 rounded bg-success/15 hover:bg-success/25 text-success text-sm">
+        <i class="fa-solid fa-circle-check"></i> mark reviewed
+      </button>
+    </form>
+    {% endif %}
+    {% if row.incident.status != 'dismissed' %}
+    <form hx-post="/moderation/{{ row.incident.id }}/status"
+          hx-target="#incident-{{ row.incident.id }}" hx-swap="outerHTML">
+      <input type="hidden" name="new_status" value="dismissed">
+      <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-muted text-sm">
+        <i class="fa-solid fa-eye-slash"></i> dismiss
+      </button>
+    </form>
+    {% endif %}
+    {% if row.incident.status != 'open' %}
+    <form hx-post="/moderation/{{ row.incident.id }}/status"
+          hx-target="#incident-{{ row.incident.id }}" hx-swap="outerHTML">
+      <input type="hidden" name="new_status" value="open">
+      <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-muted text-sm">
+        <i class="fa-solid fa-rotate-left"></i> reopen
+      </button>
+    </form>
+    {% endif %}
+  </div>
+</article>

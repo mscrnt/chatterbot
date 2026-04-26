@@ -1,0 +1,37 @@
+<div id="incidents-area" class="space-y-2">
+  {% if not rows %}
+    {% with icon='fa-shield-halved',
+            heading='Nothing flagged',
+            body=('No ' ~ status ~ ' incidents.') if status != 'all' else 'No incidents recorded.' %}
+      {% include "components/_empty_state.html" %}
+    {% endwith %}
+  {% else %}
+    <p class="text-xs text-muted">
+      {{ total }} {{ status if status != 'all' else 'total' }} incident{{ '' if total == 1 else 's' }}
+    </p>
+    <div class="space-y-2">
+      {% for row in rows %}
+        {% include "partials/incident_card.html" %}
+      {% endfor %}
+    </div>
+    {% if pages and pages > 1 %}
+    <div class="flex items-center justify-between pt-2 text-sm">
+      {% if page > 1 %}
+        <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary"
+                hx-get="/moderation?partial=1&status={{ status }}&page={{ page-1 }}"
+                hx-target="#incidents-area" hx-swap="outerHTML">
+          <i class="fa-solid fa-chevron-left text-xs"></i> prev
+        </button>
+      {% else %}<span></span>{% endif %}
+      <span class="text-muted">page {{ page }} / {{ pages }}</span>
+      {% if page < pages %}
+        <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary"
+                hx-get="/moderation?partial=1&status={{ status }}&page={{ page+1 }}"
+                hx-target="#incidents-area" hx-swap="outerHTML">
+          next <i class="fa-solid fa-chevron-right text-xs"></i>
+        </button>
+      {% else %}<span></span>{% endif %}
+    </div>
+    {% endif %}
+  {% endif %}
+</div>

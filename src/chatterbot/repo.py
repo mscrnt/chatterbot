@@ -84,6 +84,28 @@ class Event:
 
 
 @dataclass
+class Incident:
+    id: int
+    user_id: str | None
+    message_id: int | None
+    ts: str
+    severity: int               # 1 (minor) | 2 (warning) | 3 (serious)
+    categories: list[str]       # parsed from JSON column
+    rationale: str | None
+    status: str                 # 'open' | 'reviewed' | 'dismissed'
+
+
+@dataclass
+class IncidentRow:
+    """Joined incident with the offender's name and the offending message
+    content — used by the moderation list view and per-user incident panel."""
+
+    incident: Incident
+    user_name: str | None
+    message_content: str | None
+
+
+@dataclass
 class TopicSnapshot:
     id: int
     ts: str
@@ -259,6 +281,26 @@ class ChatterRepo:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_aliases_name ON user_aliases(LOWER(name))"
             )
+            # Moderation incidents (opt-in MOD_MODE_ENABLED). Advisory only —
+            # the bot never auto-actions; the streamer reviews via the
+            # dashboard's Moderation tab.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS incidents (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id     TEXT REFERENCES users(twitch_id) ON DELETE CASCADE,
+                    message_id  INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+                    ts          TEXT NOT NULL,
+                    severity    INTEGER NOT NULL,
+                    categories  TEXT NOT NULL,
+                    rationale   TEXT,
+                    status      TEXT NOT NULL DEFAULT 'open'
+                )
+                """
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_incidents_user ON incidents(user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_incidents_ts ON incidents(ts)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status)")
             # One-time backfill so existing users get their current name as an alias
             # without needing a fresh observation. Idempotent.
             cur.execute(
@@ -1103,6 +1145,156 @@ class ChatterRepo:
                 for r in cur.fetchall()
             ]
 
+    # ============================ Moderation (opt-in) =====================
+
+    _MOD_WATERMARK_KEY = "mod_review_watermark"
+
+    def get_mod_watermark(self) -> int:
+        v = self.get_app_setting(self._MOD_WATERMARK_KEY)
+        try:
+            return int(v) if v is not None else 0
+        except (TypeError, ValueError):
+            return 0
+
+    def set_mod_watermark(self, msg_id: int) -> None:
+        self.set_app_setting(self._MOD_WATERMARK_KEY, str(int(msg_id)))
+
+    def messages_for_mod_review(self, limit: int) -> list[Message]:
+        """Pull messages newer than the moderation watermark, oldest first."""
+        wm = self.get_mod_watermark()
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.id, m.user_id, u.name, m.ts, m.content
+                FROM messages m
+                JOIN users u ON u.twitch_id = m.user_id
+                WHERE m.id > ?
+                ORDER BY m.id ASC
+                LIMIT ?
+                """,
+                (wm, limit),
+            )
+            return [
+                Message(
+                    id=int(r["id"]), user_id=r["user_id"], name=r["name"],
+                    ts=r["ts"], content=r["content"],
+                )
+                for r in cur.fetchall()
+            ]
+
+    def add_incident(
+        self,
+        *,
+        user_id: str | None,
+        message_id: int | None,
+        severity: int,
+        categories: list[str],
+        rationale: str | None,
+    ) -> int:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO incidents(user_id, message_id, ts, severity, categories, rationale, status)
+                VALUES (?, ?, ?, ?, ?, ?, 'open')
+                """,
+                (
+                    user_id,
+                    message_id,
+                    _now_iso(),
+                    int(severity),
+                    json.dumps(list(categories)),
+                    rationale,
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def list_incidents(
+        self,
+        *,
+        status: str | None = "open",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[IncidentRow]:
+        params: list[Any] = []
+        where = []
+        if status:
+            where.append("i.status = ?")
+            params.append(status)
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+        params.extend([limit, offset])
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT i.id, i.user_id, i.message_id, i.ts, i.severity,
+                       i.categories, i.rationale, i.status,
+                       u.name AS user_name,
+                       m.content AS message_content
+                FROM incidents i
+                LEFT JOIN users u    ON u.twitch_id = i.user_id
+                LEFT JOIN messages m ON m.id        = i.message_id
+                {where_sql}
+                ORDER BY i.ts DESC
+                LIMIT ? OFFSET ?
+                """,
+                params,
+            )
+            return [_incident_row_from_row(r) for r in cur.fetchall()]
+
+    def count_incidents(self, status: str | None = None) -> int:
+        params: list[Any] = []
+        where_sql = ""
+        if status:
+            where_sql = "WHERE status = ?"
+            params.append(status)
+        with self._cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) AS c FROM incidents {where_sql}", params)
+            return int(cur.fetchone()["c"])
+
+    def get_user_incidents(self, user_id: str, limit: int = 25) -> list[IncidentRow]:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT i.id, i.user_id, i.message_id, i.ts, i.severity,
+                       i.categories, i.rationale, i.status,
+                       u.name AS user_name,
+                       m.content AS message_content
+                FROM incidents i
+                LEFT JOIN users u    ON u.twitch_id = i.user_id
+                LEFT JOIN messages m ON m.id        = i.message_id
+                WHERE i.user_id = ?
+                ORDER BY i.ts DESC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            )
+            return [_incident_row_from_row(r) for r in cur.fetchall()]
+
+    def update_incident_status(self, incident_id: int, status: str) -> None:
+        if status not in ("open", "reviewed", "dismissed"):
+            raise ValueError(f"invalid status: {status!r}")
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE incidents SET status = ? WHERE id = ?", (status, incident_id)
+            )
+
+    def get_incident(self, incident_id: int) -> IncidentRow | None:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT i.id, i.user_id, i.message_id, i.ts, i.severity,
+                       i.categories, i.rationale, i.status,
+                       u.name AS user_name,
+                       m.content AS message_content
+                FROM incidents i
+                LEFT JOIN users u    ON u.twitch_id = i.user_id
+                LEFT JOIN messages m ON m.id        = i.message_id
+                WHERE i.id = ?
+                """,
+                (incident_id,),
+            )
+            r = cur.fetchone()
+            return _incident_row_from_row(r) if r else None
+
     # ============================ App settings (dashboard editable) ========
     # The dashboard's /settings page edits Twitch + StreamElements credentials
     # here. The bot reads these on startup with .env values as fallback. A
@@ -1141,6 +1333,30 @@ class ChatterRepo:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+
+def _incident_row_from_row(r) -> IncidentRow:
+    try:
+        cats = json.loads(r["categories"]) if r["categories"] else []
+        if not isinstance(cats, list):
+            cats = []
+    except (TypeError, ValueError):
+        cats = []
+    inc = Incident(
+        id=int(r["id"]),
+        user_id=r["user_id"],
+        message_id=int(r["message_id"]) if r["message_id"] is not None else None,
+        ts=r["ts"],
+        severity=int(r["severity"]),
+        categories=[str(c) for c in cats],
+        rationale=r["rationale"],
+        status=r["status"],
+    )
+    return IncidentRow(
+        incident=inc,
+        user_name=r["user_name"],
+        message_content=r["message_content"],
+    )
 
 
 def _event_from_row(r) -> Event:

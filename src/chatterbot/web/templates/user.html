@@ -115,6 +115,24 @@
     {% include "partials/notes_list.html" %}
   </section>
 
+  {# Moderation incidents (only when MOD_MODE_ENABLED) #}
+  {% if mod_mode_enabled %}
+  <section class="space-y-2">
+    <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+      <i class="fa-solid fa-shield-halved text-accent"></i> Moderation incidents
+    </h2>
+    {% if not incidents %}
+      <p class="text-muted italic text-sm">No incidents flagged for this viewer.</p>
+    {% else %}
+      <div class="space-y-2">
+        {% for row in incidents %}
+          {% include "partials/incident_card.html" %}
+        {% endfor %}
+      </div>
+    {% endif %}
+  </section>
+  {% endif %}
+
   {# Donations & events log #}
   <section class="space-y-2">
     <h2 class="font-semibold text-primary inline-flex items-center gap-2">

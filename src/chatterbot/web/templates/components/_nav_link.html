@@ -1,11 +1,14 @@
-{# Renders the four nav links. Reads `current_path` from base.html context. #}
+{# Nav links. Reads `current_path` and `mod_mode_enabled` from base context. #}
 {% set links = [
   ('/',         'Chatters', 'fa-users',    is_chatters),
   ('/topics',   'Topics',   'fa-comments', current_path == '/topics'),
   ('/events',   'Events',   'fa-coins',    current_path == '/events'),
   ('/live',     'Live',     'fa-tower-broadcast', current_path == '/live'),
-  ('/settings', 'Settings', 'fa-sliders',  current_path == '/settings'),
 ] %}
+{% if mod_mode_enabled %}
+  {% set _ = links.append(('/moderation', 'Moderation', 'fa-shield-halved', current_path == '/moderation')) %}
+{% endif %}
+{% set _ = links.append(('/settings', 'Settings', 'fa-sliders', current_path == '/settings')) %}
 {% for href, label, icon, active in links %}
 <a href="{{ href }}"
    class="tap inline-flex items-center gap-2 px-3 rounded text-sm sm:text-base transition-all duration-150 ease-out

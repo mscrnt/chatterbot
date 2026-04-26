@@ -22,6 +22,7 @@ from .config import Settings, get_settings
 from .diagnose import build_diagnostic_bundle, default_bundle_filename
 from .llm.ollama_client import OllamaClient
 from .logging_setup import setup_logging
+from .moderator import Moderator
 from .repo import ChatterRepo
 from .streamelements import StreamElementsListener
 from .summarizer import Summarizer
@@ -59,6 +60,10 @@ async def run_bot(settings: Settings) -> None:
     ]
     if settings.streamelements_enabled:
         tasks.append(asyncio.create_task(se.run(), name="streamelements"))
+    if settings.mod_mode_enabled:
+        moderator = Moderator(repo, llm, settings)
+        tasks.append(asyncio.create_task(moderator.review_loop(), name="moderator"))
+        logger.info("moderation mode ENABLED — advisory-only classifier active")
 
     try:
         await asyncio.gather(*tasks)

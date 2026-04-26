@@ -98,6 +98,9 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         embed_model=settings.ollama_embed_model,
     )
 
+    # Expose runtime settings flags to every template (nav uses these).
+    TEMPLATES.env.globals["mod_mode_enabled"] = bool(settings.mod_mode_enabled)
+
     auth_dep = make_auth_dependency(settings)
     deps = [Depends(auth_dep)] if settings.dashboard_basic_auth_enabled else []
     app = FastAPI(
@@ -167,6 +170,11 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         msg_total = repo.count_messages(twitch_id)
         aliases = repo.get_user_aliases(twitch_id)
         prior_aliases = [a for a in aliases if a.name != user.name]
+        incidents = (
+            repo.get_user_incidents(twitch_id, limit=15)
+            if settings.mod_mode_enabled
+            else []
+        )
         return TEMPLATES.TemplateResponse(
             request,
             "user.html",
@@ -180,6 +188,8 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "msg_page": 1,
                 "msg_pages": max(1, (msg_total + MESSAGE_PAGE_SIZE - 1) // MESSAGE_PAGE_SIZE),
                 "prior_aliases": prior_aliases,
+                "incidents": incidents,
+                "mod_mode_enabled": settings.mod_mode_enabled,
             },
         )
 
@@ -382,6 +392,50 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             else:
                 repo.set_app_setting(key, submitted.strip())
         return RedirectResponse(url="/settings?saved=1", status_code=303)
+
+    # ---------------- moderation (opt-in via MOD_MODE_ENABLED) ----------------
+
+    @app.get("/moderation", response_class=HTMLResponse)
+    async def moderation_page(
+        request: Request,
+        status: str = Query("open"),
+        page: int = Query(1, ge=1),
+        partial: int = Query(0),
+    ):
+        if status not in ("open", "reviewed", "dismissed", "all"):
+            status = "open"
+        status_filter = None if status == "all" else status
+        offset = (page - 1) * PAGE_SIZE
+        rows = repo.list_incidents(
+            status=status_filter, limit=PAGE_SIZE, offset=offset
+        )
+        total = repo.count_incidents(status=status_filter)
+        ctx = {
+            "rows": rows,
+            "status": status,
+            "page": page,
+            "total": total,
+            "pages": max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE),
+            "mod_mode_enabled": settings.mod_mode_enabled,
+        }
+        tpl = "partials/incidents_list.html" if partial else "moderation.html"
+        return TEMPLATES.TemplateResponse(request, tpl, ctx)
+
+    @app.post("/moderation/{incident_id}/status", response_class=HTMLResponse)
+    async def update_incident(
+        request: Request,
+        incident_id: int,
+        new_status: Annotated[str, Form()],
+    ):
+        if new_status not in ("open", "reviewed", "dismissed"):
+            raise HTTPException(400, "invalid status")
+        repo.update_incident_status(incident_id, new_status)
+        row = repo.get_incident(incident_id)
+        if not row:
+            raise HTTPException(404, "incident not found")
+        return TEMPLATES.TemplateResponse(
+            request, "partials/incident_card.html", {"row": row}
+        )
 
     # ---------------- diagnostic bundle ----------------
 

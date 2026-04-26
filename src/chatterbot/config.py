@@ -31,6 +31,7 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "streamelements_enabled",
     "streamelements_jwt",
     "streamelements_channel_id",
+    "mod_mode_enabled",
 )
 
 # Subset that should be rendered as password inputs. Blank submissions for
@@ -88,6 +89,14 @@ class Settings(BaseSettings):
     topics_interval_minutes: int = 5
     topics_max_messages: int = 200
 
+    # Moderation mode — opt-in. When enabled, the bot batches recent
+    # messages through a strict-rubric LLM classifier and persists
+    # flagged ones as incidents for streamer review. Advisory only —
+    # the bot never takes chat action.
+    mod_mode_enabled: bool = False
+    mod_review_interval_minutes: int = 5
+    mod_review_max_messages: int = 100
+
     # Run mode (used by main.py / docker entrypoint)
     run_mode: str = "bot"
 
@@ -101,7 +110,7 @@ class Settings(BaseSettings):
 
 
 def _coerce(key: str, value: str) -> Any:
-    if key == "streamelements_enabled":
+    if key in ("streamelements_enabled", "mod_mode_enabled"):
         return value.strip().lower() in ("true", "1", "yes", "on")
     return value
 
