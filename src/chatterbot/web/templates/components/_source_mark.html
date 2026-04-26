@@ -1,0 +1,17 @@
+{# Tiny inline platform marker. Pass `source` ∈ {twitch, youtube, discord}.
+   Renders nothing for missing/unknown sources or for plain Twitch (the
+   default — keeps the UI quiet when there's only one platform in play).
+   Caller decides whether to use _border_class for a left-stripe. #}
+{% set _src = source or 'twitch' %}
+{% if _src and _src != 'twitch' %}
+  {% set _icon = {
+    'youtube': 'fa-brands fa-youtube',
+    'discord': 'fa-brands fa-discord',
+  }.get(_src, 'fa-solid fa-globe') %}
+  {% set _color = {
+    'youtube': 'text-danger',
+    'discord': 'text-accent',
+  }.get(_src, 'text-muted') %}
+  <i class="{{ _icon }} {{ _color }} text-[10px]"
+     title="{{ _src }}"></i>
+{% endif %}

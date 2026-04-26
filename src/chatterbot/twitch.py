@@ -28,6 +28,7 @@ from dataclasses import dataclass
 import httpx
 
 from .config import Settings
+from .obs import OBSStatusService
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,10 @@ class TwitchStatus:
     game_name: str | None = None
     title: str | None = None
     started_at: str | None = None
+    # True when we skipped a poll because OBS confirmed the streamer is
+    # offline. Helix would just answer "not live" anyway, so we save the
+    # call (and the rate-limit budget).
+    auto_paused: bool = False
     error: str | None = None
     refreshed_at: float | None = None
 
@@ -48,12 +53,16 @@ class TwitchStatus:
 class TwitchService:
     POLL_SECONDS = 60
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, obs: OBSStatusService | None = None):
         self.settings = settings
         self._status = TwitchStatus(enabled=bool(settings.twitch_oauth_token and settings.twitch_channel))
         self._lock = asyncio.Lock()
         self._client_id: str | None = None
         self._last_logged_error: str | None = None
+        # Optional OBS coupling — when present, the Helix poll is skipped
+        # while OBS reports the streamer offline.
+        self.obs = obs
+        self._was_auto_paused: bool = False
 
     @property
     def status(self) -> TwitchStatus:
@@ -67,6 +76,24 @@ class TwitchService:
         if not await self._init_client_id():
             return
         while True:
+            # OBS-driven auto-pause: when OBS confirms the streamer is
+            # offline, Helix would just answer is_live=false. Save the
+            # call. Defaults to "not paused" on any uncertainty.
+            if self.obs is not None and self.obs.status.is_streamer_offline():
+                if not self._was_auto_paused:
+                    logger.info(
+                        "twitch: helix poll auto-paused (OBS reports offline)"
+                    )
+                    self._was_auto_paused = True
+                self._status = TwitchStatus(
+                    enabled=True, is_live=False, auto_paused=True,
+                    refreshed_at=time.time(),
+                )
+                await asyncio.sleep(self.POLL_SECONDS)
+                continue
+            if self._was_auto_paused:
+                logger.info("twitch: helix poll auto-resumed")
+                self._was_auto_paused = False
             try:
                 await self._poll_once()
             except asyncio.CancelledError:

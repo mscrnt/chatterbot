@@ -24,6 +24,7 @@
         {% endif %}
         <div class="flex items-baseline gap-2">
           <span class="text-[11px] text-muted whitespace-nowrap w-32 shrink-0">{{ m.ts | short_ts }}</span>
+          {% with source=m.source %}{% include "components/_source_mark.html" %}{% endwith %}
           <a href="/users/{{ m.user_id }}" class="text-accent hover:underline font-medium shrink-0">{{ m.name }}</a>
           <span class="text-primary break-words">{{ m.content }}</span>
         </div>
@@ -40,6 +41,7 @@
       {% endif %}
       <div class="flex items-baseline gap-2">
         <span class="text-[11px] text-muted whitespace-nowrap w-32 shrink-0">{{ focal.ts | short_ts }}</span>
+        {% with source=focal.source %}{% include "components/_source_mark.html" %}{% endwith %}
         <a href="/users/{{ focal.user_id }}" class="text-accent hover:underline font-semibold shrink-0">{{ focal.name }}</a>
         <span class="text-primary font-medium break-words">{{ focal.content }}</span>
       </div>
@@ -56,6 +58,7 @@
         {% endif %}
         <div class="flex items-baseline gap-2">
           <span class="text-[11px] text-muted whitespace-nowrap w-32 shrink-0">{{ m.ts | short_ts }}</span>
+          {% with source=m.source %}{% include "components/_source_mark.html" %}{% endwith %}
           <a href="/users/{{ m.user_id }}" class="text-accent hover:underline font-medium shrink-0">{{ m.name }}</a>
           <span class="text-primary break-words">{{ m.content }}</span>
         </div>

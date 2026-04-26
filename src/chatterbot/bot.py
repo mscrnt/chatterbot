@@ -46,6 +46,45 @@ def _parse_badges(s: str) -> dict[str, str]:
     return out
 
 
+def _is_emote_only(content: str, emotes_tag: str | None) -> bool:
+    """Decide whether a chat message is just emotes + whitespace.
+
+    Twitch IRCv3 emits the exact spans of every native emote in the
+    `emotes` tag, formatted as `id:start-end,start-end/id:start-end`.
+    Positions are 0-indexed character offsets into the message content,
+    counting Unicode code points (NOT UTF-16 like JS, NOT bytes).
+
+    We mark the message emote-only when subtracting every emote span
+    leaves nothing but whitespace. BTTV/FFZ emotes aren't in the IRC
+    tag (they're rendered client-side) so we treat them as plain text —
+    a 'bawkCrazy bawkCrazy bawkCrazy' message from a Twitch channel
+    emote will be marked emote-only because Twitch IS aware of it.
+    """
+    if not emotes_tag or not content:
+        return False
+    # IRC offsets are over Unicode code points; index a code-point list,
+    # not the UTF-16 string, so emotes after a multi-byte char align.
+    chars = list(content)
+    keep = [True] * len(chars)
+    for chunk in emotes_tag.split("/"):
+        if ":" not in chunk:
+            continue
+        _, spans = chunk.split(":", 1)
+        for span in spans.split(","):
+            if "-" not in span:
+                continue
+            try:
+                start_s, end_s = span.split("-", 1)
+                start = int(start_s)
+                end = int(end_s)
+            except ValueError:
+                continue
+            for i in range(start, min(end + 1, len(chars))):
+                keep[i] = False
+    leftover = "".join(c for c, k in zip(chars, keep) if k).strip()
+    return leftover == ""
+
+
 class ChatterListener(commands.Bot):
     def __init__(self, settings: Settings, repo: ChatterRepo, summarizer: Summarizer):
         channel = settings.twitch_channel.strip()
@@ -114,6 +153,12 @@ class ChatterListener(commands.Bot):
         is_vip = "vip" in badges
         is_founder = "founder" in badges
 
+        # Twitch IRCv3 `emotes` tag → ground-truth emote spans. If after
+        # removing every emote the message is just whitespace, flag it so
+        # the summarizer + moderator skip it (still kept for live display).
+        emotes_tag = tags.get("emotes") or ""
+        is_emote_only = _is_emote_only(content, emotes_tag)
+
         try:
             await asyncio.to_thread(self.repo.upsert_user, twitch_id, name)
             await asyncio.to_thread(
@@ -144,6 +189,7 @@ class ChatterListener(commands.Bot):
                 twitch_id, content,
                 reply_parent_login=reply_parent_login,
                 reply_parent_body=reply_parent_body,
+                is_emote_only=is_emote_only,
             )
             unsummarized = await asyncio.to_thread(
                 self.repo.unsummarized_count, twitch_id

@@ -76,6 +76,21 @@ class OBSStatus:
     error: str | None = None
     refreshed_at: float | None = None
 
+    def is_streamer_offline(self) -> bool:
+        """True only when OBS is the authoritative source and explicitly
+        reports the streamer is not live (no stream, no recording).
+
+        Returns False on any uncertainty — OBS disabled, OBS unreachable,
+        or status not yet primed. Callers (YouTube poller, Twitch Helix
+        poller) use this to skip wasted work while keeping default-ON
+        behavior so a misconfigured OBS never silently pauses the bot."""
+        return bool(
+            self.enabled
+            and self.connected
+            and not self.streaming
+            and not self.recording
+        )
+
 
 class OBSStatusService:
     POLL_SECONDS = 10

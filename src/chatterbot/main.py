@@ -24,6 +24,7 @@ from .discord_bot import DiscordListener
 from .llm.ollama_client import OllamaClient
 from .logging_setup import setup_logging
 from .moderator import Moderator
+from .obs import OBSStatusService
 from .repo import ChatterRepo
 from .streamelements import StreamElementsListener
 from .summarizer import Summarizer
@@ -74,6 +75,10 @@ async def run_bot(settings: Settings) -> None:
     summarizer = Summarizer(repo, llm, settings)
     listener = ChatterListener(settings, repo, summarizer)
     se = StreamElementsListener(repo, settings)
+    # OBS is the authoritative "are we streaming?" signal. The bot process
+    # owns its own poller (the dashboard has a separate one for the nav)
+    # so YouTube + other quota-sensitive pollers can pause when offline.
+    obs = OBSStatusService(settings)
 
     # One-time backfill of any pre-existing topic_snapshots into the
     # topic_threads index. Idempotent — only operates on snapshots that
@@ -90,16 +95,19 @@ async def run_bot(settings: Settings) -> None:
         asyncio.create_task(summarizer.idle_loop(), name="summarizer_idle"),
         asyncio.create_task(summarizer.topics_loop(), name="summarizer_topics"),
     ]
+    if settings.obs_enabled:
+        tasks.append(asyncio.create_task(obs.poll_loop(), name="obs_poll"))
     if settings.streamelements_enabled:
         tasks.append(asyncio.create_task(se.run(), name="streamelements"))
     if settings.mod_mode_enabled:
         moderator = Moderator(repo, llm, settings)
         tasks.append(asyncio.create_task(moderator.review_loop(), name="moderator"))
         logger.info("moderation mode ENABLED — advisory-only classifier active")
-    # Cross-platform listeners — both are stubs today; their start() returns
-    # immediately when disabled or unconfigured.
+    # Cross-platform listeners. Both no-op when disabled or unconfigured.
+    # YouTube takes the OBS poller so it can skip its 100-unit search.list
+    # while we're not actually streaming (OBS-confirmed offline).
     if settings.youtube_enabled:
-        yt = YouTubeListener(settings, repo, summarizer)
+        yt = YouTubeListener(settings, repo, summarizer, obs=obs)
         tasks.append(asyncio.create_task(yt.start(), name="youtube_listener"))
     if settings.discord_enabled:
         dc = DiscordListener(settings, repo, summarizer)

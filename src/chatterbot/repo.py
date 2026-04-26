@@ -119,11 +119,14 @@ class Message:
     name: str
     ts: str
     content: str
-    # Twitch native-reply context, populated when the chatter used the Reply
-    # feature. None for plain messages. Stored denormalized so we don't need
-    # to track Twitch's own message UUIDs.
+    # Native-reply context, populated when the chatter used the platform's
+    # Reply feature (Twitch IRCv3 reply tags or Discord message references).
+    # None for plain messages.
     reply_parent_login: str | None = None
     reply_parent_body: str | None = None
+    # Cross-platform attribution. Pulled from users.source via JOIN. Default
+    # 'twitch' so old call-sites that build Message() directly stay sane.
+    source: str = "twitch"
 
 
 @dataclass
@@ -323,6 +326,20 @@ class ChatterRepo:
                 cur.execute("ALTER TABLE messages ADD COLUMN reply_parent_login TEXT")
             if "reply_parent_body" not in _mcols:
                 cur.execute("ALTER TABLE messages ADD COLUMN reply_parent_body TEXT")
+            # Emote-only flag — set when the message contains nothing but
+            # native emotes + whitespace. The bot derives this from the
+            # IRCv3 `emotes` tag at write time (ground truth — no guessing).
+            # Summarizer + moderator skip these; the live widget still shows
+            # them so hype is visible.
+            if "is_emote_only" not in _mcols:
+                cur.execute(
+                    "ALTER TABLE messages ADD COLUMN is_emote_only "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_messages_emote_only "
+                    "ON messages(is_emote_only)"
+                )
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS notes (
@@ -610,17 +627,25 @@ class ChatterRepo:
         *,
         reply_parent_login: str | None = None,
         reply_parent_body: str | None = None,
+        is_emote_only: bool = False,
     ) -> int:
-        """Insert a chat message and return its rowid. The two reply_parent_*
-        kwargs are populated when twitchio reports the message used Twitch's
-        native Reply feature (see bot.event_message)."""
+        """Insert a chat message and return its rowid. `reply_parent_*` are
+        populated when the platform reports the message used a native Reply.
+        `is_emote_only` is set when the message text is just emotes +
+        whitespace; summarizer and moderator skip those."""
         with self._cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO messages(user_id, ts, content, reply_parent_login, reply_parent_body)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO messages(user_id, ts, content,
+                                     reply_parent_login, reply_parent_body,
+                                     is_emote_only)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (user_id, _now_iso(), content, reply_parent_login, reply_parent_body),
+                (
+                    user_id, _now_iso(), content,
+                    reply_parent_login, reply_parent_body,
+                    1 if is_emote_only else 0,
+                ),
             )
             return int(cur.lastrowid)
 
@@ -812,7 +837,7 @@ class ChatterRepo:
                 """
                 SELECT id, content
                 FROM messages
-                WHERE user_id = ? AND id > ?
+                WHERE user_id = ? AND id > ? AND is_emote_only = 0
                 ORDER BY id ASC
                 """,
                 (user_id, wm),
@@ -823,7 +848,8 @@ class ChatterRepo:
         wm = self.get_watermark(user_id)
         with self._cursor() as cur:
             cur.execute(
-                "SELECT COUNT(*) AS c FROM messages WHERE user_id = ? AND id > ?",
+                "SELECT COUNT(*) AS c FROM messages "
+                "WHERE user_id = ? AND id > ? AND is_emote_only = 0",
                 (user_id, wm),
             )
             return int(cur.fetchone()["c"])
@@ -837,6 +863,7 @@ class ChatterRepo:
                 JOIN users u ON u.twitch_id = m.user_id
                 LEFT JOIN summarization_state s ON s.user_id = m.user_id
                 WHERE u.opt_out = 0
+                  AND m.is_emote_only = 0
                   AND m.id > COALESCE(s.last_summarized_msg_id, 0)
                 GROUP BY m.user_id
                 HAVING COUNT(*) >= ?
@@ -856,6 +883,7 @@ class ChatterRepo:
                 JOIN users u ON u.twitch_id = m.user_id
                 LEFT JOIN summarization_state s ON s.user_id = m.user_id
                 WHERE u.opt_out = 0
+                  AND m.is_emote_only = 0
                   AND m.id > COALESCE(s.last_summarized_msg_id, 0)
                 GROUP BY m.user_id
                 HAVING MAX(m.ts) <= datetime('now', ?)
@@ -941,15 +969,18 @@ class ChatterRepo:
         return out
 
     def recent_global_messages(self, limit: int = 30) -> list[Message]:
-        """Latest messages across the whole channel, newest first.
+        """Latest messages across all sources, newest first.
 
         Used by the dashboard's live-chat widget. Opted-out users contribute
         nothing because their messages aren't inserted in the first place.
+        Returns rows from every platform (Twitch / YouTube / Discord) in one
+        chronological bucket.
         """
         with self._cursor() as cur:
             cur.execute(
                 """
-                SELECT m.id, m.user_id, u.name, m.ts, m.content, m.reply_parent_login, m.reply_parent_body
+                SELECT m.id, m.user_id, u.name, u.source,
+                       m.ts, m.content, m.reply_parent_login, m.reply_parent_body
                 FROM messages m
                 JOIN users u ON u.twitch_id = m.user_id
                 ORDER BY m.id DESC
@@ -966,6 +997,7 @@ class ChatterRepo:
                     content=r["content"],
                     reply_parent_login=r["reply_parent_login"],
                     reply_parent_body=r["reply_parent_body"],
+                    source=r["source"] or "twitch",
                 )
                 for r in cur.fetchall()
             ]
@@ -2059,7 +2091,7 @@ class ChatterRepo:
         with self._cursor() as cur:
             cur.execute(
                 """
-                SELECT m.id, m.user_id, u.name, m.ts, m.content,
+                SELECT m.id, m.user_id, u.name, u.source, m.ts, m.content,
                        m.reply_parent_login, m.reply_parent_body
                 FROM messages m
                 JOIN users u ON u.twitch_id = m.user_id
@@ -2074,6 +2106,7 @@ class ChatterRepo:
                     ts=r["ts"], content=r["content"],
                     reply_parent_login=r["reply_parent_login"],
                     reply_parent_body=r["reply_parent_body"],
+                    source=r["source"] or "twitch",
                 )
                 if r else None
             )
@@ -2082,7 +2115,7 @@ class ChatterRepo:
 
             cur.execute(
                 """
-                SELECT m.id, m.user_id, u.name, m.ts, m.content,
+                SELECT m.id, m.user_id, u.name, u.source, m.ts, m.content,
                        m.reply_parent_login, m.reply_parent_body
                 FROM messages m
                 JOIN users u ON u.twitch_id = m.user_id
@@ -2098,6 +2131,7 @@ class ChatterRepo:
                     ts=r["ts"], content=r["content"],
                     reply_parent_login=r["reply_parent_login"],
                     reply_parent_body=r["reply_parent_body"],
+                    source=r["source"] or "twitch",
                 )
                 for r in cur.fetchall()
             ]
@@ -2105,7 +2139,7 @@ class ChatterRepo:
 
             cur.execute(
                 """
-                SELECT m.id, m.user_id, u.name, m.ts, m.content,
+                SELECT m.id, m.user_id, u.name, u.source, m.ts, m.content,
                        m.reply_parent_login, m.reply_parent_body
                 FROM messages m
                 JOIN users u ON u.twitch_id = m.user_id
@@ -2121,6 +2155,7 @@ class ChatterRepo:
                     ts=r["ts"], content=r["content"],
                     reply_parent_login=r["reply_parent_login"],
                     reply_parent_body=r["reply_parent_body"],
+                    source=r["source"] or "twitch",
                 )
                 for r in cur.fetchall()
             ]
@@ -2870,7 +2905,8 @@ class ChatterRepo:
         self.set_app_setting(self._MOD_WATERMARK_KEY, str(int(msg_id)))
 
     def messages_for_mod_review(self, limit: int) -> list[Message]:
-        """Pull messages newer than the moderation watermark, oldest first."""
+        """Pull messages newer than the moderation watermark, oldest first.
+        Skips emote-only messages — they're hype noise, not policy content."""
         wm = self.get_mod_watermark()
         with self._cursor() as cur:
             cur.execute(
@@ -2878,7 +2914,7 @@ class ChatterRepo:
                 SELECT m.id, m.user_id, u.name, m.ts, m.content, m.reply_parent_login, m.reply_parent_body
                 FROM messages m
                 JOIN users u ON u.twitch_id = m.user_id
-                WHERE m.id > ?
+                WHERE m.id > ? AND m.is_emote_only = 0
                 ORDER BY m.id ASC
                 LIMIT ?
                 """,

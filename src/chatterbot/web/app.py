@@ -156,7 +156,9 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
 
     insights = InsightsService(repo, llm, settings)
     obs_status = OBSStatusService(settings)
-    twitch_status = TwitchService(settings)
+    # The Helix poller consults OBS so it can pause itself while we're
+    # not actually streaming. Same defaults-on-uncertainty contract.
+    twitch_status = TwitchService(settings, obs=obs_status)
     _bg_tasks: set[asyncio.Task] = set()
 
     async def _lifespan(app):
