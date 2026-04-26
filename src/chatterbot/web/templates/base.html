@@ -168,8 +168,13 @@
 
   {# `current_path` is referenced by nav and the live widget guard above. #}
 
-  <footer class="border-t border-subtle text-xs text-muted py-3 text-center pb-24 sm:pb-3">
-    streamer-only · this dashboard never writes to chat
+  <footer class="border-t border-subtle text-xs text-muted py-3 text-center pb-24 sm:pb-3 flex items-center justify-center gap-3">
+    <span>streamer-only · this dashboard never writes to chat</span>
+    <span class="text-subtle">·</span>
+    <a href="https://buymeacoffee.com/mscrnt" target="_blank" rel="noopener"
+       class="inline-flex items-center gap-1 text-muted hover:text-accent transition-all duration-150 ease-out">
+      <i class="fa-solid fa-mug-hot"></i> buy me a coffee
+    </a>
   </footer>
 
   {# ---------------- live-chat widget ---------------- #}
