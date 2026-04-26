@@ -1,0 +1,47 @@
+{# Generic modal shell. Wrap a modal partial's contents in this template via
+   `extends`. Caller sets modal_title, modal_icon, modal_tone (one of accent /
+   danger / warning / success), modal_size (sm / md / lg), and overrides the
+   `modal_body` block. Esc closes from base.html; backdrop click also closes. #}
+{% set _size = modal_size or 'md' %}
+{% set _maxw = {'sm': 'max-w-sm', 'md': 'max-w-lg', 'lg': 'max-w-2xl'}[_size] %}
+{% set _tone = modal_tone or 'accent' %}
+{% set _icon_classes = {
+  'accent':  'text-accent',
+  'danger':  'text-danger',
+  'warning': 'text-warning',
+  'success': 'text-success',
+}[_tone] %}
+{# Backdrop is its own element so a click on it can be detected reliably,
+   independent of Alpine. The panel sits on top and stops click propagation,
+   so clicks inside the modal don't trigger backdrop close. #}
+<div class="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
+     x-data="{ show: false }"
+     x-init="$nextTick(() => show = true)">
+  <button type="button"
+          aria-label="close"
+          class="absolute inset-0 w-full h-full bg-black/60 cursor-default transition-opacity duration-150 ease-out"
+          x-transition.opacity
+          onclick="window.chatterbotCloseModal()"></button>
+  <div class="relative w-full {{ _maxw }} mx-2 sm:mx-4 mb-2 sm:mb-0 bg-surface border border-subtle rounded-xl shadow-lg overflow-hidden"
+       x-show="show"
+       x-transition:enter="transition transform duration-150 ease-out"
+       x-transition:enter-start="opacity-0 translate-y-2 sm:scale-95"
+       x-transition:enter-end="opacity-100 translate-y-0 sm:scale-100"
+       @click.stop>
+    <header class="flex items-start gap-3 px-4 py-3 border-b border-subtle">
+      {% if modal_icon %}
+        <i class="fa-solid {{ modal_icon }} {{ _icon_classes }} mt-1"></i>
+      {% endif %}
+      <h2 class="flex-1 font-semibold text-primary">{{ modal_title }}</h2>
+      <button type="button"
+              class="text-muted hover:text-primary tap inline-flex items-center justify-center"
+              onclick="window.chatterbotCloseModal()"
+              aria-label="close">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+    </header>
+    <div class="p-4">
+      {% block modal_body %}{% endblock %}
+    </div>
+  </div>
+</div>

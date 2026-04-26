@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Live Topics · chatterbot{% endblock %}
+{% block content %}
+<div class="space-y-3">
+  <header class="flex items-baseline justify-between gap-2">
+    <h1 class="text-xl sm:text-2xl font-semibold inline-flex items-center gap-2">
+      <i class="fa-solid fa-comments text-accent"></i> Live topics
+    </h1>
+    <span class="text-xs text-muted">refreshes every 30s</span>
+  </header>
+  {% include "partials/topics_list.html" %}
+</div>
+{% endblock %}

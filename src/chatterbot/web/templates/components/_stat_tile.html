@@ -1,0 +1,16 @@
+{# Stat tile: icon + label + big value + tiny subtitle.
+   Usage:
+     {% with icon='fa-dollar-sign', label='Lifetime Donated', value='$120.00', subtitle='last 2026-04-12' %}
+       {% include "components/_stat_tile.html" %}
+     {% endwith %}
+#}
+<div class="rounded-xl bg-surface-raised border border-subtle p-4 shadow-sm flex flex-col gap-1">
+  <div class="flex items-center justify-between">
+    <span class="text-[11px] uppercase tracking-wider text-muted">{{ label }}</span>
+    <i class="fa-solid {{ icon }} text-accent"></i>
+  </div>
+  <div class="text-xl sm:text-2xl font-semibold text-primary leading-none mt-1">{{ value }}</div>
+  {% if subtitle %}
+    <div class="text-[11px] text-muted">{{ subtitle }}</div>
+  {% endif %}
+</div>

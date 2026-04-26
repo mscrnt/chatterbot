@@ -1,0 +1,19 @@
+{# Status pill.
+   Usage:
+     {% with label='opt-out', tone='warning', icon='fa-eye-slash' %}
+       {% include "components/_pill.html" %}
+     {% endwith %}
+   tone ∈ {neutral, success, warning, danger, accent}.  icon optional.
+#}
+{% set _tone = tone or 'neutral' %}
+{% set _classes = {
+  'neutral': 'bg-surface-raised text-muted border-subtle',
+  'success': 'bg-success/15 text-success border-success/30',
+  'warning': 'bg-warning/15 text-warning border-warning/30',
+  'danger':  'bg-danger/15 text-danger border-danger/30',
+  'accent':  'bg-accent/15 text-accent border-accent/30',
+}[_tone] %}
+<span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full border {{ _classes }}">
+  {% if icon %}<i class="fa-solid {{ icon }} text-[10px]"></i>{% endif %}
+  {{ label }}
+</span>

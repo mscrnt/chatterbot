@@ -1,0 +1,96 @@
+# --- secrets / runtime data ---
+.env
+.env.*
+!.env.example
+
+# --- chatterbot data dir ---
+# Keep the directory itself but ignore anything inside it (DB, demo data,
+# logs). A .gitkeep can be added if you want the dir tracked.
+data/*
+!data/.gitkeep
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtualenvs
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# uv
+.uv/
+# uv.lock IS committed for reproducible installs (this is an app, not a library)
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.cache
+
+# Type checkers / linters
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# --- Node / Tailwind build ---
+node_modules/
+src/chatterbot/web/static/css/output.css
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# --- Playwright ---
+.playwright_screens/
+playwright-report/
+test-results/
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini

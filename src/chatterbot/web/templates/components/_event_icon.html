@@ -1,0 +1,17 @@
+{# Map event type → FA icon + tone. Caller wraps for desired styling.
+   Outputs a bare <span> with the icon. Pass `type`. #}
+{% set _icon = {
+  'tip':    'fa-dollar-sign',
+  'sub':    'fa-star',
+  'cheer':  'fa-bolt',
+  'raid':   'fa-people-group',
+  'follow': 'fa-user-plus',
+}.get(type, 'fa-circle') %}
+{% set _tone = {
+  'tip':    'text-success',
+  'sub':    'text-accent',
+  'cheer':  'text-warning',
+  'raid':   'text-accent',
+  'follow': 'text-muted',
+}.get(type, 'text-muted') %}
+<i class="fa-solid {{ _icon }} {{ _tone }}"></i>

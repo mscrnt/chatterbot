@@ -1,0 +1,111 @@
+<div id="events-area" class="space-y-2">
+  {% if not events %}
+    {% with icon='fa-coins',
+            heading='No events',
+            body='Tips, subs, cheers, raids and follows from StreamElements appear here.' %}
+      {% include "components/_empty_state.html" %}
+    {% endwith %}
+  {% else %}
+    {# Mobile cards #}
+    <ul class="md:hidden space-y-2">
+      {% for e in events %}
+        <li class="rounded-xl border border-subtle bg-surface p-3 hover:bg-surface-raised transition-all duration-150 ease-out"
+            data-row-link tabindex="0">
+          <div class="flex items-center justify-between gap-2">
+            <span class="inline-flex items-center gap-2 font-mono text-primary">
+              {% with type=e.type %}{% include "components/_event_icon.html" %}{% endwith %}
+              {{ e.type }}
+            </span>
+            <span class="text-xs text-muted">{{ e.ts | short_ts }}</span>
+          </div>
+          <div class="text-sm mt-1 flex items-center gap-2">
+            {% with name=e.twitch_name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+            {% if e.user_id %}
+              <a class="text-accent hover:underline" href="/users/{{ e.user_id }}">{{ e.twitch_name }}</a>
+            {% else %}
+              <span class="text-primary">{{ e.twitch_name }}</span>
+              {% with label='unlinked', tone='neutral' %}{% include "components/_pill.html" %}{% endwith %}
+            {% endif %}
+            {% if e.amount is not none %}
+              <span class="ml-auto text-primary">{{ "%g"|format(e.amount) }}{% if e.currency %} {{ e.currency }}{% endif %}</span>
+            {% endif %}
+          </div>
+          {% if e.message %}
+            <p class="text-sm text-muted mt-1 break-words">{{ e.message }}</p>
+          {% endif %}
+          <button class="mt-2 text-xs text-muted hover:text-primary inline-flex items-center gap-1"
+                  hx-get="/modals/event/{{ e.id }}" hx-target="#modal-root">
+            <i class="fa-solid fa-magnifying-glass"></i> details
+          </button>
+        </li>
+      {% endfor %}
+    </ul>
+
+    {# Desktop table #}
+    <div class="hidden md:block overflow-hidden rounded-xl border border-subtle">
+      <table class="w-full text-sm">
+        <thead class="bg-surface-raised text-muted text-xs uppercase sticky top-0">
+          <tr>
+            <th class="text-left px-3 py-2">When</th>
+            <th class="text-left px-3 py-2">Type</th>
+            <th class="text-left px-3 py-2">Who</th>
+            <th class="text-right px-3 py-2">Amount</th>
+            <th class="text-left px-3 py-2">Message</th>
+            <th class="text-right px-3 py-2"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-subtle">
+          {% for e in events %}
+          <tr class="even:bg-surface-raised/40 hover:bg-surface-raised transition-all duration-150 ease-out">
+            <td class="px-3 py-2 text-muted whitespace-nowrap">{{ e.ts | short_ts }}</td>
+            <td class="px-3 py-2 inline-flex items-center gap-2 font-mono text-primary">
+              {% with type=e.type %}{% include "components/_event_icon.html" %}{% endwith %}
+              {{ e.type }}
+            </td>
+            <td class="px-3 py-2">
+              <span class="inline-flex items-center gap-2">
+                {% with name=e.twitch_name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+                {% if e.user_id %}
+                  <a class="text-accent hover:underline" href="/users/{{ e.user_id }}">{{ e.twitch_name }}</a>
+                {% else %}
+                  <span class="text-primary">{{ e.twitch_name }}</span>
+                  {% with label='unlinked', tone='neutral' %}{% include "components/_pill.html" %}{% endwith %}
+                {% endif %}
+              </span>
+            </td>
+            <td class="px-3 py-2 text-right whitespace-nowrap text-primary">
+              {% if e.amount is not none %}{{ "%g"|format(e.amount) }}{% if e.currency %} {{ e.currency }}{% endif %}{% endif %}
+            </td>
+            <td class="px-3 py-2 text-muted break-words">{{ e.message or "" }}</td>
+            <td class="px-3 py-2 text-right">
+              <button class="text-muted hover:text-primary tap inline-flex items-center justify-center"
+                      hx-get="/modals/event/{{ e.id }}" hx-target="#modal-root"
+                      aria-label="event details">
+                <i class="fa-solid fa-magnifying-glass"></i>
+              </button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="flex items-center justify-between pt-2 text-sm">
+      {% if page > 1 %}
+        <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary"
+                hx-get="/events?partial=1&type={{ type_filter }}&page={{ page-1 }}"
+                hx-target="#events-area" hx-swap="outerHTML">
+          <i class="fa-solid fa-chevron-left text-xs"></i> prev
+        </button>
+      {% else %}<span></span>{% endif %}
+      <span class="text-muted">page {{ page }}</span>
+      {% if events|length == 50 %}
+        <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary"
+                hx-get="/events?partial=1&type={{ type_filter }}&page={{ page+1 }}"
+                hx-target="#events-area" hx-swap="outerHTML">
+          next <i class="fa-solid fa-chevron-right text-xs"></i>
+        </button>
+      {% else %}<span></span>{% endif %}
+    </div>
+  {% endif %}
+</div>

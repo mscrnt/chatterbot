@@ -1,0 +1,9 @@
+{# Lightweight skeleton placeholder. Use as an htmx-indicator for slow swaps.
+   Pass `lines` to repeat (default 3).
+   Usage: {% with lines=4 %}{% include "components/_skeleton.html" %}{% endwith %}
+#}
+<div class="space-y-2 htmx-indicator">
+  {% for _ in range(lines or 3) %}
+    <div class="skeleton h-4 w-full"></div>
+  {% endfor %}
+</div>

@@ -1,0 +1,40 @@
+<div id="messages-area" class="space-y-2">
+  {% if not messages %}
+    {% with icon='fa-comment-slash', heading='No messages',
+            body='Either this viewer hasn\'t spoken in chat, or your search returned nothing.' %}
+      {% include "components/_empty_state.html" %}
+    {% endwith %}
+  {% else %}
+    <p class="text-xs text-muted">
+      {{ msg_total }} message{{ '' if msg_total == 1 else 's' }}{% if q %} matching “{{ q }}”{% endif %}
+    </p>
+    <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
+      {% for m in messages %}
+        <li class="px-3 py-2 text-sm hover:bg-surface-raised transition-all duration-150 ease-out">
+          <span class="text-xs text-muted mr-2 inline-block w-32">{{ m.ts | short_ts }}</span>
+          <span class="break-words text-primary">{{ m.content }}</span>
+        </li>
+      {% endfor %}
+    </ul>
+
+    {% if msg_pages and msg_pages > 1 %}
+    <div class="flex items-center justify-between pt-2 text-sm">
+      {% if msg_page > 1 %}
+        <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary"
+                hx-get="/users/{{ user.twitch_id }}/messages?q={{ q or '' }}&page={{ msg_page-1 }}"
+                hx-target="#messages-area" hx-swap="outerHTML">
+          <i class="fa-solid fa-chevron-left text-xs"></i> prev
+        </button>
+      {% else %}<span></span>{% endif %}
+      <span class="text-muted">page {{ msg_page }} / {{ msg_pages }}</span>
+      {% if msg_page < msg_pages %}
+        <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary"
+                hx-get="/users/{{ user.twitch_id }}/messages?q={{ q or '' }}&page={{ msg_page+1 }}"
+                hx-target="#messages-area" hx-swap="outerHTML">
+          next <i class="fa-solid fa-chevron-right text-xs"></i>
+        </button>
+      {% else %}<span></span>{% endif %}
+    </div>
+    {% endif %}
+  {% endif %}
+</div>

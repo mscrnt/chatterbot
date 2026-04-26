@@ -1,0 +1,53 @@
+{% set modal_title = 'Event · ' ~ event.type %}
+{% set modal_icon = 'fa-coins' %}
+{% set modal_tone = 'accent' %}
+{% set modal_size = 'lg' %}
+{% extends "components/_modal.html" %}
+{% block modal_body %}
+<div class="space-y-3 text-sm">
+  <div class="grid grid-cols-2 gap-2">
+    <div class="rounded border border-subtle p-2">
+      <div class="text-xs text-muted">when</div>
+      <div class="text-primary">{{ event.ts | short_ts }}</div>
+    </div>
+    <div class="rounded border border-subtle p-2">
+      <div class="text-xs text-muted">type</div>
+      <div class="text-primary inline-flex items-center gap-2">
+        {% with type=event.type %}{% include "components/_event_icon.html" %}{% endwith %}
+        <span class="font-mono">{{ event.type }}</span>
+      </div>
+    </div>
+    <div class="rounded border border-subtle p-2 col-span-2">
+      <div class="text-xs text-muted">who</div>
+      <div class="text-primary inline-flex items-center gap-2">
+        {% with name=event.twitch_name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+        {% if event.user_id %}
+          <a class="text-accent hover:underline" href="/users/{{ event.user_id }}">{{ event.twitch_name }}</a>
+        {% else %}
+          {{ event.twitch_name }}
+          {% with label='unlinked', tone='neutral' %}{% include "components/_pill.html" %}{% endwith %}
+        {% endif %}
+      </div>
+    </div>
+    {% if event.amount is not none %}
+    <div class="rounded border border-subtle p-2">
+      <div class="text-xs text-muted">amount</div>
+      <div class="text-primary">{{ "%g"|format(event.amount) }}{% if event.currency %} {{ event.currency }}{% endif %}</div>
+    </div>
+    {% endif %}
+    {% if event.message %}
+    <div class="rounded border border-subtle p-2 col-span-2">
+      <div class="text-xs text-muted">message</div>
+      <div class="text-primary break-words">{{ event.message }}</div>
+    </div>
+    {% endif %}
+  </div>
+
+  <details class="rounded border border-subtle p-2">
+    <summary class="cursor-pointer text-muted hover:text-primary text-xs uppercase tracking-wider">
+      raw payload
+    </summary>
+    <pre class="text-[11px] overflow-x-auto mt-2 text-primary">{{ raw_pretty }}</pre>
+  </details>
+</div>
+{% endblock %}

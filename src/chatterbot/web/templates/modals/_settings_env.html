@@ -1,0 +1,82 @@
+{% set modal_title = 'Environment & cadence' %}
+{% set modal_icon = 'fa-circle-info' %}
+{% set modal_tone = 'accent' %}
+{% set modal_size = 'lg' %}
+{% extends "components/_modal.html" %}
+{% block modal_body %}
+<div class="space-y-4 text-sm">
+  <p class="text-muted text-xs">
+    Read-only. These come from <code class="text-accent">.env</code>. Edit
+    Twitch / StreamElements credentials on the <a href="/settings" class="text-accent hover:underline">Settings page</a>.
+  </p>
+
+  <section>
+    <h3 class="font-medium text-primary mb-2 inline-flex items-center gap-2">
+      <i class="fa-solid fa-shield text-accent"></i> Dashboard
+    </h3>
+    <dl class="grid grid-cols-3 gap-2 text-xs">
+      <dt class="text-muted">host</dt><dd class="col-span-2 text-primary font-mono">{{ s.dashboard_host }}</dd>
+      <dt class="text-muted">port</dt><dd class="col-span-2 text-primary font-mono">{{ s.dashboard_port }}</dd>
+      <dt class="text-muted">basic auth</dt><dd class="col-span-2 text-primary">
+        {% if s.dashboard_basic_auth_enabled %}
+          {% with label='enabled', tone='success', icon='fa-lock' %}{% include "components/_pill.html" %}{% endwith %}
+          <span class="ml-2 text-muted">user: <span class="font-mono">{{ s.dashboard_basic_auth_user }}</span></span>
+        {% else %}
+          {% with label='disabled', tone='warning', icon='fa-lock-open' %}{% include "components/_pill.html" %}{% endwith %}
+        {% endif %}
+      </dd>
+    </dl>
+  </section>
+
+  <section>
+    <h3 class="font-medium text-primary mb-2 inline-flex items-center gap-2">
+      <i class="fa-solid fa-server text-accent"></i> Ollama
+    </h3>
+    <dl class="grid grid-cols-3 gap-2 text-xs">
+      <dt class="text-muted">base url</dt><dd class="col-span-2 text-primary font-mono">{{ s.ollama_base_url }}</dd>
+      <dt class="text-muted">model</dt><dd class="col-span-2 text-primary font-mono">{{ s.ollama_model }}</dd>
+      <dt class="text-muted">embed model</dt><dd class="col-span-2 text-primary font-mono">{{ s.ollama_embed_model }}</dd>
+      <dt class="text-muted">embed dim</dt><dd class="col-span-2 text-primary font-mono">{{ s.ollama_embed_dim }}</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h3 class="font-medium text-primary mb-2 inline-flex items-center gap-2">
+      <i class="fa-solid fa-stopwatch text-accent"></i> Summarizer cadence
+    </h3>
+    <dl class="grid grid-cols-3 gap-2 text-xs">
+      <dt class="text-muted">N (per-user threshold)</dt><dd class="col-span-2 text-primary">{{ s.summarize_after_messages }} messages</dd>
+      <dt class="text-muted">M (idle window)</dt><dd class="col-span-2 text-primary">{{ s.summarize_idle_minutes }} minutes</dd>
+      <dt class="text-muted">sweep interval</dt><dd class="col-span-2 text-primary">{{ s.idle_sweep_interval_seconds }} s</dd>
+      <dt class="text-muted">topic snapshot</dt><dd class="col-span-2 text-primary">every {{ s.topics_interval_minutes }} min over last {{ s.topics_max_messages }} msgs</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h3 class="font-medium text-primary mb-2 inline-flex items-center gap-2">
+      <i class="fa-solid fa-eye-slash text-accent"></i> Opted-out viewers
+    </h3>
+    {% if not opt_out_users %}
+      <p class="text-muted text-xs">None.</p>
+    {% else %}
+    <ul class="divide-y divide-subtle rounded border border-subtle">
+      {% for u in opt_out_users %}
+        <li class="px-2 py-1 text-xs flex items-center justify-between gap-2">
+          <span class="inline-flex items-center gap-2 text-primary">
+            {% with name=u.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+            <a class="text-accent hover:underline" href="/users/{{ u.twitch_id }}">{{ u.name }}</a>
+          </span>
+          <form hx-post="/users/{{ u.twitch_id }}/opt-out"
+                hx-target="this" hx-swap="outerHTML"
+                hx-on::after-request="window.chatterbotCloseModal()">
+            <button class="text-xs text-muted hover:text-primary inline-flex items-center gap-1">
+              <i class="fa-solid fa-rotate-left"></i> un-opt-out
+            </button>
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

@@ -1,0 +1,16 @@
+{% if not messages %}
+  <p class="text-muted italic px-1 py-2 text-xs">No messages yet.</p>
+{% else %}
+  {% for m in messages %}
+    <div class="leading-snug py-1 border-b border-subtle/60 last:border-0 flex items-start gap-2">
+      {% with name=m.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+      <div class="min-w-0 flex-1">
+        <div class="flex items-baseline gap-1">
+          <a href="/users/{{ m.user_id }}" class="text-accent hover:underline font-medium text-sm">{{ m.name }}</a>
+          <span class="text-[10px] text-muted whitespace-nowrap">{{ m.ts | short_ts }}</span>
+        </div>
+        <div class="text-primary break-words text-sm">{{ m.content }}</div>
+      </div>
+    </div>
+  {% endfor %}
+{% endif %}

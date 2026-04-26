@@ -1,0 +1,19 @@
+{# Empty state.
+   Usage:
+     {% with icon='fa-comments-slash', heading='No chatters yet', body='As soon as someone speaks, they show up here.', cta_href=None, cta_label=None %}
+       {% include "components/_empty_state.html" %}
+     {% endwith %}
+#}
+<div class="text-center py-10 sm:py-16 text-muted">
+  <div class="mx-auto w-12 h-12 rounded-full bg-surface-raised border border-subtle flex items-center justify-center mb-3">
+    <i class="fa-solid {{ icon or 'fa-circle-exclamation' }} text-accent text-lg"></i>
+  </div>
+  <h3 class="font-semibold text-primary text-base">{{ heading }}</h3>
+  {% if body %}<p class="text-sm mt-1 max-w-md mx-auto">{{ body }}</p>{% endif %}
+  {% if cta_href and cta_label %}
+    <a href="{{ cta_href }}"
+       class="inline-flex items-center gap-2 mt-4 tap px-4 rounded bg-accent hover:bg-accent-600 text-white text-sm font-medium transition-all duration-150 ease-out">
+      {{ cta_label }}
+    </a>
+  {% endif %}
+</div>

@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block title %}{{ user.name }} · chatterbot{% endblock %}
+{% block content %}
+<div class="space-y-5">
+
+  {# Header #}
+  <header class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+    <div class="min-w-0 flex items-center gap-3">
+      {% with name=user.name, size='lg' %}{% include "components/_avatar.html" %}{% endwith %}
+      <div class="min-w-0">
+        <a href="/" class="text-xs text-muted hover:underline inline-flex items-center gap-1">
+          <i class="fa-solid fa-arrow-left text-[10px]"></i> all chatters
+        </a>
+        <h1 class="text-2xl sm:text-3xl font-semibold truncate text-primary">{{ user.name }}</h1>
+        <p class="text-xs text-muted">
+          id {{ user.twitch_id }} · first seen {{ user.first_seen | short_ts }}
+          · last seen {{ user.last_seen | short_ts }}
+        </p>
+        {% if prior_aliases %}
+        <p class="text-xs text-muted mt-1 inline-flex items-center gap-1 flex-wrap">
+          <i class="fa-solid fa-arrow-rotate-left text-[10px]"></i>
+          previously
+          {% for a in prior_aliases %}
+            <span class="font-mono text-primary"
+                  title="seen {{ a.first_seen | short_ts }} → {{ a.last_seen_as | short_ts }}">{{ a.name }}</span>{% if not loop.last %}<span class="text-muted">,</span>{% endif %}
+          {% endfor %}
+        </p>
+        {% endif %}
+      </div>
+    </div>
+    <div class="flex flex-wrap items-center gap-2">
+      <div id="opt-out-area" class="contents">
+        {% include "partials/opt_out_badge.html" %}
+      </div>
+      <form hx-post="/users/{{ user.twitch_id }}/opt-out" hx-target="#opt-out-area" hx-swap="innerHTML">
+        <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary text-sm transition-all duration-150 ease-out">
+          <i class="fa-solid {{ 'fa-eye' if user.opt_out else 'fa-eye-slash' }}"></i>
+          {{ 'un-opt-out' if user.opt_out else 'opt-out' }}
+        </button>
+      </form>
+      <button class="tap inline-flex items-center gap-2 px-3 rounded bg-danger/15 hover:bg-danger/25 text-danger text-sm transition-all duration-150 ease-out"
+              hx-get="/modals/forget/{{ user.twitch_id }}"
+              hx-target="#modal-root">
+        <i class="fa-solid fa-arrow-right-from-bracket"></i> forget
+      </button>
+    </div>
+  </header>
+
+  {# Stat tiles #}
+  <section class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+    {% with icon='fa-dollar-sign', label='Lifetime Donated',
+            value=("$%.2f"|format(summary.total_tip_amount)) ~ ' ' ~ (summary.tip_currency or ''),
+            subtitle=('last ' ~ (summary.last_tip_ts | short_ts)) if summary.last_tip_ts else 'none yet' %}
+      {% include "components/_stat_tile.html" %}
+    {% endwith %}
+    {% with icon='fa-comment', label='Total Messages',
+            value=msg_total, subtitle=('through ' ~ (user.last_seen | short_ts)) if msg_total else 'silent so far' %}
+      {% include "components/_stat_tile.html" %}
+    {% endwith %}
+    {% with icon='fa-note-sticky', label='Notes',
+            value=notes|length, subtitle='LLM-extracted facts' %}
+      {% include "components/_stat_tile.html" %}
+    {% endwith %}
+    {% with icon='fa-star', label='Sub Status',
+            value=(summary.sub_months|int|string ~ ' mo') if summary.sub_months else '—',
+            subtitle=('tier ' ~ summary.sub_tier) if summary.sub_tier else 'no sub' %}
+      {% include "components/_stat_tile.html" %}
+    {% endwith %}
+  </section>
+
+  {# Ask Qwen — streamer-only RAG, output to browser #}
+  <section class="rounded-xl border border-accent/40 bg-accent/5 p-3 sm:p-4 space-y-3">
+    <div class="flex items-baseline justify-between">
+      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+        <i class="fa-solid fa-robot text-accent"></i> Ask Qwen about this viewer
+      </h2>
+      <span class="text-xs text-muted hidden sm:inline">browser-only · never sent to chat</span>
+    </div>
+    <form id="ask-form" class="flex flex-col sm:flex-row gap-2">
+      <input id="ask-q" name="q" type="text" placeholder="e.g. has Bob ever mentioned a pet?"
+             class="flex-1 tap bg-surface border border-subtle rounded px-3 text-base text-primary placeholder:text-muted
+                    focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out">
+      <button type="button" id="ask-submit"
+              class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-accent hover:bg-accent-600 text-white font-medium transition-all duration-150 ease-out">
+        <i class="fa-solid fa-paper-plane"></i> Ask
+      </button>
+    </form>
+    <p id="ask-status" class="text-xs text-muted hidden"></p>
+    <div id="ask-answer" class="whitespace-pre-wrap text-primary leading-relaxed text-sm sm:text-base"></div>
+    <details id="ask-citations-wrap" class="hidden text-sm">
+      <summary class="cursor-pointer text-muted hover:text-primary">citations</summary>
+      <div id="ask-citations" class="mt-2 space-y-2"></div>
+    </details>
+  </section>
+
+  {# Profile / notes #}
+  <section class="space-y-2">
+    <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+      <i class="fa-solid fa-id-card text-accent"></i> Profile
+    </h2>
+    <div id="notes-list" class="space-y-2">
+      {% if not notes %}
+        {% with icon='fa-note-sticky',
+                heading='No notes yet',
+                body='Notes appear after the summarizer processes this viewer\'s messages.' %}
+          {% include "components/_empty_state.html" %}
+        {% endwith %}
+      {% else %}
+        {% for note in notes %}
+          {% include "partials/note.html" %}
+        {% endfor %}
+      {% endif %}
+    </div>
+  </section>
+
+  {# Donations & events log #}
+  <section class="space-y-2">
+    <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+      <i class="fa-solid fa-coins text-accent"></i> Donations &amp; events
+    </h2>
+    {% if not events %}
+      <p class="text-muted italic text-sm">No StreamElements events for this viewer.</p>
+    {% else %}
+    <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden">
+      {% for e in events %}
+        <li class="px-3 py-2 text-sm flex flex-wrap items-baseline gap-x-3 hover:bg-surface-raised transition-all duration-150 ease-out">
+          <span class="text-xs text-muted w-32 shrink-0">{{ e.ts | short_ts }}</span>
+          <span class="w-6 shrink-0">{% with type=e.type %}{% include "components/_event_icon.html" %}{% endwith %}</span>
+          <span class="font-mono text-primary w-12 shrink-0">{{ e.type }}</span>
+          <span class="text-primary">
+            {% if e.amount is not none %}{{ "%g"|format(e.amount) }}{% endif %}
+            {% if e.currency %} {{ e.currency }}{% endif %}
+          </span>
+          {% if e.message %}<span class="text-muted break-words flex-1">{{ e.message }}</span>{% endif %}
+          <button class="ml-auto text-xs text-muted hover:text-primary tap inline-flex items-center gap-1"
+                  hx-get="/modals/event/{{ e.id }}" hx-target="#modal-root"
+                  aria-label="event details">
+            <i class="fa-solid fa-magnifying-glass"></i>
+          </button>
+        </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </section>
+
+  {# Message history (paginated, searchable) #}
+  <section class="space-y-2">
+    <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+      <i class="fa-solid fa-clock-rotate-left text-accent"></i> Message history
+    </h2>
+    {% with endpoint='/users/' ~ user.twitch_id ~ '/messages',
+            target='#messages-area', placeholder='search messages…' %}
+      {% include "components/_search.html" %}
+    {% endwith %}
+    {% include "partials/messages.html" %}
+  </section>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/ask.js"></script>
+<script>chatterbotAsk("{{ user.twitch_id }}");</script>
+{% endblock %}

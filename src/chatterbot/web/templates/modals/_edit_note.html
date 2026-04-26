@@ -1,0 +1,32 @@
+{% set modal_title = 'Edit note' %}
+{% set modal_icon = 'fa-pen-to-square' %}
+{% set modal_tone = 'accent' %}
+{% set modal_size = 'md' %}
+{% extends "components/_modal.html" %}
+{% block modal_body %}
+<form class="space-y-3 text-sm"
+      hx-patch="/notes/{{ note.id }}"
+      hx-target="#note-{{ note.id }}"
+      hx-swap="outerHTML"
+      hx-on::after-request="window.chatterbotCloseModal()">
+  <p class="text-xs text-muted">created {{ note.ts | short_ts }}</p>
+  <textarea name="text" rows="4" autofocus
+            @keydown.shift.enter.prevent="$el.form.requestSubmit()"
+            class="w-full tap bg-canvas border border-subtle rounded px-3 py-2 text-base text-primary
+                   focus:outline-none focus:ring-2 focus:ring-accent">{{ note.text }}</textarea>
+  <p class="text-[11px] text-muted">
+    <kbd class="kb">Shift</kbd> + <kbd class="kb">Enter</kbd> to save
+  </p>
+  <div class="flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
+    <button type="button"
+            class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-surface-raised hover:bg-subtle text-primary"
+            onclick="window.chatterbotCloseModal()">
+      Cancel
+    </button>
+    <button type="submit"
+            class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-accent hover:bg-accent-600 text-white font-medium">
+      <i class="fa-solid fa-floppy-disk"></i> Save
+    </button>
+  </div>
+</form>
+{% endblock %}

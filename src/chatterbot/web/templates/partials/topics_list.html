@@ -1,0 +1,52 @@
+<div id="topics-list" class="space-y-3"
+     hx-get="/topics?partial=1"
+     hx-trigger="every 30s"
+     hx-swap="outerHTML">
+  {% if not snapshots %}
+    {% with icon='fa-comments',
+            heading='No topic snapshots yet',
+            body='Snapshots appear every ' ~ settings.topics_interval_minutes ~ ' minutes once chat is active.' %}
+      {% include "components/_empty_state.html" %}
+    {% endwith %}
+  {% else %}
+    {% for s in snapshots %}
+    <article class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 shadow-sm">
+      <header class="text-xs text-muted mb-2 flex items-center gap-2">
+        <i class="fa-regular fa-clock"></i> {{ s.ts | short_ts }}
+      </header>
+
+      {% set parsed = s.topics_json | from_json if s.topics_json else None %}
+      {% if parsed and parsed.topics %}
+        {# New snapshots: each topic is clickable. Open detail modal. #}
+        <ul class="space-y-1.5">
+          {% for t in parsed.topics %}
+          <li>
+            <button type="button"
+                    class="w-full text-left rounded-lg px-2 py-1.5 hover:bg-surface-raised transition-all duration-150 ease-out flex items-start gap-2 group"
+                    hx-get="/modals/topic/{{ s.id }}/{{ loop.index0 }}"
+                    hx-target="#modal-root">
+              <i class="fa-solid fa-circle text-accent text-[6px] mt-2 shrink-0"></i>
+              <span class="flex-1 min-w-0">
+                <span class="text-primary text-sm sm:text-base">{{ t.topic }}</span>
+                {% if t.drivers %}
+                  <span class="text-xs text-muted ml-1">
+                    ({{ t.drivers | join(', ') }})
+                  </span>
+                {% endif %}
+              </span>
+              <i class="fa-solid fa-arrow-up-right-from-square text-muted text-[11px] mt-1 opacity-0 group-hover:opacity-100 transition-opacity"></i>
+            </button>
+          </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        {# Pre-migration snapshots fall back to the rendered text. #}
+        <pre class="whitespace-pre-wrap text-sm sm:text-base leading-relaxed font-sans text-primary">{{ s.summary }}</pre>
+        <p class="text-[10px] text-muted mt-2 italic">
+          older snapshot — click-through unavailable (predates structured topics)
+        </p>
+      {% endif %}
+    </article>
+    {% endfor %}
+  {% endif %}
+</div>

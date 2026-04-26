@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Events · chatterbot{% endblock %}
+{% block content %}
+<div class="space-y-3">
+  <header class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-2">
+    <h1 class="text-xl sm:text-2xl font-semibold inline-flex items-center gap-2">
+      <i class="fa-solid fa-coins text-accent"></i> StreamElements events
+    </h1>
+    <div>
+      <label class="block text-xs uppercase tracking-wider text-muted mb-1">Filter</label>
+      <select name="type"
+              class="tap bg-surface border border-subtle rounded px-3 text-base text-primary focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out"
+              hx-get="/events?partial=1"
+              hx-target="#events-area"
+              hx-swap="outerHTML"
+              hx-trigger="change">
+        <option value=""      {% if not type_filter %}selected{% endif %}>all</option>
+        <option value="tip"   {% if type_filter=='tip' %}selected{% endif %}>tips</option>
+        <option value="sub"   {% if type_filter=='sub' %}selected{% endif %}>subs</option>
+        <option value="cheer" {% if type_filter=='cheer' %}selected{% endif %}>cheers</option>
+        <option value="raid"  {% if type_filter=='raid' %}selected{% endif %}>raids</option>
+        <option value="follow"{% if type_filter=='follow' %}selected{% endif %}>follows</option>
+      </select>
+    </div>
+  </header>
+  {% include "partials/events_list.html" %}
+</div>
+{% endblock %}

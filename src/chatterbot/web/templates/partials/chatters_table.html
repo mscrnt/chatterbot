@@ -1,0 +1,100 @@
+<div id="chatters-table" class="space-y-2">
+  {% if not rows %}
+    {% with icon='fa-comments-slash',
+            heading='No chatters yet',
+            body='As soon as someone speaks in chat, they show up here.' %}
+      {% include "components/_empty_state.html" %}
+    {% endwith %}
+  {% else %}
+    <p class="text-xs text-muted">{{ total }} chatter{{ '' if total == 1 else 's' }}</p>
+
+    {# Card list on mobile. #}
+    <ul class="md:hidden space-y-2">
+      {% for r in rows %}
+      <li>
+        <a href="/users/{{ r.user.twitch_id }}" data-row-link tabindex="0"
+           class="block tap p-3 rounded-xl border border-subtle bg-surface
+                  active:bg-surface-raised hover:bg-surface-raised
+                  transition-all duration-150 ease-out">
+          <div class="flex items-center gap-3">
+            {% with name=r.user.name, size='md' %}{% include "components/_avatar.html" %}{% endwith %}
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center justify-between gap-2">
+                <span class="font-medium truncate text-primary">{{ r.user.name }}</span>
+                {% if r.user.opt_out %}
+                  {% with label='opt-out', tone='warning', icon='fa-eye-slash' %}
+                    {% include "components/_pill.html" %}
+                  {% endwith %}
+                {% endif %}
+              </div>
+              <div class="text-xs text-muted mt-1 flex flex-wrap gap-x-3">
+                <span><i class="fa-regular fa-clock mr-1"></i>{{ r.user.last_seen | short_ts }}</span>
+                <span><i class="fa-regular fa-comment mr-1"></i>{{ r.msg_count }}</span>
+                <span><i class="fa-regular fa-note-sticky mr-1"></i>{{ r.note_count }}</span>
+              </div>
+            </div>
+          </div>
+        </a>
+      </li>
+      {% endfor %}
+    </ul>
+
+    {# Desktop table #}
+    <div class="hidden md:block overflow-hidden rounded-xl border border-subtle">
+      <table class="w-full text-sm">
+        <thead class="bg-surface-raised text-muted text-xs uppercase sticky top-0">
+          <tr>
+            <th class="text-left px-3 py-2">Name</th>
+            <th class="text-left px-3 py-2">Last seen</th>
+            <th class="text-right px-3 py-2">Msgs</th>
+            <th class="text-right px-3 py-2">Notes</th>
+            <th class="text-left px-3 py-2"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-subtle">
+          {% for r in rows %}
+          <tr class="even:bg-surface-raised/40 hover:bg-surface-raised transition-all duration-150 ease-out">
+            <td class="px-3 py-2">
+              <a href="/users/{{ r.user.twitch_id }}" data-row-link tabindex="0"
+                 class="inline-flex items-center gap-2 text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent rounded">
+                {% with name=r.user.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+                <span>{{ r.user.name }}</span>
+              </a>
+            </td>
+            <td class="px-3 py-2 text-muted">{{ r.user.last_seen | short_ts }}</td>
+            <td class="px-3 py-2 text-right text-primary">{{ r.msg_count }}</td>
+            <td class="px-3 py-2 text-right text-primary">{{ r.note_count }}</td>
+            <td class="px-3 py-2">
+              {% if r.user.opt_out %}
+                {% with label='opt-out', tone='warning', icon='fa-eye-slash' %}
+                  {% include "components/_pill.html" %}
+                {% endwith %}
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if pages > 1 %}
+    <div class="flex items-center justify-between pt-2 text-sm">
+      {% if page > 1 %}
+        <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary"
+                hx-get="/chatters?q={{ q }}&sort={{ sort }}&page={{ page-1 }}"
+                hx-target="#chatters-table" hx-swap="outerHTML">
+          <i class="fa-solid fa-chevron-left text-xs"></i> prev
+        </button>
+      {% else %}<span></span>{% endif %}
+      <span class="text-muted">page {{ page }} / {{ pages }}</span>
+      {% if page < pages %}
+        <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary"
+                hx-get="/chatters?q={{ q }}&sort={{ sort }}&page={{ page+1 }}"
+                hx-target="#chatters-table" hx-swap="outerHTML">
+          next <i class="fa-solid fa-chevron-right text-xs"></i>
+        </button>
+      {% else %}<span></span>{% endif %}
+    </div>
+    {% endif %}
+  {% endif %}
+</div>

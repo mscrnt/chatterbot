@@ -1,0 +1,22 @@
+{# Avatar circle with initials. Color derived from username hash so the same
+   user always gets the same hue across views.
+
+   Usage:
+     {% with name=u.name, size='md' %}{% include "components/_avatar.html" %}{% endwith %}
+
+   Sizes: sm (24px), md (32px), lg (48px). Default md.
+#}
+{% set _name = name or '?' %}
+{% set _initials = (_name[:2]).upper() %}
+{# Stable hue: simple djb2-ish hash modulo 360. #}
+{% set _ns = namespace(h=5381) %}
+{% for ch in _name %}
+  {% set _ns.h = (_ns.h * 33 + ch | string | length) | abs %}
+{% endfor %}
+{% set _hue = (_ns.h * 137) % 360 %}
+{% set _size = size or 'md' %}
+{% set _dim = {'sm': 'w-6 h-6 text-[10px]', 'md': 'w-8 h-8 text-xs', 'lg': 'w-12 h-12 text-base'}[_size] %}
+<span class="inline-flex items-center justify-center rounded-full font-semibold shrink-0 {{ _dim }}"
+      style="background: hsl({{ _hue }}, 50%, 28%); color: hsl({{ _hue }}, 80%, 88%);">
+  {{ _initials }}
+</span>

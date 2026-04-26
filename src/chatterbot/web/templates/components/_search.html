@@ -1,0 +1,26 @@
+{# Search input with leading magnifier icon, clear button, and "/" kbd hint.
+   Wires to HTMX. Caller passes `endpoint`, `target`, optional `value`, `name`,
+   `include_selector`, `placeholder`.
+#}
+{% set _name = name or 'q' %}
+{% set _placeholder = placeholder or 'search…' %}
+<label class="relative block">
+  <span class="absolute inset-y-0 left-0 flex items-center pl-3 text-muted pointer-events-none">
+    <i class="fa-solid fa-magnifying-glass text-sm"></i>
+  </span>
+  <input type="search"
+         data-search-input
+         name="{{ _name }}"
+         value="{{ value or '' }}"
+         placeholder="{{ _placeholder }}"
+         class="w-full tap bg-surface border border-subtle rounded pl-9 pr-16 text-base text-primary placeholder:text-muted
+                focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out"
+         hx-get="{{ endpoint }}"
+         hx-trigger="keyup changed delay:200ms, search"
+         hx-target="{{ target }}"
+         hx-swap="outerHTML"
+         {% if include_selector %}hx-include="{{ include_selector }}"{% endif %}>
+  <span class="absolute inset-y-0 right-2 flex items-center gap-1">
+    <kbd class="kb hidden sm:inline">/</kbd>
+  </span>
+</label>

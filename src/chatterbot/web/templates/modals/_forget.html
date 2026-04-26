@@ -1,0 +1,58 @@
+{% set modal_title = 'Forget viewer permanently' %}
+{% set modal_icon = 'fa-triangle-exclamation' %}
+{% set modal_tone = 'danger' %}
+{% set modal_size = 'md' %}
+{% extends "components/_modal.html" %}
+{% block modal_body %}
+<div class="space-y-4 text-sm" x-data="{ typed: '' }">
+  <p class="text-primary">
+    This deletes <strong class="text-danger">every row</strong> touching
+    <strong>{{ user.name }}</strong> across users, messages, notes, events, and
+    summarization state. Cannot be undone.
+  </p>
+
+  <div class="grid grid-cols-2 gap-2 text-xs">
+    <div class="rounded border border-subtle p-2">
+      <div class="text-muted">messages</div>
+      <div class="text-primary text-base font-semibold">{{ msg_count }}</div>
+    </div>
+    <div class="rounded border border-subtle p-2">
+      <div class="text-muted">notes</div>
+      <div class="text-primary text-base font-semibold">{{ note_count }}</div>
+    </div>
+    <div class="rounded border border-subtle p-2">
+      <div class="text-muted">events</div>
+      <div class="text-primary text-base font-semibold">{{ event_count }}</div>
+    </div>
+    <div class="rounded border border-subtle p-2">
+      <div class="text-muted">lifetime tipped</div>
+      <div class="text-primary text-base font-semibold">${{ "%.2f"|format(summary.total_tip_amount) }}</div>
+    </div>
+  </div>
+
+  <div>
+    <label class="block text-xs uppercase tracking-wider text-muted mb-1">
+      Type <span class="text-danger font-mono">{{ user.name }}</span> to confirm
+    </label>
+    <input type="text" x-model="typed" autocomplete="off" autofocus
+           class="w-full tap bg-canvas border border-subtle rounded px-3 text-base text-primary
+                  focus:outline-none focus:ring-2 focus:ring-danger">
+  </div>
+
+  <div class="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 pt-2">
+    <button type="button"
+            class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-surface-raised hover:bg-subtle text-primary"
+            onclick="window.chatterbotCloseModal()">
+      Cancel
+    </button>
+    <form method="post" action="/users/{{ user.twitch_id }}/forget" class="contents">
+      <button type="submit"
+              :disabled="typed !== '{{ user.name }}'"
+              :class="typed === '{{ user.name }}' ? 'bg-danger hover:bg-danger/80 text-white' : 'bg-danger/30 text-white/70 cursor-not-allowed'"
+              class="tap inline-flex items-center justify-center gap-2 px-4 rounded font-medium transition-all duration-150 ease-out">
+        <i class="fa-solid fa-arrow-right-from-bracket"></i> Forget permanently
+      </button>
+    </form>
+  </div>
+</div>
+{% endblock %}

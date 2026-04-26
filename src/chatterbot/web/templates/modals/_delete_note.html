@@ -1,0 +1,24 @@
+{% set modal_title = 'Delete note' %}
+{% set modal_icon = 'fa-trash' %}
+{% set modal_tone = 'danger' %}
+{% set modal_size = 'sm' %}
+{% extends "components/_modal.html" %}
+{% block modal_body %}
+<div class="space-y-4 text-sm">
+  <p class="text-primary leading-relaxed">{{ note.text }}</p>
+  <p class="text-xs text-muted">created {{ note.ts | short_ts }}</p>
+  <div class="flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
+    <button type="button"
+            class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-surface-raised hover:bg-subtle text-primary"
+            onclick="window.chatterbotCloseModal()">Cancel</button>
+    <button type="button"
+            class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-danger hover:bg-danger/80 text-white font-medium"
+            hx-delete="/notes/{{ note.id }}"
+            hx-target="#note-{{ note.id }}"
+            hx-swap="delete"
+            hx-on::after-request="window.chatterbotCloseModal()">
+      <i class="fa-solid fa-trash"></i> Delete
+    </button>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Settings · chatterbot{% endblock %}
+{% block content %}
+<div class="space-y-4">
+  <header class="flex items-center justify-between gap-2">
+    <h1 class="text-xl sm:text-2xl font-semibold inline-flex items-center gap-2">
+      <i class="fa-solid fa-sliders text-accent"></i> Settings
+    </h1>
+    <button class="text-xs text-muted hover:text-primary inline-flex items-center gap-1"
+            hx-get="/modals/settings" hx-target="#modal-root">
+      <i class="fa-solid fa-circle-info"></i> env / cadence info
+    </button>
+  </header>
+  <p class="text-sm text-muted">
+    Edit Twitch and StreamElements credentials. Anything left blank stays at its
+    current value (or falls back to <code class="text-accent">.env</code>).
+  </p>
+
+  {% if saved %}
+  <div class="rounded-xl border border-success/40 bg-success/10 px-3 py-2 text-sm text-primary inline-flex items-center gap-2">
+    <i class="fa-solid fa-circle-check text-success"></i>
+    Saved. <strong>Restart the bot</strong> for the new credentials to take effect.
+  </div>
+  {% endif %}
+
+  <div class="rounded-xl border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-primary inline-flex items-start gap-2">
+    <i class="fa-solid fa-triangle-exclamation text-warning mt-0.5"></i>
+    <span>Heads up: secrets here are stored in plain text inside <code>data/chatters.db</code>.
+      Fine for a single-user local tool — but if you sync this DB elsewhere, you're moving credentials with it.</span>
+  </div>
+
+  <form method="post" action="/settings" class="space-y-4">
+    {% for r in rows %}
+      <div class="rounded-xl border border-subtle bg-surface p-3 sm:p-4">
+        <label class="flex items-baseline justify-between gap-2 mb-2">
+          <span class="font-medium text-sm sm:text-base text-primary">{{ r.label }}</span>
+          {% if r.source == 'db' %}
+            {% with label='from db', tone='accent' %}{% include "components/_pill.html" %}{% endwith %}
+          {% elif r.is_set %}
+            {% with label='from env', tone='neutral' %}{% include "components/_pill.html" %}{% endwith %}
+          {% else %}
+            {% with label='unset', tone='warning' %}{% include "components/_pill.html" %}{% endwith %}
+          {% endif %}
+        </label>
+
+        {% if r.is_bool %}
+          <label class="inline-flex items-center gap-2 tap">
+            <input type="checkbox" name="{{ r.key }}"
+                   {% if r.value %}checked{% endif %}
+                   class="h-5 w-5 accent-accent">
+            <span class="text-sm text-primary">enabled</span>
+          </label>
+        {% elif r.is_secret %}
+          <input type="password" name="{{ r.key }}"
+                 placeholder="{% if r.is_set %}•••••••• (leave blank to keep current){% else %}not set{% endif %}"
+                 autocomplete="off"
+                 class="w-full tap bg-canvas border border-subtle rounded px-3 text-base text-primary placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out">
+          <p class="text-[11px] text-muted mt-1">
+            {% if r.is_set %}Currently: set ({{ r.value | length }} chars). Submit blank to keep it.
+            {% else %}Currently: not set.{% endif %}
+          </p>
+        {% else %}
+          <input type="text" name="{{ r.key }}" value="{{ r.value }}"
+                 class="w-full tap bg-canvas border border-subtle rounded px-3 text-base text-primary focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out">
+        {% endif %}
+      </div>
+    {% endfor %}
+
+    <div class="flex flex-col sm:flex-row gap-2 sm:items-center sm:justify-between pt-2">
+      <p class="text-xs text-muted">
+        Saving writes to the <code>app_settings</code> table. Restart
+        <code>make bot</code> to reconnect with new credentials.
+      </p>
+      <button type="submit"
+              class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-accent hover:bg-accent-600 text-white font-medium transition-all duration-150 ease-out">
+        <i class="fa-solid fa-floppy-disk"></i> Save
+      </button>
+    </div>
+  </form>
+</div>
+{% endblock %}

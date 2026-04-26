@@ -1,0 +1,9 @@
+{% if user.opt_out %}
+  {% with label='opted out', tone='warning', icon='fa-eye-slash' %}
+    {% include "components/_pill.html" %}
+  {% endwith %}
+{% else %}
+  {% with label='active', tone='success', icon='fa-circle-check' %}
+    {% include "components/_pill.html" %}
+  {% endwith %}
+{% endif %}

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Chatters · chatterbot{% endblock %}
+{% block content %}
+<div class="space-y-3">
+  <header class="flex items-baseline justify-between gap-2">
+    <h1 class="text-xl sm:text-2xl font-semibold flex items-center gap-2">
+      <i class="fa-solid fa-users text-accent"></i> Chatters
+    </h1>
+    <span class="text-xs text-muted hidden sm:inline">
+      <kbd class="kb">/</kbd> to search · <kbd class="kb">j</kbd>/<kbd class="kb">k</kbd> to move
+    </span>
+  </header>
+
+  <div class="flex flex-col sm:flex-row gap-2 sm:items-end">
+    <div class="flex-1">
+      {% with endpoint='/chatters', target='#chatters-table', value=q,
+              include_selector="[name='sort']", placeholder='username…' %}
+        {% include "components/_search.html" %}
+      {% endwith %}
+    </div>
+    <div>
+      <select id="sort" name="sort"
+              class="w-full sm:w-auto tap bg-surface border border-subtle rounded px-3 text-base text-primary
+                     focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out"
+              hx-get="/chatters"
+              hx-trigger="change"
+              hx-target="#chatters-table"
+              hx-swap="outerHTML"
+              hx-include="[name='q']">
+        <option value="last_seen" {% if sort=='last_seen' %}selected{% endif %}>Last seen</option>
+        <option value="name"      {% if sort=='name' %}selected{% endif %}>Name (A–Z)</option>
+        <option value="messages"  {% if sort=='messages' %}selected{% endif %}>Most messages</option>
+        <option value="notes"     {% if sort=='notes' %}selected{% endif %}>Most notes</option>
+      </select>
+    </div>
+  </div>
+
+  {% include "partials/chatters_table.html" %}
+</div>
+{% endblock %}

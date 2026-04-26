@@ -1,0 +1,13 @@
+{
+  "name": "chatterbot-dashboard-css",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tailwind build files for the chatterbot dashboard. Optional — base.html ships with the Play CDN by default.",
+  "scripts": {
+    "build:css": "tailwindcss -i src/chatterbot/web/static/css/input.css -o src/chatterbot/web/static/css/output.css --minify",
+    "watch:css": "tailwindcss -i src/chatterbot/web/static/css/input.css -o src/chatterbot/web/static/css/output.css --watch"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.0"
+  }
+}

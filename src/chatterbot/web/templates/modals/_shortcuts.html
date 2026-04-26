@@ -1,0 +1,25 @@
+{% set modal_title = 'Keyboard shortcuts' %}
+{% set modal_icon = 'fa-keyboard' %}
+{% set modal_tone = 'accent' %}
+{% set modal_size = 'md' %}
+{% extends "components/_modal.html" %}
+{% block modal_body %}
+<div class="text-sm">
+  <table class="w-full text-left">
+    <tbody class="divide-y divide-subtle">
+      <tr><td class="py-2"><kbd class="kb">/</kbd></td>           <td class="text-muted">focus search</td></tr>
+      <tr><td class="py-2"><kbd class="kb">Esc</kbd></td>          <td class="text-muted">close modal · clear search</td></tr>
+      <tr><td class="py-2"><kbd class="kb">?</kbd></td>            <td class="text-muted">this help</td></tr>
+      <tr><td class="py-2"><kbd class="kb">j</kbd> / <kbd class="kb">k</kbd></td><td class="text-muted">next / previous row</td></tr>
+      <tr><td class="py-2"><kbd class="kb">g</kbd> <kbd class="kb">c</kbd></td><td class="text-muted">go to Chatters</td></tr>
+      <tr><td class="py-2"><kbd class="kb">g</kbd> <kbd class="kb">t</kbd></td><td class="text-muted">go to Topics</td></tr>
+      <tr><td class="py-2"><kbd class="kb">g</kbd> <kbd class="kb">e</kbd></td><td class="text-muted">go to Events</td></tr>
+      <tr><td class="py-2"><kbd class="kb">g</kbd> <kbd class="kb">l</kbd></td><td class="text-muted">go to Live</td></tr>
+      <tr><td class="py-2"><kbd class="kb">g</kbd> <kbd class="kb">s</kbd></td><td class="text-muted">go to Settings</td></tr>
+    </tbody>
+  </table>
+  <p class="text-xs text-muted mt-3">
+    Shortcuts are disabled while typing in inputs.
+  </p>
+</div>
+{% endblock %}
