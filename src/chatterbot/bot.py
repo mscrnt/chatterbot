@@ -30,6 +30,22 @@ from .summarizer import Summarizer
 logger = logging.getLogger(__name__)
 
 
+def _parse_badges(s: str) -> dict[str, str]:
+    """Parse a Twitch IRCv3 `badges` / `badge-info` tag value into
+    {name: value}. Format: 'subscriber/3,vip/1,moderator/1' → keys."""
+    out: dict[str, str] = {}
+    for part in (s or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "/" in part:
+            k, v = part.split("/", 1)
+            out[k] = v
+        else:
+            out[part] = ""
+    return out
+
+
 class ChatterListener(commands.Bot):
     def __init__(self, settings: Settings, repo: ChatterRepo, summarizer: Summarizer):
         channel = settings.twitch_channel.strip()
@@ -74,11 +90,54 @@ class ChatterListener(commands.Bot):
             else None
         )
 
+        # IRCv3 badges → role/sub state. `badges` is the display set
+        # (e.g. "subscriber/3,vip/1,moderator/1"); `badge-info` carries the
+        # accurate sub_months ("subscriber/12") even when the badge image
+        # rounds. We snap last-seen state per chatter.
+        badges_str = tags.get("badges") or ""
+        badge_info_str = tags.get("badge-info") or ""
+        badges = _parse_badges(badges_str)
+        badge_info = _parse_badges(badge_info_str)
+        sub_tier = badges.get("subscriber")  # '1000'/'2000'/'3000' tier code
+        # If the user has the founder badge they're a sub even without a
+        # subscriber badge — promote to tier 1000 so the rest of the app
+        # treats them as a subscriber.
+        if not sub_tier and "founder" in badges:
+            sub_tier = "1000"
+        if "premium" in badges or "twitch-prime" in badges:
+            sub_tier = sub_tier or "Prime"
+        try:
+            sub_months = int(badge_info.get("subscriber") or 0)
+        except (TypeError, ValueError):
+            sub_months = 0
+        is_mod = "moderator" in badges or "broadcaster" in badges
+        is_vip = "vip" in badges
+        is_founder = "founder" in badges
+
         try:
             await asyncio.to_thread(self.repo.upsert_user, twitch_id, name)
+            await asyncio.to_thread(
+                self.repo.update_user_badges, twitch_id,
+                sub_tier=sub_tier, sub_months=sub_months,
+                is_mod=is_mod, is_vip=is_vip, is_founder=is_founder,
+            )
 
             if await asyncio.to_thread(self.repo.is_opted_out, twitch_id):
                 return  # honor opt_out — no logging, no summarization
+
+            # Fire any pending reminders attached to this chatter — the
+            # dashboard's nav pill picks them up on the next render.
+            try:
+                fired = await asyncio.to_thread(
+                    self.repo.fire_pending_reminders, twitch_id
+                )
+                if fired:
+                    logger.info(
+                        "reminder: fired %d for %s on incoming message",
+                        fired, name,
+                    )
+            except Exception:
+                logger.exception("reminder: fire-pending failed for %s", name)
 
             await asyncio.to_thread(
                 self.repo.insert_message,

@@ -10,7 +10,11 @@
     </p>
     <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
       {% for m in messages %}
-        <li class="px-3 py-2 text-sm hover:bg-surface-raised transition-all duration-150 ease-out">
+        <li class="px-3 py-2 text-sm hover:bg-surface-raised cursor-pointer transition-all duration-150 ease-out"
+            hx-get="/modals/message/{{ m.id }}"
+            hx-target="#modal-root"
+            hx-swap="innerHTML"
+            title="Open with surrounding context">
           {% if m.reply_parent_body %}
             <div class="text-[11px] text-muted mb-1 inline-flex items-center gap-1">
               <i class="fa-solid fa-reply text-[10px]"></i>

@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Settings · chatterbot{% endblock %}
 {% block content %}
-<div class="space-y-4">
+<div class="space-y-4"
+     x-data="{ tab: (new URLSearchParams(location.search).get('tab')) || '{{ groups[0].id }}' }">
   <header class="flex items-center justify-between gap-2">
     <h1 class="text-xl sm:text-2xl font-semibold inline-flex items-center gap-2">
       <i class="fa-solid fa-sliders text-accent"></i> Settings
@@ -21,16 +22,12 @@
       </button>
     </div>
   </header>
-  <p class="text-sm text-muted">
-    Edit Twitch and StreamElements credentials. Anything left blank stays at its
-    current value (or falls back to <code class="text-accent">.env</code>).
-  </p>
 
   {% if saved %}
   <div class="rounded-xl border border-success/40 bg-success/10 px-3 py-2 text-sm text-primary flex flex-col sm:flex-row sm:items-center gap-2">
     <span class="inline-flex items-center gap-2">
       <i class="fa-solid fa-circle-check text-success"></i>
-      Saved. Restart the bot to pick up the new settings.
+      Saved. Restart the bot to pick up credential changes.
     </span>
     <button type="button"
             class="tap inline-flex items-center justify-center gap-2 px-3 rounded bg-accent hover:bg-accent-600 text-white text-sm font-medium ml-auto"
@@ -51,85 +48,132 @@
       Fine for a single-user local tool — but if you sync this DB elsewhere, you're moving credentials with it.</span>
   </div>
 
-  {# ---------------- diagnostic bundle ---------------- #}
-  <section class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 space-y-3"
-           x-data="{ withRecent: false }">
-    <header class="flex items-center justify-between gap-2">
-      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-        <i class="fa-solid fa-life-ring text-accent"></i> Diagnostic bundle
-      </h2>
-      <span class="text-[10px] uppercase tracking-wider text-muted">.cbreport</span>
-    </header>
-    <p class="text-xs text-muted">
-      Downloads a <code>.cbreport</code> file (a renamed zip — won't get filtered
-      by mail / Discord) for bug reports. Privacy-safe by default: NO chat
-      content, NO usernames, NO secrets. Includes log tails, system info,
-      DB row counts, and which <code>.env</code> keys are set.
-    </p>
-    <label class="inline-flex items-center gap-2 text-xs text-muted">
-      <input type="checkbox" x-model="withRecent" class="h-4 w-4 accent-accent">
-      Also include usernames + per-user message <em>counts</em> over the last 24h
-      <span class="text-[10px] uppercase tracking-wider text-warning">opt-in</span>
-    </label>
-    <div class="flex flex-col sm:flex-row gap-2">
-      <a :href="withRecent ? '/diagnose?with_recent_activity=1' : '/diagnose'"
-         class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-accent hover:bg-accent-600 text-white font-medium text-sm transition-all duration-150 ease-out">
-        <i class="fa-solid fa-download"></i> Download bundle
-      </a>
-      <a href="{{ github_issue_url }}" target="_blank" rel="noopener"
-         class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-surface-raised hover:bg-subtle text-primary font-medium text-sm transition-all duration-150 ease-out">
-        <i class="fa-brands fa-github"></i> Open issue on GitHub
-      </a>
-    </div>
-    <p class="text-[11px] text-muted">
-      <i class="fa-solid fa-circle-info text-accent"></i>
-      GitHub doesn't allow file attachments via URL — after the issue page
-      opens, drag the <code>.cbreport</code> you just downloaded into the
-      issue body.
-    </p>
-  </section>
+  {# ---------------- tab strip ---------------- #}
+  <nav class="flex gap-1 overflow-x-auto border-b border-subtle"
+       role="tablist" aria-label="Settings sections">
+    {% for g in groups %}
+      <button type="button"
+              role="tab"
+              :aria-selected="tab === '{{ g.id }}'"
+              @click="tab = '{{ g.id }}'; history.replaceState(null, '', '?tab={{ g.id }}')"
+              class="tap inline-flex items-center gap-2 px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-all duration-150 ease-out"
+              :class="tab === '{{ g.id }}'
+                      ? 'border-accent text-accent'
+                      : 'border-transparent text-muted hover:text-primary hover:bg-surface-raised'">
+        <i class="fa-solid {{ g.icon }} text-xs"></i> {{ g.title }}
+      </button>
+    {% endfor %}
+    <button type="button"
+            role="tab"
+            :aria-selected="tab === 'diagnostics'"
+            @click="tab = 'diagnostics'; history.replaceState(null, '', '?tab=diagnostics')"
+            class="tap inline-flex items-center gap-2 px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-all duration-150 ease-out"
+            :class="tab === 'diagnostics'
+                    ? 'border-accent text-accent'
+                    : 'border-transparent text-muted hover:text-primary hover:bg-surface-raised'">
+      <i class="fa-solid fa-life-ring text-xs"></i> Diagnostics
+    </button>
+  </nav>
 
   <form method="post" action="/settings" class="space-y-4">
-    {% for r in rows %}
-      <div class="rounded-xl border border-subtle bg-surface p-3 sm:p-4">
-        <label class="flex items-baseline justify-between gap-2 mb-2">
-          <span class="font-medium text-sm sm:text-base text-primary">{{ r.label }}</span>
-          {% if r.source == 'db' %}
-            {% with label='from db', tone='accent' %}{% include "components/_pill.html" %}{% endwith %}
-          {% elif r.is_set %}
-            {% with label='from env', tone='neutral' %}{% include "components/_pill.html" %}{% endwith %}
-          {% else %}
-            {% with label='unset', tone='warning' %}{% include "components/_pill.html" %}{% endwith %}
-          {% endif %}
-        </label>
+    {# Hidden — keep tab alive across the POST/redirect cycle. #}
+    <input type="hidden" name="_tab" :value="tab">
 
-        {% if r.is_bool %}
-          <label class="inline-flex items-center gap-2 tap">
-            <input type="checkbox" name="{{ r.key }}"
-                   {% if r.value %}checked{% endif %}
-                   class="h-5 w-5 accent-accent">
-            <span class="text-sm text-primary">enabled</span>
-          </label>
-        {% elif r.is_secret %}
-          <input type="password" name="{{ r.key }}"
-                 placeholder="{% if r.is_set %}•••••••• (leave blank to keep current){% else %}not set{% endif %}"
-                 autocomplete="off"
-                 class="w-full tap bg-canvas border border-subtle rounded px-3 text-base text-primary placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out">
-          <p class="text-[11px] text-muted mt-1">
-            {% if r.is_set %}Currently: set ({{ r.value | length }} chars). Submit blank to keep it.
-            {% else %}Currently: not set.{% endif %}
+    {% for g in groups %}
+      <section x-show="tab === '{{ g.id }}'" x-cloak class="space-y-4">
+        {% if g.blurb %}
+          <p class="text-sm text-muted inline-flex items-start gap-2">
+            <i class="fa-solid {{ g.icon }} text-accent mt-0.5"></i>
+            {{ g.blurb }}
           </p>
-        {% else %}
-          <input type="text" name="{{ r.key }}" value="{{ r.value }}"
-                 class="w-full tap bg-canvas border border-subtle rounded px-3 text-base text-primary focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out">
         {% endif %}
-      </div>
+
+        {% if not g.rows %}
+          <p class="text-muted italic text-sm">No settings in this section yet.</p>
+        {% endif %}
+
+        {% for r in g.rows %}
+          <div class="rounded-xl border border-subtle bg-surface p-3 sm:p-4">
+            <label class="flex items-baseline justify-between gap-2 mb-2">
+              <span class="font-medium text-sm sm:text-base text-primary">{{ r.label }}</span>
+              {% if r.source == 'db' %}
+                {% with label='from db', tone='accent' %}{% include "components/_pill.html" %}{% endwith %}
+              {% elif r.is_set %}
+                {% with label='from env', tone='neutral' %}{% include "components/_pill.html" %}{% endwith %}
+              {% else %}
+                {% with label='unset', tone='warning' %}{% include "components/_pill.html" %}{% endwith %}
+              {% endif %}
+            </label>
+
+            {% if r.is_bool %}
+              <label class="inline-flex items-center gap-2 tap">
+                <input type="checkbox" name="{{ r.key }}"
+                       {% if r.value %}checked{% endif %}
+                       class="h-5 w-5 accent-accent">
+                <span class="text-sm text-primary">enabled</span>
+              </label>
+            {% elif r.is_secret %}
+              <input type="password" name="{{ r.key }}"
+                     placeholder="{% if r.is_set %}•••••••• (leave blank to keep current){% else %}not set{% endif %}"
+                     autocomplete="off"
+                     class="w-full tap bg-canvas border border-subtle rounded px-3 text-base text-primary placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out">
+              <p class="text-[11px] text-muted mt-1">
+                {% if r.is_set %}Currently: set ({{ r.value | length }} chars). Submit blank to keep it.
+                {% else %}Currently: not set.{% endif %}
+              </p>
+            {% else %}
+              <input type="text" name="{{ r.key }}" value="{{ r.value }}"
+                     class="w-full tap bg-canvas border border-subtle rounded px-3 text-base text-primary focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out">
+            {% endif %}
+          </div>
+        {% endfor %}
+      </section>
     {% endfor %}
 
-    <div class="flex flex-col sm:flex-row gap-2 sm:items-center sm:justify-between pt-2">
+    {# Diagnostics tab — not a settings group, so it lives outside the loop. #}
+    <section x-show="tab === 'diagnostics'" x-cloak
+             class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 space-y-3"
+             x-data="{ withRecent: false }">
+      <header class="flex items-center justify-between gap-2">
+        <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+          <i class="fa-solid fa-life-ring text-accent"></i> Diagnostic bundle
+        </h2>
+        <span class="text-[10px] uppercase tracking-wider text-muted">.cbreport</span>
+      </header>
       <p class="text-xs text-muted">
-        Saving writes to the <code>app_settings</code> table. Restart
-        <code>make bot</code> to reconnect with new credentials.
+        Downloads a <code>.cbreport</code> file (a renamed zip — won't get filtered
+        by mail / Discord) for bug reports. Privacy-safe by default: NO chat
+        content, NO usernames, NO secrets. Includes log tails, system info,
+        DB row counts, and which <code>.env</code> keys are set.
+      </p>
+      <label class="inline-flex items-center gap-2 text-xs text-muted">
+        <input type="checkbox" x-model="withRecent" class="h-4 w-4 accent-accent">
+        Also include usernames + per-user message <em>counts</em> over the last 24h
+        <span class="text-[10px] uppercase tracking-wider text-warning">opt-in</span>
+      </label>
+      <div class="flex flex-col sm:flex-row gap-2">
+        <a :href="withRecent ? '/diagnose?with_recent_activity=1' : '/diagnose'"
+           class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-accent hover:bg-accent-600 text-white font-medium text-sm transition-all duration-150 ease-out">
+          <i class="fa-solid fa-download"></i> Download bundle
+        </a>
+        <a href="{{ github_issue_url }}" target="_blank" rel="noopener"
+           class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-surface-raised hover:bg-subtle text-primary font-medium text-sm transition-all duration-150 ease-out">
+          <i class="fa-brands fa-github"></i> Open issue on GitHub
+        </a>
+      </div>
+      <p class="text-[11px] text-muted">
+        <i class="fa-solid fa-circle-info text-accent"></i>
+        GitHub doesn't allow file attachments via URL — after the issue page
+        opens, drag the <code>.cbreport</code> you just downloaded into the
+        issue body.
+      </p>
+    </section>
+
+    <div class="flex flex-col sm:flex-row gap-2 sm:items-center sm:justify-between pt-2"
+         x-show="tab !== 'diagnostics'" x-cloak>
+      <p class="text-xs text-muted">
+        Saving writes to the <code>app_settings</code> table.
+        Bot-related changes need a <code>make bot</code> restart; UI toggles apply on next page load.
       </p>
       <button type="submit"
               class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-accent hover:bg-accent-600 text-white font-medium transition-all duration-150 ease-out">
@@ -138,4 +182,6 @@
     </div>
   </form>
 </div>
+
+<style>[x-cloak] { display: none !important; }</style>
 {% endblock %}

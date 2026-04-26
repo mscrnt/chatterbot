@@ -29,6 +29,26 @@
       </div>
     </div>
     <div class="flex flex-wrap items-center gap-2">
+      {% if msg_stats and msg_stats.msg_count is defined %}
+        {% with user=user, msg_count=msg_stats.msg_count %}
+          {% include "components/_activity_badge.html" %}
+        {% endwith %}
+      {% endif %}
+      {% if user.is_mod %}
+        {% with label='mod', tone='success', icon='fa-shield-halved' %}{% include "components/_pill.html" %}{% endwith %}
+      {% endif %}
+      {% if user.is_vip %}
+        {% with label='VIP', tone='accent', icon='fa-gem' %}{% include "components/_pill.html" %}{% endwith %}
+      {% endif %}
+      {% if user.is_founder %}
+        {% with label='founder', tone='warning', icon='fa-seedling' %}{% include "components/_pill.html" %}{% endwith %}
+      {% endif %}
+      {% if user.sub_tier %}
+        {% set _stier = 'Prime' if user.sub_tier == 'Prime' else ('T' ~ (user.sub_tier|int // 1000)) %}
+        {% with label=(_stier ~ ' · ' ~ user.sub_months ~ 'mo') if user.sub_months else _stier, tone='accent', icon='fa-star' %}
+          {% include "components/_pill.html" %}
+        {% endwith %}
+      {% endif %}
       <div id="opt-out-area" class="contents">
         {% include "partials/opt_out_badge.html" %}
       </div>
@@ -115,6 +135,11 @@
     {% include "partials/notes_list.html" %}
   </section>
 
+  {# Reminders — fires next time this chatter speaks. #}
+  {% with reminders=reminders %}
+    {% include "partials/reminders_section.html" %}
+  {% endwith %}
+
   {# Moderation incidents (only when MOD_MODE_ENABLED) #}
   {% if mod_mode_enabled %}
   <section class="space-y-2">
@@ -181,4 +206,16 @@
 {% block scripts %}
 <script src="/static/js/ask.js"></script>
 <script>chatterbotAsk("{{ user.twitch_id }}");</script>
+<script>
+  // Auto-open the message-context modal when arriving with ?focus=<msg_id>
+  (function () {
+    const params = new URLSearchParams(window.location.search);
+    const focusId = params.get('focus');
+    if (!focusId || !/^\d+$/.test(focusId)) return;
+    if (window.htmx) {
+      htmx.ajax('GET', '/modals/message/' + focusId,
+        { target: '#modal-root', swap: 'innerHTML' });
+    }
+  })();
+</script>
 {% endblock %}

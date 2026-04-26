@@ -45,6 +45,41 @@ class User:
     first_seen: str
     last_seen: str
     opt_out: bool
+    # Denormalized per-message badge snapshot — last-seen state from IRCv3
+    # tags. These reflect the chatter's status the last time they spoke in
+    # chat, not their current Twitch state (silent un-subs etc. are missed).
+    sub_tier: str | None = None      # '1000' | '2000' | '3000' | 'Prime' | None
+    sub_months: int = 0
+    is_mod: bool = False
+    is_vip: bool = False
+    is_founder: bool = False
+
+
+@dataclass
+class Reminder:
+    """Streamer-set reminder attached to a chatter. Fires (auto-stamps
+    `fired_at`) when that chatter next sends a message; the dashboard
+    surfaces a fired-not-dismissed reminder until the streamer dismisses it."""
+
+    id: int
+    user_id: str
+    user_name: str | None
+    text: str
+    created_at: str
+    fired_at: str | None
+    dismissed: bool
+
+
+@dataclass
+class StreamSession:
+    """Computed session — a contiguous chunk of chat with no >GAP-min silence."""
+
+    id: int           # pseudo-id (1..N), most recent first
+    start_ts: str
+    end_ts: str
+    message_count: int
+    unique_chatters: int
+    top_chatter: str | None
 
 
 @dataclass
@@ -232,10 +267,27 @@ class ChatterRepo:
                     name       TEXT NOT NULL,
                     first_seen TEXT NOT NULL,
                     last_seen  TEXT NOT NULL,
-                    opt_out    INTEGER NOT NULL DEFAULT 0
+                    opt_out    INTEGER NOT NULL DEFAULT 0,
+                    sub_tier   TEXT,
+                    sub_months INTEGER NOT NULL DEFAULT 0,
+                    is_mod     INTEGER NOT NULL DEFAULT 0,
+                    is_vip     INTEGER NOT NULL DEFAULT 0,
+                    is_founder INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
+            # Idempotent badge-column migration for older DBs.
+            cur.execute("PRAGMA table_info(users)")
+            _ucols = {r["name"] for r in cur.fetchall()}
+            for col, decl in (
+                ("sub_tier",   "TEXT"),
+                ("sub_months", "INTEGER NOT NULL DEFAULT 0"),
+                ("is_mod",     "INTEGER NOT NULL DEFAULT 0"),
+                ("is_vip",     "INTEGER NOT NULL DEFAULT 0"),
+                ("is_founder", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if col not in _ucols:
+                    cur.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS messages (
@@ -343,6 +395,23 @@ class ChatterRepo:
                     last_summarized_msg_id   INTEGER NOT NULL DEFAULT 0
                 )
                 """
+            )
+            # Reminders — streamer-set, fired when the user next chats.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reminders (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id     TEXT NOT NULL REFERENCES users(twitch_id) ON DELETE CASCADE,
+                    text        TEXT NOT NULL,
+                    created_at  TEXT NOT NULL,
+                    fired_at    TEXT,
+                    dismissed   INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reminders_user_pending "
+                "ON reminders(user_id, fired_at, dismissed)"
             )
             cur.execute(
                 """
@@ -482,6 +551,40 @@ class ChatterRepo:
                   )
                 """,
                 (twitch_id, twitch_id),
+            )
+
+    def update_user_badges(
+        self,
+        twitch_id: str,
+        *,
+        sub_tier: str | None,
+        sub_months: int,
+        is_mod: bool,
+        is_vip: bool,
+        is_founder: bool,
+    ) -> None:
+        """Snap the chatter's role/sub state from IRCv3 tags onto users.
+        Called by the bot on every message — gives us at-a-glance "who's
+        currently subbed / a mod / etc." without needing Helix scopes."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                UPDATE users
+                SET sub_tier   = ?,
+                    sub_months = MAX(sub_months, ?),
+                    is_mod     = ?,
+                    is_vip     = ?,
+                    is_founder = is_founder OR ?
+                WHERE twitch_id = ?
+                """,
+                (
+                    sub_tier,
+                    int(sub_months),
+                    1 if is_mod else 0,
+                    1 if is_vip else 0,
+                    1 if is_founder else 0,
+                    twitch_id,
+                ),
             )
 
     def insert_message(
@@ -632,6 +735,43 @@ class ChatterRepo:
                     )
             return note_id
 
+    def arrival_signals_for_users(
+        self, user_ids: Iterable[str], *, returning_min_hours: int = 6
+    ) -> dict[str, str]:
+        """Return per-user arrival signal: 'first_timer', 'returning', or
+        absent. `first_timer` = first_seen within last 24h. `returning` = the
+        previous message from this user is at least `returning_min_hours` old.
+        Pure read; used by the live widget to highlight notable arrivals."""
+        ids = [u for u in user_ids if u]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        out: dict[str, str] = {}
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT u.twitch_id, u.first_seen,
+                       (julianday('now') - julianday(u.first_seen)) * 24 AS first_age_h,
+                       (
+                         SELECT (julianday('now') - julianday(m2.ts)) * 24
+                         FROM messages m2
+                         WHERE m2.user_id = u.twitch_id
+                         ORDER BY m2.id DESC LIMIT 1 OFFSET 1
+                       ) AS prev_age_h
+                FROM users u
+                WHERE u.twitch_id IN ({placeholders})
+                """,
+                tuple(ids),
+            )
+            for r in cur.fetchall():
+                first_age = r["first_age_h"]
+                prev_age = r["prev_age_h"]
+                if first_age is not None and float(first_age) <= 24.0:
+                    out[r["twitch_id"]] = "first_timer"
+                elif prev_age is not None and float(prev_age) >= returning_min_hours:
+                    out[r["twitch_id"]] = "returning"
+        return out
+
     def recent_global_messages(self, limit: int = 30) -> list[Message]:
         """Latest messages across the whole channel, newest first.
 
@@ -736,6 +876,328 @@ class ChatterRepo:
             return int(cur.lastrowid)
 
     # ============================ READ surface (TUI / dashboard) ===========
+
+    # ============================ Reminders ================================
+
+    def add_reminder(self, user_id: str, text: str) -> int:
+        with self._cursor() as cur:
+            cur.execute(
+                "INSERT INTO reminders(user_id, text, created_at) VALUES (?, ?, ?)",
+                (user_id, text.strip(), _now_iso()),
+            )
+            return int(cur.lastrowid)
+
+    def fire_pending_reminders(self, user_id: str) -> int:
+        """Stamp every pending reminder for this user as fired-now. Returns
+        the count of newly-fired reminders. Called by the bot when this user
+        next speaks."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                UPDATE reminders
+                SET fired_at = ?
+                WHERE user_id = ? AND fired_at IS NULL AND dismissed = 0
+                """,
+                (_now_iso(), user_id),
+            )
+            return int(cur.rowcount)
+
+    def dismiss_reminder(self, reminder_id: int) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE reminders SET dismissed = 1 WHERE id = ?", (reminder_id,)
+            )
+
+    def delete_reminder(self, reminder_id: int) -> None:
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM reminders WHERE id = ?", (reminder_id,))
+
+    def get_reminders_for_user(self, user_id: str) -> list[Reminder]:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.id, r.user_id, u.name AS user_name, r.text, r.created_at,
+                       r.fired_at, r.dismissed
+                FROM reminders r
+                JOIN users u ON u.twitch_id = r.user_id
+                WHERE r.user_id = ?
+                ORDER BY r.dismissed ASC, r.created_at DESC
+                """,
+                (user_id,),
+            )
+            return [
+                Reminder(
+                    id=int(r["id"]), user_id=r["user_id"], user_name=r["user_name"],
+                    text=r["text"], created_at=r["created_at"],
+                    fired_at=r["fired_at"], dismissed=bool(r["dismissed"]),
+                )
+                for r in cur.fetchall()
+            ]
+
+    def list_fired_reminders(self) -> list[Reminder]:
+        """All reminders that have fired and not been dismissed yet —
+        the inbox the streamer needs to clear."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.id, r.user_id, u.name AS user_name, r.text, r.created_at,
+                       r.fired_at, r.dismissed
+                FROM reminders r
+                JOIN users u ON u.twitch_id = r.user_id
+                WHERE r.fired_at IS NOT NULL AND r.dismissed = 0
+                ORDER BY r.fired_at DESC
+                """
+            )
+            return [
+                Reminder(
+                    id=int(r["id"]), user_id=r["user_id"], user_name=r["user_name"],
+                    text=r["text"], created_at=r["created_at"],
+                    fired_at=r["fired_at"], dismissed=bool(r["dismissed"]),
+                )
+                for r in cur.fetchall()
+            ]
+
+    def count_fired_reminders(self) -> int:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM reminders "
+                "WHERE fired_at IS NOT NULL AND dismissed = 0"
+            )
+            return int(cur.fetchone()["c"])
+
+    def count_pending_reminders_for_user(self, user_id: str) -> int:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM reminders "
+                "WHERE user_id = ? AND fired_at IS NULL AND dismissed = 0",
+                (user_id,),
+            )
+            return int(cur.fetchone()["c"])
+
+    # ============================ Activity / arrival signals ===============
+
+    def user_message_stats(self, user_id: str) -> dict[str, Any]:
+        """Aggregate snapshot used by the activity-badge helper:
+            msg_count, first_seen, last_seen, prev_seen (penultimate msg ts).
+        prev_seen is what lets us detect "back after a long gap"."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  (SELECT COUNT(*) FROM messages WHERE user_id = u.twitch_id) AS msg_count,
+                  u.first_seen, u.last_seen,
+                  (SELECT ts FROM messages WHERE user_id = u.twitch_id
+                    ORDER BY id DESC LIMIT 1 OFFSET 1) AS prev_seen
+                FROM users u
+                WHERE u.twitch_id = ?
+                """,
+                (user_id,),
+            )
+            r = cur.fetchone()
+            if not r:
+                return {}
+            return {
+                "msg_count": int(r["msg_count"] or 0),
+                "first_seen": r["first_seen"],
+                "last_seen": r["last_seen"],
+                "prev_seen": r["prev_seen"],
+            }
+
+    # ============================ Stream sessions =========================
+
+    def stream_sessions(
+        self, *, gap_minutes: int = 30, limit: int = 12
+    ) -> list[StreamSession]:
+        """Bucket the entire message log into stream sessions — contiguous
+        chunks separated by silences of at least `gap_minutes`. Returns the
+        most recent `limit` sessions, newest first.
+
+        Computed at query time via SQLite window functions; no state to
+        maintain. For each session also computes the top chatter."""
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                WITH gapped AS (
+                  SELECT id, user_id, ts,
+                         (julianday(ts) - julianday(LAG(ts) OVER (ORDER BY id)))
+                           * 24 * 60 AS gap_min
+                  FROM messages
+                ),
+                flagged AS (
+                  SELECT id, user_id, ts,
+                         CASE WHEN gap_min IS NULL OR gap_min > {int(gap_minutes)}
+                              THEN 1 ELSE 0 END AS is_new
+                  FROM gapped
+                ),
+                sessioned AS (
+                  SELECT id, user_id, ts,
+                         SUM(is_new) OVER (ORDER BY id) AS sid
+                  FROM flagged
+                )
+                SELECT sid,
+                       MIN(ts)            AS start_ts,
+                       MAX(ts)            AS end_ts,
+                       COUNT(*)           AS msgs,
+                       COUNT(DISTINCT user_id) AS uniques
+                FROM sessioned
+                GROUP BY sid
+                ORDER BY sid DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            session_rows = [dict(r) for r in cur.fetchall()]
+            if not session_rows:
+                return []
+            # Top chatter per session — separate query, joined in Python.
+            sids = [r["sid"] for r in session_rows]
+            sids_csv = ",".join(str(int(s)) for s in sids)
+            cur.execute(
+                f"""
+                WITH gapped AS (
+                  SELECT id, user_id, ts,
+                         (julianday(ts) - julianday(LAG(ts) OVER (ORDER BY id)))
+                           * 24 * 60 AS gap_min
+                  FROM messages
+                ),
+                flagged AS (
+                  SELECT id, user_id, ts,
+                         CASE WHEN gap_min IS NULL OR gap_min > {int(gap_minutes)}
+                              THEN 1 ELSE 0 END AS is_new
+                  FROM gapped
+                ),
+                sessioned AS (
+                  SELECT id, user_id, ts,
+                         SUM(is_new) OVER (ORDER BY id) AS sid
+                  FROM flagged
+                )
+                SELECT s.sid, u.name, COUNT(*) AS c
+                FROM sessioned s JOIN users u ON u.twitch_id = s.user_id
+                WHERE s.sid IN ({sids_csv})
+                GROUP BY s.sid, s.user_id
+                """
+            )
+            rows = cur.fetchall()
+        # Reduce to top chatter per session.
+        top_by_sid: dict[int, tuple[str, int]] = {}
+        for r in rows:
+            sid = int(r["sid"])
+            cur_top = top_by_sid.get(sid)
+            if cur_top is None or int(r["c"]) > cur_top[1]:
+                top_by_sid[sid] = (r["name"], int(r["c"]))
+        out: list[StreamSession] = []
+        for r in session_rows:
+            sid = int(r["sid"])
+            top = top_by_sid.get(sid)
+            out.append(
+                StreamSession(
+                    id=sid, start_ts=r["start_ts"], end_ts=r["end_ts"],
+                    message_count=int(r["msgs"]),
+                    unique_chatters=int(r["uniques"]),
+                    top_chatter=top[0] if top else None,
+                )
+            )
+        return out
+
+    # ============================ Anniversaries ===========================
+
+    def users_with_anniversary_today(self) -> list[tuple[User, str]]:
+        """Users whose first_seen anniversary lands on today's date (UTC),
+        at one of: 1y, 2y, 3y, 6mo, 3mo. Returns (user, milestone_label)."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT twitch_id, name, first_seen, last_seen, opt_out, sub_tier, sub_months, is_mod, is_vip, is_founder,
+                       date(first_seen) AS first_date,
+                       julianday('now') - julianday(first_seen) AS days_since
+                FROM users
+                WHERE opt_out = 0
+                  AND first_date IS NOT NULL
+                  AND strftime('%m-%d', first_seen) = strftime('%m-%d', 'now')
+                """
+            )
+            rows = cur.fetchall()
+        out: list[tuple[User, str]] = []
+        for r in rows:
+            try:
+                days = float(r["days_since"] or 0)
+            except (TypeError, ValueError):
+                continue
+            label: str | None = None
+            if 360 <= days < 370:
+                label = "1 year"
+            elif 720 <= days < 730:
+                label = "2 years"
+            elif 1080 <= days < 1090:
+                label = "3 years"
+            else:
+                continue
+            out.append(
+                (
+                    User(
+                        twitch_id=r["twitch_id"], name=r["name"],
+                        first_seen=r["first_seen"], last_seen=r["last_seen"],
+                        opt_out=False,
+                                            sub_tier=r["sub_tier"],
+                        sub_months=int(r["sub_months"] or 0),
+                        is_mod=bool(r["is_mod"]),
+                        is_vip=bool(r["is_vip"]),
+                        is_founder=bool(r["is_founder"]),
+                    ),
+                    label,
+                )
+            )
+        # Also: half-year and quarter-year — check today vs first_seen + 6 mo / 3 mo.
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT twitch_id, name, first_seen, last_seen, opt_out, sub_tier, sub_months, is_mod, is_vip, is_founder
+                FROM users
+                WHERE opt_out = 0
+                  AND date(first_seen, '+6 months') = date('now')
+                """
+            )
+            for r in cur.fetchall():
+                out.append(
+                    (
+                        User(
+                            twitch_id=r["twitch_id"], name=r["name"],
+                            first_seen=r["first_seen"], last_seen=r["last_seen"],
+                            opt_out=False,
+                                                    sub_tier=r["sub_tier"],
+                            sub_months=int(r["sub_months"] or 0),
+                            is_mod=bool(r["is_mod"]),
+                            is_vip=bool(r["is_vip"]),
+                            is_founder=bool(r["is_founder"]),
+                        ),
+                        "6 months",
+                    )
+                )
+            cur.execute(
+                """
+                SELECT twitch_id, name, first_seen, last_seen, opt_out, sub_tier, sub_months, is_mod, is_vip, is_founder
+                FROM users
+                WHERE opt_out = 0
+                  AND date(first_seen, '+3 months') = date('now')
+                """
+            )
+            for r in cur.fetchall():
+                out.append(
+                    (
+                        User(
+                            twitch_id=r["twitch_id"], name=r["name"],
+                            first_seen=r["first_seen"], last_seen=r["last_seen"],
+                            opt_out=False,
+                                                    sub_tier=r["sub_tier"],
+                            sub_months=int(r["sub_months"] or 0),
+                            is_mod=bool(r["is_mod"]),
+                            is_vip=bool(r["is_vip"]),
+                            is_founder=bool(r["is_founder"]),
+                        ),
+                        "3 months",
+                    )
+                )
+        return out
 
     # ============================ Stats queries (Stats tab) ================
     # All read-only aggregates; no LLM. Powers the dashboard's Stats page.
@@ -936,7 +1398,7 @@ class ChatterRepo:
         with self._cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out
+                SELECT DISTINCT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out, u.sub_tier, u.sub_months, u.is_mod, u.is_vip, u.is_founder
                 FROM users u
                 JOIN messages m ON m.user_id = u.twitch_id
                 WHERE u.opt_out = 0
@@ -951,6 +1413,9 @@ class ChatterRepo:
                     twitch_id=r["twitch_id"], name=r["name"],
                     first_seen=r["first_seen"], last_seen=r["last_seen"],
                     opt_out=False,
+                    sub_tier=r["sub_tier"], sub_months=int(r["sub_months"] or 0),
+                    is_mod=bool(r["is_mod"]), is_vip=bool(r["is_vip"]),
+                    is_founder=bool(r["is_founder"]),
                 )
                 for r in cur.fetchall()
             ]
@@ -972,7 +1437,7 @@ class ChatterRepo:
         with self._cursor() as cur:
             cur.execute(
                 f"""
-                SELECT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out,
+                SELECT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out, u.sub_tier, u.sub_months, u.is_mod, u.is_vip, u.is_founder,
                        COUNT(m.id) AS msg_count,
                        (SELECT COUNT(*) FROM notes n WHERE n.user_id = u.twitch_id) AS note_count,
                        MAX(m.ts) AS last_msg_ts
@@ -991,6 +1456,11 @@ class ChatterRepo:
                         twitch_id=r["twitch_id"], name=r["name"],
                         first_seen=r["first_seen"], last_seen=r["last_seen"],
                         opt_out=False,
+                                            sub_tier=r["sub_tier"],
+                        sub_months=int(r["sub_months"] or 0),
+                        is_mod=bool(r["is_mod"]),
+                        is_vip=bool(r["is_vip"]),
+                        is_founder=bool(r["is_founder"]),
                     ),
                     note_count=int(r["note_count"]),
                     msg_count=int(r["msg_count"]),
@@ -1020,7 +1490,7 @@ class ChatterRepo:
         with self._cursor() as cur:
             cur.execute(
                 f"""
-                SELECT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out,
+                SELECT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out, u.sub_tier, u.sub_months, u.is_mod, u.is_vip, u.is_founder,
                        COUNT(m.id) AS msg_count,
                        (SELECT COUNT(*) FROM notes n WHERE n.user_id = u.twitch_id) AS note_count,
                        MAX(m.ts) AS last_msg_ts
@@ -1040,6 +1510,11 @@ class ChatterRepo:
                         twitch_id=r["twitch_id"], name=r["name"],
                         first_seen=r["first_seen"], last_seen=r["last_seen"],
                         opt_out=False,
+                                            sub_tier=r["sub_tier"],
+                        sub_months=int(r["sub_months"] or 0),
+                        is_mod=bool(r["is_mod"]),
+                        is_vip=bool(r["is_vip"]),
+                        is_founder=bool(r["is_founder"]),
                     ),
                     note_count=int(r["note_count"]),
                     msg_count=int(r["msg_count"]),
@@ -1053,7 +1528,7 @@ class ChatterRepo:
         with self._cursor() as cur:
             cur.execute(
                 """
-                SELECT twitch_id, name, first_seen, last_seen, opt_out
+                SELECT twitch_id, name, first_seen, last_seen, opt_out, sub_tier, sub_months, is_mod, is_vip, is_founder
                 FROM users
                 WHERE opt_out = 0
                   AND first_seen >= datetime('now', '-24 hours')
@@ -1067,6 +1542,9 @@ class ChatterRepo:
                     twitch_id=r["twitch_id"], name=r["name"],
                     first_seen=r["first_seen"], last_seen=r["last_seen"],
                     opt_out=False,
+                    sub_tier=r["sub_tier"], sub_months=int(r["sub_months"] or 0),
+                    is_mod=bool(r["is_mod"]), is_vip=bool(r["is_vip"]),
+                    is_founder=bool(r["is_founder"]),
                 )
                 for r in cur.fetchall()
             ]
@@ -1122,7 +1600,7 @@ class ChatterRepo:
     def list_opt_out_users(self) -> list[User]:
         with self._cursor() as cur:
             cur.execute(
-                "SELECT twitch_id, name, first_seen, last_seen, opt_out "
+                "SELECT twitch_id, name, first_seen, last_seen, opt_out, sub_tier, sub_months, is_mod, is_vip, is_founder "
                 "FROM users WHERE opt_out = 1 ORDER BY LOWER(name)"
             )
             return [
@@ -1130,6 +1608,11 @@ class ChatterRepo:
                     twitch_id=r["twitch_id"], name=r["name"],
                     first_seen=r["first_seen"], last_seen=r["last_seen"],
                     opt_out=True,
+                                    sub_tier=r["sub_tier"],
+                    sub_months=int(r["sub_months"] or 0),
+                    is_mod=bool(r["is_mod"]),
+                    is_vip=bool(r["is_vip"]),
+                    is_founder=bool(r["is_founder"]),
                 )
                 for r in cur.fetchall()
             ]
@@ -1190,7 +1673,7 @@ class ChatterRepo:
         with self._cursor() as cur:
             cur.execute(
                 f"""
-                SELECT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out,
+                SELECT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out, u.sub_tier, u.sub_months, u.is_mod, u.is_vip, u.is_founder,
                        (SELECT COUNT(*) FROM notes n WHERE n.user_id = u.twitch_id) AS note_count,
                        (SELECT COUNT(*) FROM messages m WHERE m.user_id = u.twitch_id) AS msg_count,
                        (SELECT MAX(ts) FROM messages m WHERE m.user_id = u.twitch_id) AS last_msg_ts
@@ -1209,6 +1692,11 @@ class ChatterRepo:
                         first_seen=r["first_seen"],
                         last_seen=r["last_seen"],
                         opt_out=bool(r["opt_out"]),
+                        sub_tier=r["sub_tier"],
+                        sub_months=int(r["sub_months"] or 0),
+                        is_mod=bool(r["is_mod"]),
+                        is_vip=bool(r["is_vip"]),
+                        is_founder=bool(r["is_founder"]),
                     ),
                     note_count=int(r["note_count"]),
                     msg_count=int(r["msg_count"]),
@@ -1238,7 +1726,7 @@ class ChatterRepo:
     def get_user(self, twitch_id: str) -> User | None:
         with self._cursor() as cur:
             cur.execute(
-                "SELECT twitch_id, name, first_seen, last_seen, opt_out FROM users WHERE twitch_id = ?",
+                "SELECT twitch_id, name, first_seen, last_seen, opt_out, sub_tier, sub_months, is_mod, is_vip, is_founder FROM users WHERE twitch_id = ?",
                 (twitch_id,),
             )
             r = cur.fetchone()
@@ -1250,6 +1738,11 @@ class ChatterRepo:
                 first_seen=r["first_seen"],
                 last_seen=r["last_seen"],
                 opt_out=bool(r["opt_out"]),
+                sub_tier=r["sub_tier"],
+                sub_months=int(r["sub_months"] or 0),
+                is_mod=bool(r["is_mod"]),
+                is_vip=bool(r["is_vip"]),
+                is_founder=bool(r["is_founder"]),
             )
 
     def get_user_aliases(self, user_id: str) -> list[Alias]:
@@ -1379,6 +1872,86 @@ class ChatterRepo:
                 )
                 for r in cur.fetchall()
             ]
+
+    def get_message_context(
+        self, message_id: int, *, before: int = 3, after: int = 3
+    ) -> dict[str, Any]:
+        """Return the focal message plus N channel-wide messages on each side
+        for conversational context. Result:
+            {"focal": Message|None,
+             "before": list[Message],   # oldest first
+             "after":  list[Message]}   # oldest first
+        Cross-user — the surrounding rows show who else was talking around
+        that moment."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.id, m.user_id, u.name, m.ts, m.content,
+                       m.reply_parent_login, m.reply_parent_body
+                FROM messages m
+                JOIN users u ON u.twitch_id = m.user_id
+                WHERE m.id = ?
+                """,
+                (message_id,),
+            )
+            r = cur.fetchone()
+            focal = (
+                Message(
+                    id=int(r["id"]), user_id=r["user_id"], name=r["name"],
+                    ts=r["ts"], content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
+                )
+                if r else None
+            )
+            if not focal:
+                return {"focal": None, "before": [], "after": []}
+
+            cur.execute(
+                """
+                SELECT m.id, m.user_id, u.name, m.ts, m.content,
+                       m.reply_parent_login, m.reply_parent_body
+                FROM messages m
+                JOIN users u ON u.twitch_id = m.user_id
+                WHERE m.id < ?
+                ORDER BY m.id DESC
+                LIMIT ?
+                """,
+                (message_id, int(before)),
+            )
+            before_rows = [
+                Message(
+                    id=int(r["id"]), user_id=r["user_id"], name=r["name"],
+                    ts=r["ts"], content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
+                )
+                for r in cur.fetchall()
+            ]
+            before_rows.reverse()  # oldest first
+
+            cur.execute(
+                """
+                SELECT m.id, m.user_id, u.name, m.ts, m.content,
+                       m.reply_parent_login, m.reply_parent_body
+                FROM messages m
+                JOIN users u ON u.twitch_id = m.user_id
+                WHERE m.id > ?
+                ORDER BY m.id ASC
+                LIMIT ?
+                """,
+                (message_id, int(after)),
+            )
+            after_rows = [
+                Message(
+                    id=int(r["id"]), user_id=r["user_id"], name=r["name"],
+                    ts=r["ts"], content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
+                )
+                for r in cur.fetchall()
+            ]
+        return {"focal": focal, "before": before_rows, "after": after_rows}
 
     def count_messages(self, user_id: str, query: str = "") -> int:
         params: list[Any] = [user_id]
@@ -1955,7 +2528,7 @@ class ChatterRepo:
         with self._cursor() as cur:
             cur.execute(
                 """
-                SELECT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out
+                SELECT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out, u.sub_tier, u.sub_months, u.is_mod, u.is_vip, u.is_founder
                 FROM users u
                 WHERE LOWER(u.name) = LOWER(?)
                    OR EXISTS (
@@ -1973,6 +2546,11 @@ class ChatterRepo:
                 twitch_id=r["twitch_id"], name=r["name"],
                 first_seen=r["first_seen"], last_seen=r["last_seen"],
                 opt_out=bool(r["opt_out"]),
+                sub_tier=r["sub_tier"],
+                sub_months=int(r["sub_months"] or 0),
+                is_mod=bool(r["is_mod"]),
+                is_vip=bool(r["is_vip"]),
+                is_founder=bool(r["is_founder"]),
             )
 
     # ============================ Mutations from streamer surfaces ==========

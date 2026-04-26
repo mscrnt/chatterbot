@@ -67,7 +67,50 @@
         </h2>
         <span class="text-xs text-muted">snapshot {{ latest.ts | short_ts }}</span>
       </header>
-      <pre class="whitespace-pre-wrap text-sm sm:text-base font-sans text-primary leading-relaxed">{{ latest.summary }}</pre>
+
+      {% if latest_topics %}
+        {% set _cat_tone = {
+          'gaming':    'accent',
+          'personal':  'success',
+          'meta':      'warning',
+          'tech':      'accent',
+          'off-topic': 'neutral',
+          'other':     'neutral',
+        } %}
+        <ul class="divide-y divide-accent/20 rounded-lg border border-accent/20 overflow-hidden bg-surface/60">
+          {% for t in latest_topics %}
+            <li>
+              <button type="button"
+                      class="w-full text-left px-3 py-2 hover:bg-accent/10 transition-all duration-150 ease-out flex items-start gap-3"
+                      hx-get="/modals/topic/{{ latest.id }}/{{ t.index }}"
+                      hx-target="#modal-root"
+                      hx-swap="innerHTML"
+                      title="See drivers + what they said">
+                <i class="fa-solid fa-circle text-accent text-[6px] mt-2 shrink-0"></i>
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-baseline gap-2 flex-wrap">
+                    <span class="text-primary font-medium text-sm sm:text-base break-words">{{ t.topic }}</span>
+                    {% if t.category and t.category != 'other' %}
+                      {% with label=t.category, tone=_cat_tone.get(t.category, 'neutral') %}
+                        {% include "components/_pill.html" %}
+                      {% endwith %}
+                    {% endif %}
+                  </div>
+                  {% if t.drivers %}
+                    <p class="text-[11px] text-muted mt-0.5">
+                      <i class="fa-solid fa-users text-[9px] mr-1"></i>
+                      {{ t.drivers | join(', ') }}
+                    </p>
+                  {% endif %}
+                </div>
+                <i class="fa-solid fa-chevron-right text-muted text-xs mt-1 shrink-0"></i>
+              </button>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <pre class="whitespace-pre-wrap text-sm sm:text-base font-sans text-primary leading-relaxed">{{ latest.summary }}</pre>
+      {% endif %}
     </section>
   {% endif %}
 

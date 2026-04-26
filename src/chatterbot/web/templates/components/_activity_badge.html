@@ -1,0 +1,25 @@
+{# Activity classification pill. Pure render-time signal — no schema.
+   Pass `user` (User) and optional `msg_count` int for sharper labels.
+   Categorizes:
+     first-timer  - first_seen within last 24h
+     regular      - msg_count >= 50
+     frequent     - msg_count >= 10
+     quiet        - msg_count < 10 (and not first-timer)
+   #}
+{% set _msg = msg_count if msg_count is defined and msg_count is not none else None %}
+{% set _label = None %}
+{% set _tone = 'neutral' %}
+{% set _icon = 'fa-user' %}
+{% set _floor = day_floor_iso() %}
+{% if user and user.first_seen and user.first_seen >= _floor %}
+  {% set _label = 'first-timer' %}{% set _tone = 'success' %}{% set _icon = 'fa-user-plus' %}
+{% elif _msg is not none and _msg >= 50 %}
+  {% set _label = 'regular' %}{% set _tone = 'accent' %}{% set _icon = 'fa-crown' %}
+{% elif _msg is not none and _msg >= 10 %}
+  {% set _label = 'frequent' %}{% set _tone = 'accent' %}{% set _icon = 'fa-comment' %}
+{% elif _msg is not none and _msg > 0 %}
+  {% set _label = 'quiet' %}{% set _tone = 'neutral' %}{% set _icon = 'fa-volume-low' %}
+{% endif %}
+{% if _label %}
+  {% with label=_label, tone=_tone, icon=_icon %}{% include "components/_pill.html" %}{% endwith %}
+{% endif %}

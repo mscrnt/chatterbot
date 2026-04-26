@@ -174,6 +174,25 @@
           {{ _nt }} new
         </a>
       {% endif %}
+      {% set _tw = twitch_status() %}
+      {% if _tw.is_live %}
+        {% set _thumb = twitch_thumbnail(_tw.thumbnail_url_template, 80, 45) %}
+        <span class="hidden md:inline-flex items-center gap-2 px-2 py-1 rounded-full border border-accent/30 bg-accent/10 text-accent text-xs"
+              title="{{ _tw.title or 'live' }}{% if _tw.game_name %} · {{ _tw.game_name }}{% endif %}">
+          {% if _thumb %}<img src="{{ _thumb }}" alt="" class="w-7 h-4 rounded object-cover">{% endif %}
+          <i class="fa-solid fa-eye text-[10px]"></i>
+          {{ _tw.viewer_count }}
+        </span>
+      {% endif %}
+      {% set _fr = fired_reminders_count() %}
+      {% if _fr > 0 %}
+        <a href="/reminders"
+           class="hidden sm:inline-flex items-center gap-1 px-2 py-1 rounded-full border border-accent/30 bg-accent/10 text-accent text-xs hover:bg-accent/20 transition-all duration-150 ease-out"
+           title="{{ _fr }} reminder{{ '' if _fr == 1 else 's' }} fired — chatter spoke">
+          <i class="fa-solid fa-bell text-[10px] animate-pulse"></i>
+          {{ _fr }}
+        </a>
+      {% endif %}
       <button type="button"
               @click="toggleTheme()"
               class="tap inline-flex items-center justify-center px-3 rounded text-muted hover:text-primary hover:bg-surface-raised transition-all duration-150 ease-out"
@@ -206,7 +225,7 @@
   </footer>
 
   {# ---------------- live-chat widget ---------------- #}
-  {% if current_path != '/live' %}
+  {% if current_path != '/live' and live_widget_enabled() %}
   <aside id="live-widget"
          class="fixed bottom-2 right-2 z-30 flex flex-col w-[min(360px,calc(100vw-1rem))]
                 max-h-[55vh] sm:max-h-[60vh] bg-surface border border-subtle rounded-lg shadow-lg">

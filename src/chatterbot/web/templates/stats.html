@@ -125,6 +125,42 @@
   </section>
   {% endif %}
 
+  {# Stream sessions — bucketed from gaps in the message log. #}
+  {% if sessions %}
+  <section class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 shadow-sm">
+    <h3 class="text-sm font-semibold mb-2 inline-flex items-center gap-2">
+      <i class="fa-solid fa-video text-accent"></i> Recent stream sessions
+      <span class="text-[11px] text-muted ml-auto">
+        bucketed by 30-min silence · last {{ sessions|length }}
+      </span>
+    </h3>
+    <div class="overflow-hidden rounded-lg border border-subtle">
+      <table class="w-full text-sm">
+        <thead class="bg-surface-raised text-muted text-xs uppercase">
+          <tr>
+            <th class="text-left px-3 py-2">Started</th>
+            <th class="text-left px-3 py-2">Ended</th>
+            <th class="text-right px-3 py-2">Msgs</th>
+            <th class="text-right px-3 py-2">Chatters</th>
+            <th class="text-left px-3 py-2">Top chatter</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-subtle">
+          {% for s in sessions %}
+            <tr class="even:bg-surface-raised/40 hover:bg-surface-raised">
+              <td class="px-3 py-2 text-muted">{{ s.start_ts | short_ts }}</td>
+              <td class="px-3 py-2 text-muted">{{ s.end_ts | short_ts }}</td>
+              <td class="px-3 py-2 text-right text-primary">{{ s.message_count }}</td>
+              <td class="px-3 py-2 text-right text-primary">{{ s.unique_chatters }}</td>
+              <td class="px-3 py-2 text-accent">{{ s.top_chatter or '—' }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endif %}
+
   {# Longest message showcase #}
   {% if longest %}
   <section class="rounded-xl border border-subtle bg-surface p-3 sm:p-4">

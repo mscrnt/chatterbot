@@ -1,0 +1,66 @@
+{% set modal_title = 'Message context · ' ~ focal.name %}
+{% set modal_icon = 'fa-comment' %}
+{% set modal_tone = 'accent' %}
+{% set modal_size = 'lg' %}
+{% extends "components/_modal.html" %}
+{% block modal_body %}
+<div class="space-y-1 text-sm">
+  <p class="text-[11px] text-muted px-1 pb-2">
+    showing {{ before|length }} before · the message · {{ after|length }} after
+    {% if (before|length) < 3 or (after|length) < 3 %}
+      <span class="ml-1 italic">(channel boundary)</span>
+    {% endif %}
+  </p>
+
+  <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
+    {% for m in before %}
+      <li class="px-3 py-2 hover:bg-surface-raised/60 transition-all duration-150 ease-out">
+        {% if m.reply_parent_body %}
+          <div class="text-[11px] text-muted mb-1 inline-flex items-center gap-1">
+            <i class="fa-solid fa-reply text-[10px]"></i>
+            replying to <span class="text-accent">{{ m.reply_parent_login or '?' }}</span>:
+            <span class="italic truncate max-w-[28rem]">"{{ m.reply_parent_body }}"</span>
+          </div>
+        {% endif %}
+        <div class="flex items-baseline gap-2">
+          <span class="text-[11px] text-muted whitespace-nowrap w-32 shrink-0">{{ m.ts | short_ts }}</span>
+          <a href="/users/{{ m.user_id }}" class="text-accent hover:underline font-medium shrink-0">{{ m.name }}</a>
+          <span class="text-primary break-words">{{ m.content }}</span>
+        </div>
+      </li>
+    {% endfor %}
+
+    <li class="px-3 py-3 bg-accent/10 border-l-4 border-accent">
+      {% if focal.reply_parent_body %}
+        <div class="text-[11px] text-muted mb-1 inline-flex items-center gap-1">
+          <i class="fa-solid fa-reply text-[10px]"></i>
+          replying to <span class="text-accent">{{ focal.reply_parent_login or '?' }}</span>:
+          <span class="italic truncate max-w-[28rem]">"{{ focal.reply_parent_body }}"</span>
+        </div>
+      {% endif %}
+      <div class="flex items-baseline gap-2">
+        <span class="text-[11px] text-muted whitespace-nowrap w-32 shrink-0">{{ focal.ts | short_ts }}</span>
+        <a href="/users/{{ focal.user_id }}" class="text-accent hover:underline font-semibold shrink-0">{{ focal.name }}</a>
+        <span class="text-primary font-medium break-words">{{ focal.content }}</span>
+      </div>
+    </li>
+
+    {% for m in after %}
+      <li class="px-3 py-2 hover:bg-surface-raised/60 transition-all duration-150 ease-out">
+        {% if m.reply_parent_body %}
+          <div class="text-[11px] text-muted mb-1 inline-flex items-center gap-1">
+            <i class="fa-solid fa-reply text-[10px]"></i>
+            replying to <span class="text-accent">{{ m.reply_parent_login or '?' }}</span>:
+            <span class="italic truncate max-w-[28rem]">"{{ m.reply_parent_body }}"</span>
+          </div>
+        {% endif %}
+        <div class="flex items-baseline gap-2">
+          <span class="text-[11px] text-muted whitespace-nowrap w-32 shrink-0">{{ m.ts | short_ts }}</span>
+          <a href="/users/{{ m.user_id }}" class="text-accent hover:underline font-medium shrink-0">{{ m.name }}</a>
+          <span class="text-primary break-words">{{ m.content }}</span>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endblock %}

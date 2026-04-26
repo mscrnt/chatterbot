@@ -36,6 +36,7 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "obs_host",
     "obs_port",
     "obs_password",
+    "live_widget_enabled",
 )
 
 # Subset that should be rendered as password inputs. Blank submissions for
@@ -112,6 +113,9 @@ class Settings(BaseSettings):
     mod_review_interval_minutes: int = 5
     mod_review_max_messages: int = 100
 
+    # Dashboard UI toggles
+    live_widget_enabled: bool = True
+
     # Run mode (used by main.py / docker entrypoint)
     run_mode: str = "bot"
 
@@ -125,7 +129,10 @@ class Settings(BaseSettings):
 
 
 def _coerce(key: str, value: str) -> Any:
-    if key in ("streamelements_enabled", "mod_mode_enabled", "obs_enabled"):
+    if key in (
+        "streamelements_enabled", "mod_mode_enabled",
+        "obs_enabled", "live_widget_enabled",
+    ):
         return value.strip().lower() in ("true", "1", "yes", "on")
     if key == "obs_port":
         try:

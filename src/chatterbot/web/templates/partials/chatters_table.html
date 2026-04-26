@@ -21,11 +21,16 @@
             <div class="min-w-0 flex-1">
               <div class="flex items-center justify-between gap-2">
                 <span class="font-medium truncate text-primary">{{ r.user.name }}</span>
-                {% if r.user.opt_out %}
-                  {% with label='opt-out', tone='warning', icon='fa-eye-slash' %}
-                    {% include "components/_pill.html" %}
+                <span class="inline-flex items-center gap-1 shrink-0">
+                  {% with user=r.user, msg_count=r.msg_count %}
+                    {% include "components/_activity_badge.html" %}
                   {% endwith %}
-                {% endif %}
+                  {% if r.user.opt_out %}
+                    {% with label='opt-out', tone='warning', icon='fa-eye-slash' %}
+                      {% include "components/_pill.html" %}
+                    {% endwith %}
+                  {% endif %}
+                </span>
               </div>
               <div class="text-xs text-muted mt-1 flex flex-wrap gap-x-3">
                 <span><i class="fa-regular fa-clock mr-1"></i>{{ r.user.last_seen | short_ts }}</span>
@@ -65,11 +70,16 @@
             <td class="px-3 py-2 text-right text-primary">{{ r.msg_count }}</td>
             <td class="px-3 py-2 text-right text-primary">{{ r.note_count }}</td>
             <td class="px-3 py-2">
-              {% if r.user.opt_out %}
-                {% with label='opt-out', tone='warning', icon='fa-eye-slash' %}
-                  {% include "components/_pill.html" %}
+              <span class="inline-flex items-center gap-1 flex-wrap">
+                {% with user=r.user, msg_count=r.msg_count %}
+                  {% include "components/_activity_badge.html" %}
                 {% endwith %}
-              {% endif %}
+                {% if r.user.opt_out %}
+                  {% with label='opt-out', tone='warning', icon='fa-eye-slash' %}
+                    {% include "components/_pill.html" %}
+                  {% endwith %}
+                {% endif %}
+              </span>
             </td>
           </tr>
           {% endfor %}

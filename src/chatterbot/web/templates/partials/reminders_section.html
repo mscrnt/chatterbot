@@ -1,0 +1,72 @@
+{# Reminders attached to a chatter. Pending = waiting for them to next speak.
+   Fired = they spoke; the streamer should look at the reminder and dismiss it.
+   Dropped into the user page after notes; HTMX-target #reminders-section. #}
+<div id="reminders-section" class="space-y-2">
+  <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+    <i class="fa-solid fa-bell text-accent"></i> Reminders
+    <span class="text-[11px] text-muted">fires next time they speak</span>
+  </h2>
+
+  <form hx-post="/users/{{ user.twitch_id }}/reminders"
+        hx-target="#reminders-section"
+        hx-swap="outerHTML"
+        hx-on::after-request="this.reset()"
+        class="flex flex-col sm:flex-row gap-2">
+    <input type="text" name="text" required maxlength="500"
+           placeholder="e.g. 'ask about their cat surgery' or 'thank for the raid'"
+           class="flex-1 tap bg-surface border border-subtle rounded px-3 text-base text-primary placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out">
+    <button type="submit"
+            class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-accent hover:bg-accent-600 text-white font-medium text-sm transition-all duration-150 ease-out">
+      <i class="fa-solid fa-plus"></i> add
+    </button>
+  </form>
+
+  {% if not reminders %}
+    <p class="text-muted italic text-sm">No reminders set for {{ user.name if user.name is defined else 'this viewer' }}.</p>
+  {% else %}
+    <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
+      {% for r in reminders %}
+        <li class="px-3 py-2 text-sm flex items-start gap-3" id="reminder-{{ r.id }}">
+          <span class="mt-0.5 shrink-0">
+            {% if r.dismissed %}
+              <i class="fa-solid fa-check text-muted" title="dismissed"></i>
+            {% elif r.fired_at %}
+              <i class="fa-solid fa-bell text-accent animate-pulse" title="fired — they spoke!"></i>
+            {% else %}
+              <i class="fa-regular fa-bell text-muted" title="pending"></i>
+            {% endif %}
+          </span>
+          <div class="min-w-0 flex-1">
+            <p class="text-primary break-words {% if r.dismissed %}line-through text-muted{% endif %}">{{ r.text }}</p>
+            <p class="text-[10px] text-muted mt-0.5">
+              added {{ r.created_at | short_ts }}
+              {% if r.fired_at %}· fired {{ r.fired_at | short_ts }}{% endif %}
+              {% if r.dismissed %}· dismissed{% endif %}
+            </p>
+          </div>
+          <div class="flex items-center gap-1 shrink-0">
+            {% if r.fired_at and not r.dismissed %}
+              <button class="tap inline-flex items-center justify-center px-2 rounded text-success hover:bg-surface-raised text-xs"
+                      hx-post="/reminders/{{ r.id }}/dismiss"
+                      hx-target="#reminder-{{ r.id }}"
+                      hx-swap="outerHTML swap:200ms"
+                      hx-on::after-request="this.closest('li').remove()"
+                      title="dismiss">
+                <i class="fa-solid fa-check"></i>
+              </button>
+            {% endif %}
+            <button class="tap inline-flex items-center justify-center px-2 rounded text-muted hover:text-danger hover:bg-surface-raised text-xs"
+                    hx-delete="/reminders/{{ r.id }}"
+                    hx-target="#reminder-{{ r.id }}"
+                    hx-swap="outerHTML swap:200ms"
+                    hx-on::after-request="this.closest('li').remove()"
+                    hx-confirm="Delete this reminder?"
+                    title="delete">
+              <i class="fa-solid fa-trash"></i>
+            </button>
+          </div>
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</div>

@@ -57,6 +57,7 @@ from ..insights import InsightsService
 from ..llm.ollama_client import OllamaClient
 from ..obs import OBSStatusService
 from ..repo import ChatterRepo
+from ..twitch import TwitchService
 from .auth import make_auth_dependency
 from .rag import answer_for_user
 
@@ -102,6 +103,14 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
 
     # Expose runtime settings flags to every template (nav uses these).
     TEMPLATES.env.globals["mod_mode_enabled"] = bool(settings.mod_mode_enabled)
+    # Re-read on each request so toggling in /settings takes effect after the
+    # next page navigation without a process restart.
+    def _live_widget_enabled() -> bool:
+        try:
+            return bool(get_settings().live_widget_enabled)
+        except Exception:
+            return True
+    TEMPLATES.env.globals["live_widget_enabled"] = _live_widget_enabled
 
     # Newcomers nav pill — count of first-timers in the last 24h NEWER than
     # the streamer's last acknowledgment. Visiting /insights acks. Pill goes
@@ -119,11 +128,35 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         return obs_status.status
     TEMPLATES.env.globals["obs_status"] = _obs_status
 
+    # Twitch live-status snapshot — viewer count + thumbnail for the nav.
+    def _twitch_status():
+        return twitch_status.status
+    TEMPLATES.env.globals["twitch_status"] = _twitch_status
+
+    # Helper to materialize the Twitch thumbnail URL with width/height.
+    TEMPLATES.env.globals["twitch_thumbnail"] = TwitchService.thumbnail_url
+
+    # Fired-but-not-dismissed reminders count for the nav pill.
+    def _fired_reminders_count() -> int:
+        try:
+            return repo.count_fired_reminders()
+        except Exception:
+            return 0
+    TEMPLATES.env.globals["fired_reminders_count"] = _fired_reminders_count
+
+    # Cutoff used by the activity-badge component to label first-timers
+    # (first_seen >= now - 24h). Recomputed per render so it stays accurate.
+    from datetime import datetime, timedelta, timezone
+    def _day_floor_iso() -> str:
+        return (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(timespec="seconds")
+    TEMPLATES.env.globals["day_floor_iso"] = _day_floor_iso
+
     auth_dep = make_auth_dependency(settings)
     deps = [Depends(auth_dep)] if settings.dashboard_basic_auth_enabled else []
 
     insights = InsightsService(repo, llm, settings)
     obs_status = OBSStatusService(settings)
+    twitch_status = TwitchService(settings)
     _bg_tasks: set[asyncio.Task] = set()
 
     async def _lifespan(app):
@@ -135,6 +168,11 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         # Optional OBS poller; no-op when OBS_ENABLED=false.
         _bg_tasks.add(
             asyncio.create_task(obs_status.poll_loop(), name="obs_poll")
+        )
+        # Twitch Helix poller (viewer count + thumbnail). Auto-disables if
+        # token validate fails or creds are missing.
+        _bg_tasks.add(
+            asyncio.create_task(twitch_status.poll_loop(), name="twitch_poll")
         )
         try:
             yield
@@ -216,6 +254,8 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             if settings.mod_mode_enabled
             else []
         )
+        reminders = repo.get_reminders_for_user(twitch_id)
+        msg_stats = repo.user_message_stats(twitch_id)
         return TEMPLATES.TemplateResponse(
             request,
             "user.html",
@@ -230,6 +270,8 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "msg_pages": max(1, (msg_total + MESSAGE_PAGE_SIZE - 1) // MESSAGE_PAGE_SIZE),
                 "prior_aliases": prior_aliases,
                 "incidents": incidents,
+                "reminders": reminders,
+                "msg_stats": msg_stats,
                 "mod_mode_enabled": settings.mod_mode_enabled,
             },
         )
@@ -384,41 +426,104 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     # Plaintext credentials in SQLite. Fine for a single-user local tool bound
     # to 127.0.0.1; flagged to the user on the page.
 
+    # Settings groups — drives the section layout on /settings. Each entry is
+    # (group_id, title, icon, blurb, [keys]). Keys not listed here fall into
+    # the "Other" bucket so nothing silently disappears.
+    _SETTINGS_GROUPS: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
+        (
+            "twitch", "Twitch", "fa-tv",
+            "Bot identity + chat connection. Restart bot after changes.",
+            (
+                "twitch_bot_nick", "twitch_oauth_token", "twitch_channel",
+                "twitch_client_id", "twitch_client_secret",
+            ),
+        ),
+        (
+            "obs", "OBS", "fa-circle-dot",
+            "Read-only WebSocket peek at live + scene state. Disabled by default.",
+            ("obs_enabled", "obs_host", "obs_port", "obs_password"),
+        ),
+        (
+            "streamelements", "StreamElements", "fa-coins",
+            "Pulls tip / sub / cheer / raid / follow events into the dashboard.",
+            (
+                "streamelements_enabled", "streamelements_jwt",
+                "streamelements_channel_id",
+            ),
+        ),
+        (
+            "moderation", "Moderation", "fa-shield-halved",
+            "Opt-in advisory classifier. The bot never takes chat action.",
+            ("mod_mode_enabled",),
+        ),
+        (
+            "dashboard", "Dashboard UI", "fa-sliders",
+            "Display preferences for this dashboard. No bot restart needed.",
+            ("live_widget_enabled",),
+        ),
+    )
+
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_page(request: Request, saved: int = Query(0)):
         live, db_sources = get_settings_with_sources()
-        rows = []
-        for key in EDITABLE_SETTING_KEYS:
+
+        def _row(key: str) -> dict:
             value = getattr(live, key)
             is_secret = key in SECRET_SETTING_KEYS
             is_bool = isinstance(value, bool)
-            rows.append(
-                {
-                    "key": key,
-                    "label": key.replace("_", " "),
-                    "value": value,
-                    "is_secret": is_secret,
-                    "is_bool": is_bool,
-                    "is_set": bool(value) if not is_bool else True,
-                    "source": "db" if key in db_sources else "env",
-                }
-            )
+            return {
+                "key": key,
+                "label": key.replace("_", " "),
+                "value": value,
+                "is_secret": is_secret,
+                "is_bool": is_bool,
+                "is_set": bool(value) if not is_bool else True,
+                "source": "db" if key in db_sources else "env",
+            }
+
+        grouped: list[dict] = []
+        seen: set[str] = set()
+        for gid, title, icon, blurb, keys in _SETTINGS_GROUPS:
+            grouped.append({
+                "id": gid,
+                "title": title,
+                "icon": icon,
+                "blurb": blurb,
+                "rows": [_row(k) for k in keys if k in EDITABLE_SETTING_KEYS],
+            })
+            seen.update(keys)
+        leftover = [k for k in EDITABLE_SETTING_KEYS if k not in seen]
+        if leftover:
+            grouped.append({
+                "id": "other", "title": "Other", "icon": "fa-ellipsis",
+                "blurb": "", "rows": [_row(k) for k in leftover],
+            })
+
         from ..diagnose import make_github_issue_url
         return TEMPLATES.TemplateResponse(
             request,
             "settings.html",
             {
-                "rows": rows,
+                "groups": grouped,
                 "saved": bool(saved),
                 "github_issue_url": make_github_issue_url(),
             },
         )
 
+    _BOOL_SETTING_KEYS: frozenset[str] = frozenset(
+        {
+            "streamelements_enabled",
+            "mod_mode_enabled",
+            "obs_enabled",
+            "live_widget_enabled",
+        }
+    )
+
     @app.post("/settings")
     async def settings_save(request: Request):
         form = await request.form()
         for key in EDITABLE_SETTING_KEYS:
-            if key == "streamelements_enabled":
+            if key in _BOOL_SETTING_KEYS:
                 checked = form.get(key) is not None
                 repo.set_app_setting(key, "true" if checked else "false")
                 continue
@@ -433,7 +538,9 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 repo.delete_app_setting(key)
             else:
                 repo.set_app_setting(key, submitted.strip())
-        return RedirectResponse(url="/settings?saved=1", status_code=303)
+        tab = (form.get("_tab") or "").strip()
+        url = f"/settings?saved=1&tab={tab}" if tab else "/settings?saved=1"
+        return RedirectResponse(url=url, status_code=303)
 
     # ---------------- moderation (opt-in via MOD_MODE_ENABLED) ----------------
 
@@ -477,6 +584,43 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "incident not found")
         return TEMPLATES.TemplateResponse(
             request, "partials/incident_card.html", {"row": row}
+        )
+
+    # ---------------- reminders ----------------
+
+    @app.post("/users/{twitch_id}/reminders", response_class=HTMLResponse)
+    async def add_user_reminder(
+        request: Request,
+        twitch_id: str,
+        text: Annotated[str, Form()],
+    ):
+        text = text.strip()
+        if text:
+            user = repo.get_user(twitch_id)
+            if not user:
+                raise HTTPException(404, "user not found")
+            repo.add_reminder(twitch_id, text[:500])
+        reminders = repo.get_reminders_for_user(twitch_id)
+        return TEMPLATES.TemplateResponse(
+            request, "partials/reminders_section.html",
+            {"reminders": reminders, "user": {"twitch_id": twitch_id}},
+        )
+
+    @app.post("/reminders/{reminder_id}/dismiss", response_class=HTMLResponse)
+    async def dismiss_reminder_route(request: Request, reminder_id: int):
+        repo.dismiss_reminder(reminder_id)
+        return Response(status_code=200)
+
+    @app.delete("/reminders/{reminder_id}")
+    async def delete_reminder_route(reminder_id: int):
+        repo.delete_reminder(reminder_id)
+        return Response(status_code=200)
+
+    @app.get("/reminders", response_class=HTMLResponse)
+    async def reminders_page(request: Request):
+        fired = repo.list_fired_reminders()
+        return TEMPLATES.TemplateResponse(
+            request, "reminders.html", {"fired": fired},
         )
 
     # ---------------- bot restart ----------------
@@ -625,6 +769,21 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             request,
             "modals/_event_detail.html",
             {"event": event, "raw_pretty": raw_pretty},
+        )
+
+    @app.get("/modals/message/{message_id}", response_class=HTMLResponse)
+    async def modal_message(request: Request, message_id: int):
+        ctx = repo.get_message_context(message_id, before=3, after=3)
+        if not ctx["focal"]:
+            raise HTTPException(404, "message not found")
+        return TEMPLATES.TemplateResponse(
+            request,
+            "modals/_message_context.html",
+            {
+                "focal": ctx["focal"],
+                "before": ctx["before"],
+                "after": ctx["after"],
+            },
         )
 
     @app.get("/modals/settings", response_class=HTMLResponse)
@@ -795,6 +954,12 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             logger.exception("stats: word-cloud query failed")
             top_words = []
 
+        try:
+            sessions = repo.stream_sessions(gap_minutes=30, limit=12)
+        except Exception:
+            logger.exception("stats: session-bucket query failed")
+            sessions = []
+
         return TEMPLATES.TemplateResponse(
             request,
             "stats.html",
@@ -812,6 +977,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "facts": random_facts,
                 "longest": longest,
                 "word_cloud": [[w, c] for w, c in top_words],
+                "sessions": sessions,
             },
         )
 
@@ -856,18 +1022,30 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             active_since=modifier, lapsed_for="-7 days", limit=10
         )
         newcomers = repo.list_first_timers_today(limit=20)
+        try:
+            anniversaries = repo.users_with_anniversary_today()
+        except Exception:
+            logger.exception("insights: anniversaries lookup failed")
+            anniversaries = []
         age = (
             int(_t.time() - cache.refreshed_at)
             if cache.refreshed_at is not None
             else None
         )
+        # Drop "Skip:" rows from talking points — the LLM emits them when it
+        # has nothing useful to say about a chatter; they're not for display.
+        tps = [
+            tp for tp in cache.talking_points
+            if not (tp.point or "").lstrip().lower().startswith("skip:")
+        ]
         ctx = {
-            "talking_points": cache.talking_points,
+            "talking_points": tps,
             "talking_points_age_seconds": age,
             "talking_points_error": cache.error,
             "regulars": regulars,
             "lapsed": lapsed,
             "newcomers": newcomers,
+            "anniversaries": anniversaries,
             "window": window,
             "window_label": label,
             "window_options": _INSIGHT_WINDOWS,
@@ -884,7 +1062,10 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         partial: int = Query(0),
     ):
         messages = repo.recent_global_messages(limit=limit)
-        ctx = {"messages": messages, "limit": limit}
+        signals = repo.arrival_signals_for_users(
+            {m.user_id for m in messages}
+        )
+        ctx = {"messages": messages, "limit": limit, "arrival_signals": signals}
         tpl = "partials/live_rows.html" if partial else "live.html"
         return TEMPLATES.TemplateResponse(request, tpl, ctx)
 
@@ -917,6 +1098,25 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         snapshots = repo.list_topic_snapshots(limit=10)
         latest = snapshots[0] if snapshots else None
 
+        # Parse the structured topics on the latest snapshot so each bullet
+        # becomes a clickable row that opens the per-topic detail modal.
+        latest_topics: list[dict] = []
+        if latest and latest.topics_json:
+            try:
+                from ..llm.schemas import TopicsResponse
+                parsed = TopicsResponse.model_validate_json(latest.topics_json)
+                latest_topics = [
+                    {
+                        "index": i,
+                        "topic": t.topic,
+                        "drivers": t.drivers,
+                        "category": t.category,
+                    }
+                    for i, t in enumerate(parsed.topics)
+                ]
+            except Exception:
+                logger.exception("topics: failed to parse latest topics_json")
+
         # Legacy text-only snapshots (no topics_json => never threaded).
         # Tucked at the bottom so the new view dominates.
         legacy = [s for s in snapshots if not s.topics_json][:5]
@@ -928,6 +1128,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "status": status,
             "q": q,
             "latest": latest,
+            "latest_topics": latest_topics,
             "legacy": legacy,
             "settings": settings,
             "total": len(threads),

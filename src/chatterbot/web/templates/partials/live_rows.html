@@ -2,15 +2,28 @@
   <p class="text-muted italic px-1 py-2 text-xs">No messages yet.</p>
 {% else %}
   {% for m in messages %}
-    <div class="leading-snug py-1 border-b border-subtle/60 last:border-0 flex items-start gap-2">
+    {% set _signal = (arrival_signals or {}).get(m.user_id) %}
+    <a href="/users/{{ m.user_id }}?focus={{ m.id }}"
+       class="leading-snug py-1 border-b border-subtle/60 last:border-0 flex items-start gap-2 hover:bg-surface-raised
+              {% if _signal == 'first_timer' %}bg-success/5{% elif _signal == 'returning' %}bg-accent/5{% endif %}"
+       title="Open {{ m.name }} with this message in context">
       {% with name=m.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
       <div class="min-w-0 flex-1">
-        <div class="flex items-baseline gap-1">
-          <a href="/users/{{ m.user_id }}" class="text-accent hover:underline font-medium text-sm">{{ m.name }}</a>
+        <div class="flex items-baseline gap-1 flex-wrap">
+          <span class="text-accent font-medium text-sm">{{ m.name }}</span>
+          {% if _signal == 'first_timer' %}
+            <span class="inline-flex items-center gap-1 px-1.5 text-[9px] uppercase tracking-wide rounded-full bg-success/15 text-success border border-success/30">
+              <i class="fa-solid fa-user-plus text-[8px]"></i>new
+            </span>
+          {% elif _signal == 'returning' %}
+            <span class="inline-flex items-center gap-1 px-1.5 text-[9px] uppercase tracking-wide rounded-full bg-accent/15 text-accent border border-accent/30">
+              <i class="fa-solid fa-arrow-rotate-right text-[8px]"></i>back
+            </span>
+          {% endif %}
           <span class="text-[10px] text-muted whitespace-nowrap">{{ m.ts | short_ts }}</span>
         </div>
         <div class="text-primary break-words text-sm">{{ m.content }}</div>
       </div>
-    </div>
+    </a>
   {% endfor %}
 {% endif %}

@@ -63,6 +63,33 @@
     {% endif %}
   </section>
 
+  {# ---------------- Anniversaries today ---------------- #}
+  {% if anniversaries %}
+  <section class="space-y-2">
+    <header>
+      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+        <i class="fa-solid fa-cake-candles text-accent"></i> Anniversaries today
+        <span class="text-[11px] text-muted">({{ anniversaries | length }})</span>
+      </h2>
+    </header>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+      {% for u, milestone in anniversaries %}
+        <a href="/users/{{ u.twitch_id }}"
+           class="flex items-center gap-3 rounded-xl border border-accent/40 bg-accent/5 p-3 hover:bg-accent/10 transition-all duration-150 ease-out">
+          {% with name=u.name, size='md' %}{% include "components/_avatar.html" %}{% endwith %}
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-2">
+              <span class="text-accent font-medium truncate">{{ u.name }}</span>
+              {% with label=milestone, tone='accent', icon='fa-star' %}{% include "components/_pill.html" %}{% endwith %}
+            </div>
+            <p class="text-[11px] text-muted">first seen {{ u.first_seen | short_ts }}</p>
+          </div>
+        </a>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
   {# ---------------- Newcomers today ---------------- #}
   <section class="space-y-2">
     <header>

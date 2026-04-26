@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Reminders · chatterbot{% endblock %}
+{% block content %}
+<div class="space-y-5">
+  <header class="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-2">
+    <h1 class="text-xl sm:text-2xl font-semibold inline-flex items-center gap-2 text-primary">
+      <i class="fa-solid fa-bell text-accent"></i> Fired reminders
+    </h1>
+    <span class="text-xs text-muted">
+      reminders that fired (the chatter spoke) and you haven't dismissed yet
+    </span>
+  </header>
+
+  {% if not fired %}
+    {% with icon='fa-bell-slash',
+            heading='Inbox zero',
+            body='Nothing waiting. Add a reminder from any chatter\'s page — it\'ll fire here the next time they speak.' %}
+      {% include "components/_empty_state.html" %}
+    {% endwith %}
+  {% else %}
+    <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
+      {% for r in fired %}
+        <li class="px-3 py-3 flex items-start gap-3 hover:bg-surface-raised transition-all duration-150 ease-out"
+            id="reminder-{{ r.id }}">
+          {% with name=r.user_name or '?', size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+          <div class="min-w-0 flex-1">
+            <div class="flex items-baseline gap-2 flex-wrap">
+              <a href="/users/{{ r.user_id }}" class="text-accent hover:underline font-medium">
+                {{ r.user_name or r.user_id }}
+              </a>
+              <span class="text-[10px] text-muted">fired {{ r.fired_at | short_ts }}</span>
+              <span class="text-[10px] text-muted">· added {{ r.created_at | short_ts }}</span>
+            </div>
+            <p class="text-primary text-sm break-words mt-1">{{ r.text }}</p>
+          </div>
+          <div class="flex items-center gap-1 shrink-0">
+            <button class="tap inline-flex items-center justify-center px-3 rounded bg-success/15 hover:bg-success/25 text-success text-xs font-medium"
+                    hx-post="/reminders/{{ r.id }}/dismiss"
+                    hx-target="#reminder-{{ r.id }}"
+                    hx-swap="outerHTML swap:200ms"
+                    hx-on::after-request="this.closest('li').remove()"
+                    title="dismiss">
+              <i class="fa-solid fa-check mr-1"></i> done
+            </button>
+            <button class="tap inline-flex items-center justify-center px-2 rounded text-muted hover:text-danger hover:bg-surface-raised text-xs"
+                    hx-delete="/reminders/{{ r.id }}"
+                    hx-target="#reminder-{{ r.id }}"
+                    hx-swap="outerHTML swap:200ms"
+                    hx-on::after-request="this.closest('li').remove()"
+                    hx-confirm="Delete this reminder?"
+                    title="delete">
+              <i class="fa-solid fa-trash"></i>
+            </button>
+          </div>
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</div>
+{% endblock %}
