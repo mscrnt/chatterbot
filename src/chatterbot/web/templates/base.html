@@ -146,6 +146,14 @@
         {% set is_chatters = current_path == "/" or current_path.startswith("/users") %}
         {% include "components/_nav_link.html" with context %}
       </div>
+      {# Settings — icon-only, right-aligned in the utility cluster. #}
+      <a href="/settings"
+         aria-label="settings"
+         title="Settings"
+         class="tap inline-flex items-center justify-center px-3 rounded transition-all duration-150 ease-out
+                {% if current_path == '/settings' %}bg-surface-raised text-primary{% else %}text-muted hover:text-primary hover:bg-surface-raised{% endif %}">
+        <i class="fa-solid fa-sliders"></i>
+      </a>
       {% set _obs = obs_status() %}
       {% if _obs.streaming or _obs.recording %}
         {% set _tags = [] %}

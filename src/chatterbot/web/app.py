@@ -709,6 +709,104 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    # ---------------- stats ----------------
+
+    @app.get("/stats", response_class=HTMLResponse)
+    async def stats_page(request: Request):
+        import random as _random
+
+        totals = repo.stats_totals()
+        ev = repo.stats_event_totals()
+        per_day = repo.stats_messages_per_day(days=30)
+        per_hour = repo.stats_messages_per_hour()
+        top_chatters = repo.stats_top_chatters_lifetime(limit=10)
+        top_supporters = repo.stats_top_supporters(limit=5)
+        new_per_week = repo.stats_new_chatters_per_week(weeks=12)
+
+        # "Did you know" pool — pick 3 at random per page load.
+        avg_len = repo.stats_avg_message_length()
+        longest = repo.stats_longest_message()
+        chatty_hour = repo.stats_most_chatty_hour()
+        busiest_day = repo.stats_busiest_day()
+        oldest = repo.stats_oldest_chatter()
+
+        facts: list[str] = []
+        if totals["chatters"]:
+            facts.append(
+                f"Your chat has logged {totals['messages']:,} messages from "
+                f"{totals['chatters']:,} unique chatters."
+            )
+        if top_chatters:
+            n, c = top_chatters[0]
+            facts.append(
+                f"Most prolific chatter: <b>{n}</b> with {c:,} messages — they're carrying."
+            )
+        if longest:
+            ln_name, _, ln_len = longest
+            facts.append(
+                f"Longest message ever was {ln_len:,} characters, "
+                f"courtesy of <b>{ln_name}</b>."
+            )
+        if avg_len:
+            facts.append(
+                f"Average message length is <b>{avg_len:.0f}</b> characters. "
+                "(Twitch's max is 500.)"
+            )
+        if chatty_hour is not None:
+            facts.append(
+                f"Chat is most active around <b>{chatty_hour:02d}:00</b> — "
+                "stream around then for max engagement."
+            )
+        if busiest_day:
+            d, c = busiest_day
+            facts.append(
+                f"All-time busiest day: <b>{d}</b> with {c:,} messages. "
+                "Whatever you did, do it again."
+            )
+        if oldest:
+            n, when = oldest
+            facts.append(
+                f"Your founding chatter is <b>{n}</b> — first seen "
+                f"{when.replace('T', ' ')[:10]}."
+            )
+        if ev["tip_total"]:
+            facts.append(
+                f"Lifetime tips: <b>${ev['tip_total']:,.2f}</b> from "
+                f"{ev['unique_tippers']:,} different supporters. "
+                "Cheers to them."
+            )
+        if ev["bits_total"]:
+            facts.append(
+                f"<b>{ev['bits_total']:,}</b> bits cheered across "
+                f"{ev['unique_cheerers']:,} chatters."
+            )
+        if not facts:
+            facts.append(
+                "No data yet — your stats grow as chatters speak."
+            )
+
+        random_facts = _random.sample(facts, min(3, len(facts)))
+
+        # Compose payload. JSON-friendly only — Jinja's tojson handles it all.
+        return TEMPLATES.TemplateResponse(
+            request,
+            "stats.html",
+            {
+                "totals": totals,
+                "ev": ev,
+                "per_day_labels": [d for d, _ in per_day],
+                "per_day_values": [n for _, n in per_day],
+                "per_hour_values": [n for _, n in per_hour],
+                "top_chatter_names": [n for n, _ in top_chatters],
+                "top_chatter_counts": [c for _, c in top_chatters],
+                "top_supporters": top_supporters,
+                "new_per_week_labels": [w for w, _ in new_per_week],
+                "new_per_week_values": [n for _, n in new_per_week],
+                "facts": random_facts,
+                "longest": longest,
+            },
+        )
+
     # ---------------- insights (engagement helper) ----------------
 
     # Time windows offered by the Insights window selector. The regulars +

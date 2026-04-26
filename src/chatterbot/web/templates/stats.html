@@ -1,0 +1,258 @@
+{% extends "base.html" %}
+{% block title %}Stats · chatterbot{% endblock %}
+{% block content %}
+<div class="space-y-5">
+  <header class="flex items-baseline justify-between gap-2">
+    <h1 class="text-xl sm:text-2xl font-semibold inline-flex items-center gap-2">
+      <i class="fa-solid fa-chart-pie text-accent"></i> Stats &amp; fun facts
+    </h1>
+    <span class="text-xs text-muted">live aggregates over your whole DB</span>
+  </header>
+
+  {# Big-number tiles #}
+  <section class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+    {% with icon='fa-users', label='Chatters', value=totals.chatters, subtitle='unique people' %}
+      {% include "components/_stat_tile.html" %}{% endwith %}
+    {% with icon='fa-comment', label='Messages', value=totals.messages, subtitle='lifetime' %}
+      {% include "components/_stat_tile.html" %}{% endwith %}
+    {% with icon='fa-note-sticky', label='Notes', value=totals.notes, subtitle='LLM + manual' %}
+      {% include "components/_stat_tile.html" %}{% endwith %}
+    {% with icon='fa-coins', label='Events', value=totals.events, subtitle='SE feed' %}
+      {% include "components/_stat_tile.html" %}{% endwith %}
+    {% with icon='fa-comments', label='Topics', value=totals.topic_snaps, subtitle='snapshots taken' %}
+      {% include "components/_stat_tile.html" %}{% endwith %}
+    {% with icon='fa-shield-halved', label='Incidents', value=totals.incidents, subtitle='flagged (advisory)' %}
+      {% include "components/_stat_tile.html" %}{% endwith %}
+  </section>
+
+  {# Did you know — random 3 facts on each page load #}
+  <section class="space-y-2">
+    <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+      <i class="fa-solid fa-lightbulb text-accent"></i> Did you know?
+    </h2>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+      {% for fact in facts %}
+        <div class="rounded-xl border border-accent/30 bg-accent/5 p-3 text-sm text-primary leading-relaxed">
+          <i class="fa-solid fa-sparkles text-accent text-xs mr-1"></i>
+          {{ fact | safe }}
+        </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  {# Charts grid #}
+  <section class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+
+    {# Messages per day, last 30d #}
+    <div class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 shadow-sm">
+      <h3 class="text-sm font-semibold mb-2 inline-flex items-center gap-2">
+        <i class="fa-solid fa-chart-line text-accent"></i> Messages per day
+        <span class="text-[11px] text-muted ml-auto">last 30 days</span>
+      </h3>
+      <div class="relative h-64"><canvas id="chart-per-day"></canvas></div>
+    </div>
+
+    {# Hour-of-day activity #}
+    <div class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 shadow-sm">
+      <h3 class="text-sm font-semibold mb-2 inline-flex items-center gap-2">
+        <i class="fa-solid fa-clock text-accent"></i> When chat is alive
+        <span class="text-[11px] text-muted ml-auto">hour of day, lifetime</span>
+      </h3>
+      <div class="relative h-64"><canvas id="chart-per-hour"></canvas></div>
+    </div>
+
+    {# Top chatters #}
+    <div class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 shadow-sm">
+      <h3 class="text-sm font-semibold mb-2 inline-flex items-center gap-2">
+        <i class="fa-solid fa-crown text-accent"></i> Top chatters
+        <span class="text-[11px] text-muted ml-auto">by message count, lifetime</span>
+      </h3>
+      <div class="relative h-64"><canvas id="chart-top-chatters"></canvas></div>
+    </div>
+
+    {# New chatters per week #}
+    <div class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 shadow-sm">
+      <h3 class="text-sm font-semibold mb-2 inline-flex items-center gap-2">
+        <i class="fa-solid fa-user-plus text-accent"></i> New chatters per week
+        <span class="text-[11px] text-muted ml-auto">last 12 weeks</span>
+      </h3>
+      <div class="relative h-64"><canvas id="chart-new-chatters"></canvas></div>
+    </div>
+
+    {# Donations breakdown — only renders when data exists #}
+    {% if ev.tip_total or ev.bits_total or ev.sub_months %}
+    <div class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 shadow-sm">
+      <h3 class="text-sm font-semibold mb-2 inline-flex items-center gap-2">
+        <i class="fa-solid fa-dollar-sign text-accent"></i> Support breakdown
+        <span class="text-[11px] text-muted ml-auto">tips · bits · sub-months</span>
+      </h3>
+      <div class="relative h-56"><canvas id="chart-support"></canvas></div>
+    </div>
+    {% endif %}
+
+    {# Top supporters table #}
+    {% if top_supporters %}
+    <div class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 shadow-sm">
+      <h3 class="text-sm font-semibold mb-2 inline-flex items-center gap-2">
+        <i class="fa-solid fa-medal text-accent"></i> Top supporters
+        <span class="text-[11px] text-muted ml-auto">by lifetime tips</span>
+      </h3>
+      <ol class="text-sm space-y-1.5">
+        {% for name, total in top_supporters %}
+          <li class="flex items-center justify-between gap-2">
+            <span class="inline-flex items-center gap-2">
+              <span class="w-5 text-muted text-xs">{{ loop.index }}.</span>
+              <span class="text-primary">{{ name }}</span>
+            </span>
+            <span class="font-mono text-accent">${{ "%.2f"|format(total) }}</span>
+          </li>
+        {% endfor %}
+      </ol>
+    </div>
+    {% endif %}
+  </section>
+
+  {# Longest message showcase #}
+  {% if longest %}
+  <section class="rounded-xl border border-subtle bg-surface p-3 sm:p-4">
+    <h3 class="text-sm font-semibold mb-2 inline-flex items-center gap-2">
+      <i class="fa-solid fa-trophy text-accent"></i> Longest message ever
+      <span class="text-[11px] text-muted ml-auto">{{ longest[2] }} chars from {{ longest[0] }}</span>
+    </h3>
+    <blockquote class="border-l-2 border-accent/40 pl-3 text-sm text-primary italic break-words">
+      {{ longest[1] }}
+    </blockquote>
+  </section>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+(function () {
+  // Tailwind token-aware colors so charts read in both themes.
+  const css = getComputedStyle(document.documentElement);
+  const accent  = '#9146FF';
+  const muted   = `rgb(${css.getPropertyValue('--c-muted').trim()})`;
+  const primary = `rgb(${css.getPropertyValue('--c-primary').trim()})`;
+  const subtle  = `rgb(${css.getPropertyValue('--c-subtle').trim()})`;
+
+  // Global Chart.js defaults to match dark/light theme.
+  Chart.defaults.color = muted;
+  Chart.defaults.borderColor = subtle;
+  Chart.defaults.font.family = "Inter, system-ui, sans-serif";
+
+  const noLegend = { plugins: { legend: { display: false } } };
+  const tightAxes = {
+    scales: {
+      x: { grid: { display: false }, ticks: { color: muted } },
+      y: { grid: { color: subtle }, ticks: { color: muted, precision: 0 } },
+    },
+  };
+
+  // Messages per day (line)
+  new Chart(document.getElementById('chart-per-day'), {
+    type: 'line',
+    data: {
+      labels: {{ per_day_labels | tojson }},
+      datasets: [{
+        data: {{ per_day_values | tojson }},
+        borderColor: accent,
+        backgroundColor: 'rgba(145, 70, 255, 0.18)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 2,
+        pointHoverRadius: 5,
+      }],
+    },
+    options: { responsive: true, maintainAspectRatio: false, ...noLegend, ...tightAxes },
+  });
+
+  // Hour-of-day (bar)
+  new Chart(document.getElementById('chart-per-hour'), {
+    type: 'bar',
+    data: {
+      labels: Array.from({length: 24}, (_, h) => h.toString().padStart(2, '0')),
+      datasets: [{
+        data: {{ per_hour_values | tojson }},
+        backgroundColor: 'rgba(145, 70, 255, 0.65)',
+        borderRadius: 4,
+      }],
+    },
+    options: { responsive: true, maintainAspectRatio: false, ...noLegend, ...tightAxes },
+  });
+
+  // Top chatters (horizontal bar)
+  {% if top_chatter_names %}
+  new Chart(document.getElementById('chart-top-chatters'), {
+    type: 'bar',
+    data: {
+      labels: {{ top_chatter_names | tojson }},
+      datasets: [{
+        data: {{ top_chatter_counts | tojson }},
+        backgroundColor: 'rgba(145, 70, 255, 0.7)',
+        borderRadius: 4,
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      ...noLegend,
+      scales: {
+        x: { grid: { color: subtle }, ticks: { color: muted, precision: 0 } },
+        y: { grid: { display: false }, ticks: { color: muted } },
+      },
+    },
+  });
+  {% endif %}
+
+  // New chatters per week (bar)
+  new Chart(document.getElementById('chart-new-chatters'), {
+    type: 'bar',
+    data: {
+      labels: {{ new_per_week_labels | tojson }},
+      datasets: [{
+        data: {{ new_per_week_values | tojson }},
+        backgroundColor: 'rgba(16, 185, 129, 0.7)',
+        borderRadius: 4,
+      }],
+    },
+    options: { responsive: true, maintainAspectRatio: false, ...noLegend, ...tightAxes },
+  });
+
+  // Support breakdown (donut). Tips → $, bits → $/100 (1 bit ≈ $0.01),
+  // sub months → $5 each (Tier-1 baseline). Rough but useful.
+  {% if ev.tip_total or ev.bits_total or ev.sub_months %}
+  const tipUsd  = {{ ev.tip_total | tojson }};
+  const bitsUsd = {{ ev.bits_total | tojson }} / 100;
+  const subUsd  = {{ ev.sub_months | tojson }} * 5;
+  new Chart(document.getElementById('chart-support'), {
+    type: 'doughnut',
+    data: {
+      labels: ['Tips ($)', 'Bits (~$)', 'Subs (~$, T1)'],
+      datasets: [{
+        data: [tipUsd, bitsUsd, subUsd],
+        backgroundColor: ['#10B981', '#F59E0B', accent],
+        borderColor: 'rgba(0,0,0,0)',
+        borderWidth: 2,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'bottom', labels: { color: muted } },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => `${ctx.label}: $${ctx.raw.toFixed(2)}`,
+          },
+        },
+      },
+    },
+  });
+  {% endif %}
+})();
+</script>
+{% endblock %}

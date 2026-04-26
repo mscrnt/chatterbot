@@ -1,15 +1,16 @@
-{# Nav links. Reads `current_path` and `mod_mode_enabled` from base context. #}
+{# Primary nav links. Reads `current_path` and `mod_mode_enabled` from base
+   context. Settings is rendered separately by base.html (right-aligned icon). #}
 {% set links = [
-  ('/',         'Chatters', 'fa-users',    is_chatters),
-  ('/insights', 'Insights', 'fa-lightbulb', current_path == '/insights'),
-  ('/topics',   'Topics',   'fa-comments', current_path == '/topics'),
-  ('/events',   'Events',   'fa-coins',    current_path == '/events'),
+  ('/',         'Chatters', 'fa-users',          is_chatters),
+  ('/insights', 'Insights', 'fa-lightbulb',      current_path == '/insights'),
+  ('/stats',    'Stats',    'fa-chart-pie',      current_path == '/stats'),
+  ('/topics',   'Topics',   'fa-comments',       current_path == '/topics'),
+  ('/events',   'Events',   'fa-coins',          current_path == '/events'),
   ('/live',     'Live',     'fa-tower-broadcast', current_path == '/live'),
 ] %}
 {% if mod_mode_enabled %}
   {% set _ = links.append(('/moderation', 'Moderation', 'fa-shield-halved', current_path == '/moderation')) %}
 {% endif %}
-{% set _ = links.append(('/settings', 'Settings', 'fa-sliders', current_path == '/settings')) %}
 {% for href, label, icon, active in links %}
 <a href="{{ href }}"
    class="tap inline-flex items-center gap-2 px-3 rounded text-sm sm:text-base transition-all duration-150 ease-out

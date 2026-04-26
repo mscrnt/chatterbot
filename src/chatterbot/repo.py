@@ -673,6 +673,196 @@ class ChatterRepo:
 
     # ============================ READ surface (TUI / dashboard) ===========
 
+    # ============================ Stats queries (Stats tab) ================
+    # All read-only aggregates; no LLM. Powers the dashboard's Stats page.
+
+    def stats_totals(self) -> dict[str, int]:
+        """Top-of-page big-number cards: total chatters / messages / notes /
+        events / topic snapshots / incidents (incidents are 0 if mod's off)."""
+        out: dict[str, int] = {}
+        with self._cursor() as cur:
+            for label, q in (
+                ("chatters",     "SELECT COUNT(*) FROM users"),
+                ("messages",     "SELECT COUNT(*) FROM messages"),
+                ("notes",        "SELECT COUNT(*) FROM notes"),
+                ("events",       "SELECT COUNT(*) FROM events"),
+                ("topic_snaps",  "SELECT COUNT(*) FROM topic_snapshots"),
+                ("incidents",    "SELECT COUNT(*) FROM incidents"),
+            ):
+                try:
+                    out[label] = int(cur.execute(q).fetchone()[0])
+                except sqlite3.Error:
+                    out[label] = 0
+        return out
+
+    def stats_event_totals(self) -> dict[str, float | int]:
+        """Lifetime tips ($), bits, sub months — for the donations donut + tile."""
+        with self._cursor() as cur:
+            row = cur.execute(
+                """
+                SELECT
+                  COALESCE(SUM(CASE WHEN type='tip'   THEN amount END), 0) AS tip_total,
+                  COALESCE(SUM(CASE WHEN type='cheer' THEN amount END), 0) AS bits_total,
+                  COALESCE(SUM(CASE WHEN type='sub'   THEN amount END), 0) AS sub_months,
+                  COUNT(DISTINCT CASE WHEN type='tip'   THEN twitch_name END) AS unique_tippers,
+                  COUNT(DISTINCT CASE WHEN type='cheer' THEN twitch_name END) AS unique_cheerers,
+                  COUNT(DISTINCT CASE WHEN type='sub'   THEN twitch_name END) AS unique_subbers
+                FROM events
+                """
+            ).fetchone()
+            return {
+                "tip_total":       float(row["tip_total"] or 0.0),
+                "bits_total":      int(row["bits_total"] or 0),
+                "sub_months":      int(row["sub_months"] or 0),
+                "unique_tippers":  int(row["unique_tippers"] or 0),
+                "unique_cheerers": int(row["unique_cheerers"] or 0),
+                "unique_subbers":  int(row["unique_subbers"] or 0),
+            }
+
+    def stats_messages_per_day(self, days: int = 30) -> list[tuple[str, int]]:
+        """Daily message counts for the last `days`. Returns (YYYY-MM-DD, n)
+        oldest-first. Days with zero messages are emitted explicitly."""
+        with self._cursor() as cur:
+            rows = cur.execute(
+                """
+                SELECT date(ts) AS d, COUNT(*) AS c
+                FROM messages
+                WHERE ts >= datetime('now', ?)
+                GROUP BY date(ts)
+                """,
+                (f"-{int(days)} days",),
+            ).fetchall()
+        # Densify so the chart x-axis is continuous.
+        from datetime import date, timedelta
+        counts = {r["d"]: int(r["c"]) for r in rows}
+        today = date.today()
+        out: list[tuple[str, int]] = []
+        for i in range(days - 1, -1, -1):
+            d = today - timedelta(days=i)
+            key = d.isoformat()
+            out.append((key, counts.get(key, 0)))
+        return out
+
+    def stats_messages_per_hour(self) -> list[tuple[int, int]]:
+        """Aggregate message counts by hour-of-day (0..23). Helps the streamer
+        see when their chat is most alive."""
+        with self._cursor() as cur:
+            rows = cur.execute(
+                """
+                SELECT CAST(strftime('%H', ts) AS INTEGER) AS h, COUNT(*) AS c
+                FROM messages
+                GROUP BY h
+                """
+            ).fetchall()
+        counts = {int(r["h"]): int(r["c"]) for r in rows}
+        return [(h, counts.get(h, 0)) for h in range(24)]
+
+    def stats_top_chatters_lifetime(self, limit: int = 10) -> list[tuple[str, int]]:
+        """Top N chatters by total messages (lifetime). (name, msg_count)."""
+        with self._cursor() as cur:
+            rows = cur.execute(
+                """
+                SELECT u.name, COUNT(m.id) AS c
+                FROM users u
+                JOIN messages m ON m.user_id = u.twitch_id
+                GROUP BY u.twitch_id
+                ORDER BY c DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [(r["name"], int(r["c"])) for r in rows]
+
+    def stats_top_supporters(self, limit: int = 5) -> list[tuple[str, float]]:
+        """Top tippers by lifetime $ amount. (name, tip_total)."""
+        with self._cursor() as cur:
+            rows = cur.execute(
+                """
+                SELECT twitch_name, COALESCE(SUM(amount), 0) AS total
+                FROM events
+                WHERE type = 'tip'
+                GROUP BY twitch_name
+                ORDER BY total DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [(r["twitch_name"], float(r["total"] or 0.0)) for r in rows]
+
+    def stats_new_chatters_per_week(self, weeks: int = 12) -> list[tuple[str, int]]:
+        """First-seen counts grouped by ISO week, oldest-first, densified."""
+        with self._cursor() as cur:
+            rows = cur.execute(
+                """
+                SELECT strftime('%Y-W%W', first_seen) AS w, COUNT(*) AS c
+                FROM users
+                WHERE first_seen >= datetime('now', ?)
+                GROUP BY w
+                """,
+                (f"-{int(weeks * 7)} days",),
+            ).fetchall()
+        counts = {r["w"]: int(r["c"]) for r in rows}
+        # Build the last `weeks` weekly buckets (oldest first).
+        from datetime import date, timedelta
+        today = date.today()
+        out: list[tuple[str, int]] = []
+        for i in range(weeks - 1, -1, -1):
+            d = today - timedelta(weeks=i)
+            key = d.strftime("%Y-W%W")
+            out.append((key, counts.get(key, 0)))
+        return out
+
+    def stats_longest_message(self) -> tuple[str, str, int] | None:
+        """Pull the single longest message ever logged. (name, content, len)."""
+        with self._cursor() as cur:
+            row = cur.execute(
+                """
+                SELECT u.name, m.content, length(m.content) AS L
+                FROM messages m JOIN users u ON u.twitch_id = m.user_id
+                ORDER BY L DESC LIMIT 1
+                """
+            ).fetchone()
+            if not row:
+                return None
+            return (row["name"], row["content"], int(row["L"]))
+
+    def stats_avg_message_length(self) -> float:
+        with self._cursor() as cur:
+            row = cur.execute(
+                "SELECT AVG(length(content)) AS a FROM messages"
+            ).fetchone()
+            return float(row["a"] or 0.0)
+
+    def stats_most_chatty_hour(self) -> int | None:
+        """Hour of day (0..23) with the highest aggregate message count."""
+        rows = self.stats_messages_per_hour()
+        if not any(c for _, c in rows):
+            return None
+        return max(rows, key=lambda r: r[1])[0]
+
+    def stats_busiest_day(self) -> tuple[str, int] | None:
+        """Single day with the most messages ever. (date, count)."""
+        with self._cursor() as cur:
+            row = cur.execute(
+                """
+                SELECT date(ts) AS d, COUNT(*) AS c
+                FROM messages GROUP BY d
+                ORDER BY c DESC LIMIT 1
+                """
+            ).fetchone()
+            if not row or not row["d"]:
+                return None
+            return (row["d"], int(row["c"]))
+
+    def stats_oldest_chatter(self) -> tuple[str, str] | None:
+        """Earliest first_seen — your "founder." (name, first_seen)."""
+        with self._cursor() as cur:
+            row = cur.execute(
+                "SELECT name, first_seen FROM users "
+                "ORDER BY first_seen ASC LIMIT 1"
+            ).fetchone()
+            return (row["name"], row["first_seen"]) if row else None
+
     # ============================ Insights queries =========================
     # Streamer-only views: who's chatting now, who are the regulars, who's
     # lapsed, who's new today. All read-only / aggregate; no LLM calls here.
