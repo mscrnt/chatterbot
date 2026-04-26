@@ -1,5 +1,7 @@
 # chatterbot
 
+[![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?style=flat&logo=buymeacoffee&logoColor=000)](https://buymeacoffee.com/mscrnt)
+
 Silent Twitch chatter-profiling sidecar. Listens to chat, tracks StreamElements
 events, and builds lightweight per-chatter profiles via local LLM
 summarization. The streamer reads this through a terminal UI **or** a browser
