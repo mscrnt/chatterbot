@@ -143,8 +143,15 @@ def main() -> None:
             pass
     elif mode == "tui":
         repo = ChatterRepo(settings.db_path, embed_dim=settings.ollama_embed_dim)
+        # Optional LLM client so manual notes added via the TUI can be embedded
+        # for RAG. Failures inside the TUI are non-fatal — note still saves.
+        llm = OllamaClient(
+            base_url=settings.ollama_base_url,
+            model=settings.ollama_model,
+            embed_model=settings.ollama_embed_model,
+        )
         try:
-            run_tui(repo, settings)
+            run_tui(repo, settings, llm=llm)
         finally:
             repo.close()
     elif mode == "dashboard":
