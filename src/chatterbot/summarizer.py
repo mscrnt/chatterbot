@@ -42,6 +42,9 @@ RULES:
 - If nothing notable was stated, return an empty list.
 - Each note: one short third-person sentence about the viewer (e.g., "Has a cat named Loki.").
 - Ignore stream meta-chatter, reactions to gameplay, emote spam, and questions to the streamer.
+- Some lines are tagged `(replying to X: "...")` — that's a Twitch native reply.
+  Use the quoted parent only as context to understand what the viewer is responding to.
+  Do NOT extract facts about person X or about the parent message itself.
 """
 
 
@@ -99,7 +102,25 @@ class Summarizer:
 
             user = await asyncio.to_thread(self.repo.get_user, user_id)
             display_name = user.name if user else user_id
-            corpus = "\n".join(f"- {content}" for _, content in rows)
+
+            # Look up reply parents per message so the LLM can interpret
+            # short responses ("yes", "me too", "no way") in context.
+            full_msgs = await asyncio.to_thread(
+                self.repo.get_messages_by_ids, [mid for mid, _ in rows]
+            )
+            by_id = {m.id: m for m in full_msgs}
+            corpus_lines: list[str] = []
+            for mid, content in rows:
+                m = by_id.get(mid)
+                if m and m.reply_parent_body:
+                    snippet = m.reply_parent_body[:160].replace('"', "'")
+                    parent = m.reply_parent_login or "?"
+                    corpus_lines.append(
+                        f'- (replying to {parent}: "{snippet}") {content}'
+                    )
+                else:
+                    corpus_lines.append(f"- {content}")
+            corpus = "\n".join(corpus_lines)
             prompt = f"Viewer username: {display_name}\n\nMessages:\n{corpus}"
 
             try:

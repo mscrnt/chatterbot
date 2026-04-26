@@ -11,8 +11,17 @@
     <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
       {% for m in messages %}
         <li class="px-3 py-2 text-sm hover:bg-surface-raised transition-all duration-150 ease-out">
-          <span class="text-xs text-muted mr-2 inline-block w-32">{{ m.ts | short_ts }}</span>
-          <span class="break-words text-primary">{{ m.content }}</span>
+          {% if m.reply_parent_body %}
+            <div class="text-[11px] text-muted mb-1 inline-flex items-center gap-1">
+              <i class="fa-solid fa-reply text-[10px]"></i>
+              replying to <span class="text-accent">{{ m.reply_parent_login or '?' }}</span>:
+              <span class="italic truncate max-w-[28rem]">"{{ m.reply_parent_body }}"</span>
+            </div>
+          {% endif %}
+          <div>
+            <span class="text-xs text-muted mr-2 inline-block w-32">{{ m.ts | short_ts }}</span>
+            <span class="break-words text-primary">{{ m.content }}</span>
+          </div>
         </li>
       {% endfor %}
     </ul>

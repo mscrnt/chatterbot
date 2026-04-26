@@ -21,6 +21,13 @@
   </header>
 
   {% if row.message_content %}
+    {% if row.message_reply_parent_body %}
+      <div class="text-[11px] text-muted inline-flex items-center gap-1">
+        <i class="fa-solid fa-reply text-[10px]"></i>
+        replying to <span class="text-accent">{{ row.message_reply_parent_login or '?' }}</span>:
+        <span class="italic truncate max-w-[28rem]">"{{ row.message_reply_parent_body }}"</span>
+      </div>
+    {% endif %}
     <blockquote class="border-l-2 border-danger/60 pl-3 text-sm text-primary break-words italic">
       {{ row.message_content }}
     </blockquote>

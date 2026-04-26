@@ -69,6 +69,11 @@ class Message:
     name: str
     ts: str
     content: str
+    # Twitch native-reply context, populated when the chatter used the Reply
+    # feature. None for plain messages. Stored denormalized so we don't need
+    # to track Twitch's own message UUIDs.
+    reply_parent_login: str | None = None
+    reply_parent_body: str | None = None
 
 
 @dataclass
@@ -103,6 +108,8 @@ class IncidentRow:
     incident: Incident
     user_name: str | None
     message_content: str | None
+    message_reply_parent_login: str | None = None
+    message_reply_parent_body: str | None = None
 
 
 @dataclass
@@ -197,13 +204,22 @@ class ChatterRepo:
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS messages (
-                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id    TEXT NOT NULL REFERENCES users(twitch_id) ON DELETE CASCADE,
-                    ts         TEXT NOT NULL,
-                    content    TEXT NOT NULL
+                    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id             TEXT NOT NULL REFERENCES users(twitch_id) ON DELETE CASCADE,
+                    ts                  TEXT NOT NULL,
+                    content             TEXT NOT NULL,
+                    reply_parent_login  TEXT,
+                    reply_parent_body   TEXT
                 )
                 """
             )
+            # Idempotent migration for older DBs that pre-date the reply columns.
+            cur.execute("PRAGMA table_info(messages)")
+            _mcols = {r["name"] for r in cur.fetchall()}
+            if "reply_parent_login" not in _mcols:
+                cur.execute("ALTER TABLE messages ADD COLUMN reply_parent_login TEXT")
+            if "reply_parent_body" not in _mcols:
+                cur.execute("ALTER TABLE messages ADD COLUMN reply_parent_body TEXT")
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS notes (
@@ -379,12 +395,24 @@ class ChatterRepo:
                 (twitch_id, twitch_id),
             )
 
-    def insert_message(self, user_id: str, content: str) -> int:
-        """Insert a chat message and return its rowid."""
+    def insert_message(
+        self,
+        user_id: str,
+        content: str,
+        *,
+        reply_parent_login: str | None = None,
+        reply_parent_body: str | None = None,
+    ) -> int:
+        """Insert a chat message and return its rowid. The two reply_parent_*
+        kwargs are populated when twitchio reports the message used Twitch's
+        native Reply feature (see bot.event_message)."""
         with self._cursor() as cur:
             cur.execute(
-                "INSERT INTO messages(user_id, ts, content) VALUES (?, ?, ?)",
-                (user_id, _now_iso(), content),
+                """
+                INSERT INTO messages(user_id, ts, content, reply_parent_login, reply_parent_body)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (user_id, _now_iso(), content, reply_parent_login, reply_parent_body),
             )
             return int(cur.lastrowid)
 
@@ -500,7 +528,7 @@ class ChatterRepo:
         with self._cursor() as cur:
             cur.execute(
                 """
-                SELECT m.id, m.user_id, u.name, m.ts, m.content
+                SELECT m.id, m.user_id, u.name, m.ts, m.content, m.reply_parent_login, m.reply_parent_body
                 FROM messages m
                 JOIN users u ON u.twitch_id = m.user_id
                 ORDER BY m.id DESC
@@ -515,6 +543,8 @@ class ChatterRepo:
                     name=r["name"],
                     ts=r["ts"],
                     content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
                 )
                 for r in cur.fetchall()
             ]
@@ -799,7 +829,7 @@ class ChatterRepo:
         with self._cursor() as cur:
             cur.execute(
                 f"""
-                SELECT m.id, m.user_id, u.name, m.ts, m.content
+                SELECT m.id, m.user_id, u.name, m.ts, m.content, m.reply_parent_login, m.reply_parent_body
                 FROM messages m
                 JOIN users u ON u.twitch_id = m.user_id
                 {where}
@@ -815,6 +845,8 @@ class ChatterRepo:
                     name=r["name"],
                     ts=r["ts"],
                     content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
                 )
                 for r in cur.fetchall()
             ]
@@ -977,7 +1009,7 @@ class ChatterRepo:
             id_placeholders = ",".join("?" for _ in twitch_ids)
             cur.execute(
                 f"""
-                SELECT m.id, m.user_id, u.name, m.ts, m.content
+                SELECT m.id, m.user_id, u.name, m.ts, m.content, m.reply_parent_login, m.reply_parent_body
                 FROM messages m
                 JOIN users u ON u.twitch_id = m.user_id
                 WHERE m.id BETWEEN ? AND ?
@@ -991,6 +1023,8 @@ class ChatterRepo:
                 Message(
                     id=int(r["id"]), user_id=r["user_id"], name=r["name"],
                     ts=r["ts"], content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
                 )
                 for r in cur.fetchall()
             ]
@@ -1068,7 +1102,7 @@ class ChatterRepo:
         with self._cursor() as cur:
             cur.execute(
                 """
-                SELECT m.id, m.user_id, u.name, m.ts, m.content
+                SELECT m.id, m.user_id, u.name, m.ts, m.content, m.reply_parent_login, m.reply_parent_body
                 FROM messages m
                 JOIN users u ON u.twitch_id = m.user_id
                 LEFT JOIN vec_messages v ON v.message_id = m.id
@@ -1085,6 +1119,8 @@ class ChatterRepo:
                     name=r["name"],
                     ts=r["ts"],
                     content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
                 )
                 for r in cur.fetchall()
             ]
@@ -1100,7 +1136,7 @@ class ChatterRepo:
         with self._cursor() as cur:
             cur.execute(
                 """
-                SELECT m.id, m.user_id, u.name, m.ts, m.content
+                SELECT m.id, m.user_id, u.name, m.ts, m.content, m.reply_parent_login, m.reply_parent_body
                 FROM vec_messages v
                 JOIN messages m ON m.id = v.message_id
                 JOIN users u    ON u.twitch_id = m.user_id
@@ -1118,6 +1154,8 @@ class ChatterRepo:
                     name=r["name"],
                     ts=r["ts"],
                     content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
                 )
                 for r in cur.fetchall()
             ]
@@ -1165,7 +1203,7 @@ class ChatterRepo:
         with self._cursor() as cur:
             cur.execute(
                 """
-                SELECT m.id, m.user_id, u.name, m.ts, m.content
+                SELECT m.id, m.user_id, u.name, m.ts, m.content, m.reply_parent_login, m.reply_parent_body
                 FROM messages m
                 JOIN users u ON u.twitch_id = m.user_id
                 WHERE m.id > ?
@@ -1178,9 +1216,67 @@ class ChatterRepo:
                 Message(
                     id=int(r["id"]), user_id=r["user_id"], name=r["name"],
                     ts=r["ts"], content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
                 )
                 for r in cur.fetchall()
             ]
+
+    def get_messages_by_ids(self, ids: list[int]) -> list[Message]:
+        """Hydrate full Message rows (including reply_parent_*) for a set of
+        ids. Order is by id ASC. Used by the per-user summarizer so it can
+        annotate each user line with its reply parent for context."""
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT m.id, m.user_id, u.name, m.ts, m.content, m.reply_parent_login, m.reply_parent_body
+                FROM messages m
+                JOIN users u ON u.twitch_id = m.user_id
+                WHERE m.id IN ({placeholders})
+                ORDER BY m.id ASC
+                """,
+                ids,
+            )
+            return [
+                Message(
+                    id=int(r["id"]), user_id=r["user_id"], name=r["name"],
+                    ts=r["ts"], content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
+                )
+                for r in cur.fetchall()
+            ]
+
+    def messages_before_id(self, before_id: int, limit: int) -> list[Message]:
+        """Pull up to `limit` messages with id < before_id, returned oldest-first.
+        Used as look-back context for the moderator (so a flag-worthy message
+        right at the start of a batch isn't judged without its parent line)."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.id, m.user_id, u.name, m.ts, m.content, m.reply_parent_login, m.reply_parent_body
+                FROM messages m
+                JOIN users u ON u.twitch_id = m.user_id
+                WHERE m.id < ?
+                ORDER BY m.id DESC
+                LIMIT ?
+                """,
+                (before_id, limit),
+            )
+            rows = [
+                Message(
+                    id=int(r["id"]), user_id=r["user_id"], name=r["name"],
+                    ts=r["ts"], content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
+                )
+                for r in cur.fetchall()
+            ]
+        rows.reverse()
+        return rows
 
     def add_incident(
         self,
@@ -1228,7 +1324,7 @@ class ChatterRepo:
                 SELECT i.id, i.user_id, i.message_id, i.ts, i.severity,
                        i.categories, i.rationale, i.status,
                        u.name AS user_name,
-                       m.content AS message_content
+                       m.content AS message_content, m.reply_parent_login AS message_reply_parent_login, m.reply_parent_body AS message_reply_parent_body
                 FROM incidents i
                 LEFT JOIN users u    ON u.twitch_id = i.user_id
                 LEFT JOIN messages m ON m.id        = i.message_id
@@ -1257,7 +1353,7 @@ class ChatterRepo:
                 SELECT i.id, i.user_id, i.message_id, i.ts, i.severity,
                        i.categories, i.rationale, i.status,
                        u.name AS user_name,
-                       m.content AS message_content
+                       m.content AS message_content, m.reply_parent_login AS message_reply_parent_login, m.reply_parent_body AS message_reply_parent_body
                 FROM incidents i
                 LEFT JOIN users u    ON u.twitch_id = i.user_id
                 LEFT JOIN messages m ON m.id        = i.message_id
@@ -1284,7 +1380,7 @@ class ChatterRepo:
                 SELECT i.id, i.user_id, i.message_id, i.ts, i.severity,
                        i.categories, i.rationale, i.status,
                        u.name AS user_name,
-                       m.content AS message_content
+                       m.content AS message_content, m.reply_parent_login AS message_reply_parent_login, m.reply_parent_body AS message_reply_parent_body
                 FROM incidents i
                 LEFT JOIN users u    ON u.twitch_id = i.user_id
                 LEFT JOIN messages m ON m.id        = i.message_id
@@ -1356,6 +1452,8 @@ def _incident_row_from_row(r) -> IncidentRow:
         incident=inc,
         user_name=r["user_name"],
         message_content=r["message_content"],
+        message_reply_parent_login=r["message_reply_parent_login"],
+        message_reply_parent_body=r["message_reply_parent_body"],
     )
 
 

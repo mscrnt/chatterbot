@@ -61,13 +61,31 @@ class ChatterListener(commands.Bot):
         if not twitch_id or not name or not content:
             return
 
+        # Twitch's native Reply feature surfaces the parent message via IRCv3
+        # tags. Capture them denormalized so the dashboard + classifier can
+        # show what was being replied to without us tracking Twitch's UUIDs.
+        tags = getattr(message, "tags", None) or {}
+        reply_parent_login = (tags.get("reply-parent-user-login") or "").strip() or None
+        reply_parent_body_raw = tags.get("reply-parent-msg-body") or ""
+        # Twitch IRC encodes spaces in tag values as \s; decode back.
+        reply_parent_body = (
+            reply_parent_body_raw.replace("\\s", " ").strip() or None
+            if reply_parent_body_raw
+            else None
+        )
+
         try:
             await asyncio.to_thread(self.repo.upsert_user, twitch_id, name)
 
             if await asyncio.to_thread(self.repo.is_opted_out, twitch_id):
                 return  # honor opt_out — no logging, no summarization
 
-            await asyncio.to_thread(self.repo.insert_message, twitch_id, content)
+            await asyncio.to_thread(
+                self.repo.insert_message,
+                twitch_id, content,
+                reply_parent_login=reply_parent_login,
+                reply_parent_body=reply_parent_body,
+            )
             unsummarized = await asyncio.to_thread(
                 self.repo.unsummarized_count, twitch_id
             )

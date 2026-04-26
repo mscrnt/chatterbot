@@ -28,8 +28,15 @@ logger = logging.getLogger(__name__)
 
 MOD_REVIEW_SYSTEM = """You are reviewing recent Twitch chat messages for potential community-rule violations on behalf of the streamer.
 
-For each message you receive (each has an integer message_id and a username), decide whether it is a violation:
+The prompt has two sections:
 
+  [CONTEXT] — earlier chat messages, included so you understand what was being
+             discussed. **DO NOT classify these.** They are background only.
+
+  [REVIEW]  — the messages you must judge. Return one classification per
+             violating message_id. Empty list is the normal result.
+
+For each [REVIEW] message, decide:
 - is_violation: true ONLY when the message clearly violates community standards.
 - severity: 1 = minor (mild rule-bending), 2 = warning (clear violation, low harm), 3 = serious (hate, credible threats, doxxing).
 - categories: zero or more of harassment, hate_speech, threats, spam, doxxing, other.
@@ -37,12 +44,31 @@ For each message you receive (each has an integer message_id and a username), de
 
 RULES:
 - Be conservative. When in doubt, is_violation = false. False positives harm innocent viewers.
-- Heated gaming reactions, sarcasm, casual profanity, in-jokes between regulars, and general silliness are NOT violations.
-- Quoting or referencing a slur to call it out, criticize, or report it is NOT a violation.
-- DO flag: hateful slurs targeting people / groups, credible threats of violence, doxxing attempts (sharing of personal info), persistent targeted harassment of a specific user, blatant spam / scam links / follow-bot output.
+- USE THE CONTEXT. Banter inside an established friendly thread, gaming-react
+  hyperbole ("kill the boss", "die already"), heated reactions, sarcasm,
+  casual profanity, in-jokes between regulars — NOT violations.
+- A message tagged `(replying to X: "...")` is a Twitch native reply; treat
+  the quoted parent as authoritative context for what's being responded to.
+- Quoting or referencing a slur to call it out, criticize, or report it is
+  NOT a violation.
+- DO flag: hateful slurs targeting people / groups, credible threats of
+  violence, doxxing attempts (sharing of personal info), persistent targeted
+  harassment of a specific user, blatant spam / scam links / follow-bot output.
 
-Return ONLY classifications where is_violation = true. Empty `classifications` array is the normal, expected result.
+Return ONLY classifications where is_violation = true and message_id is in [REVIEW].
 """
+
+# How many messages to include as look-back context before the batch.
+MOD_LOOKBACK_CONTEXT = 10
+
+
+def _format_message_line(m) -> str:  # noqa: ANN001 — repo.Message
+    base = f"[{m.id}] {m.name}"
+    if m.reply_parent_body:
+        snippet = m.reply_parent_body[:160].replace('"', "'")
+        parent = m.reply_parent_login or "?"
+        base += f' (replying to {parent}: "{snippet}")'
+    return f"{base}: {m.content}"
 
 
 class Moderator:
@@ -71,11 +97,23 @@ class Moderator:
         if not rows:
             return
 
-        # Build a numbered prompt block. Use just username + content; no
-        # historical context or notes (those are unrelated to whether THIS
-        # message is a violation).
-        lines = [f"[{m.id}] {m.name}: {m.content}" for m in rows]
-        prompt = "Messages to review:\n" + "\n".join(lines)
+        # Pull a small look-back window so the model sees what was being said
+        # immediately before the batch starts. The watermark moves only past
+        # the [REVIEW] block, never past [CONTEXT].
+        first_id = rows[0].id
+        context = await asyncio.to_thread(
+            self.repo.messages_before_id, first_id, MOD_LOOKBACK_CONTEXT
+        )
+
+        parts: list[str] = ["[CONTEXT — do NOT classify these, background only]"]
+        if context:
+            parts.extend(_format_message_line(m) for m in context)
+        else:
+            parts.append("(no earlier messages in our store)")
+        parts.append("")
+        parts.append("[REVIEW — judge each]")
+        parts.extend(_format_message_line(m) for m in rows)
+        prompt = "\n".join(parts)
 
         try:
             response = await self.llm.generate_structured(
