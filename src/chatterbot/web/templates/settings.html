@@ -29,6 +29,32 @@
       Fine for a single-user local tool — but if you sync this DB elsewhere, you're moving credentials with it.</span>
   </div>
 
+  {# ---------------- diagnostic bundle ---------------- #}
+  <section class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 space-y-3"
+           x-data="{ withRecent: false }">
+    <header class="flex items-center justify-between gap-2">
+      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+        <i class="fa-solid fa-life-ring text-accent"></i> Diagnostic bundle
+      </h2>
+      <span class="text-[10px] uppercase tracking-wider text-muted">.cbreport</span>
+    </header>
+    <p class="text-xs text-muted">
+      Downloads a <code>.cbreport</code> file (a renamed zip — won't get filtered
+      by mail / Discord) for bug reports. Privacy-safe by default: NO chat
+      content, NO usernames, NO secrets. Includes log tails, system info,
+      DB row counts, and which <code>.env</code> keys are set.
+    </p>
+    <label class="inline-flex items-center gap-2 text-xs text-muted">
+      <input type="checkbox" x-model="withRecent" class="h-4 w-4 accent-accent">
+      Also include usernames + per-user message <em>counts</em> over the last 24h
+      <span class="text-[10px] uppercase tracking-wider text-warning">opt-in</span>
+    </label>
+    <a :href="withRecent ? '/diagnose?with_recent_activity=1' : '/diagnose'"
+       class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-accent hover:bg-accent-600 text-white font-medium text-sm transition-all duration-150 ease-out">
+      <i class="fa-solid fa-download"></i> Download bundle
+    </a>
+  </section>
+
   <form method="post" action="/settings" class="space-y-4">
     {% for r in rows %}
       <div class="rounded-xl border border-subtle bg-surface p-3 sm:p-4">

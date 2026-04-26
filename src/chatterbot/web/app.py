@@ -21,6 +21,7 @@ Routes
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -35,7 +36,13 @@ from fastapi import (
     Query,
     Request,
 )
-from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -370,6 +377,39 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             else:
                 repo.set_app_setting(key, submitted.strip())
         return RedirectResponse(url="/settings?saved=1", status_code=303)
+
+    # ---------------- diagnostic bundle ----------------
+
+    @app.get("/diagnose")
+    async def diagnose(with_recent_activity: int = Query(0)):
+        """Build a privacy-safe .cbreport zip and stream it back as a download.
+        See diagnose.py for what's in / out of the bundle."""
+        from ..diagnose import build_diagnostic_bundle, default_bundle_filename
+        import tempfile
+        from fastapi import BackgroundTasks
+
+        fname = default_bundle_filename()
+        # Build into a tempfile we own, then hand it to FileResponse with a
+        # cleanup task to delete it after the download finishes.
+        tmp = tempfile.NamedTemporaryFile(
+            prefix="chatterbot-diagnose-", suffix=".cbreport", delete=False
+        )
+        tmp.close()
+        from pathlib import Path as _P
+        out_path = _P(tmp.name)
+        await asyncio.to_thread(
+            build_diagnostic_bundle,
+            out_path, settings,
+            with_recent_activity=bool(with_recent_activity),
+        )
+        bg = BackgroundTasks()
+        bg.add_task(lambda p=out_path: p.unlink(missing_ok=True))
+        return FileResponse(
+            out_path,
+            filename=fname,
+            media_type="application/octet-stream",
+            background=bg,
+        )
 
     # ---------------- modal partials ----------------
     # Each returns a self-contained HTML fragment (backdrop + shell + body)

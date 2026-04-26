@@ -4,9 +4,10 @@ Usage:
   chatterbot bot         # silent listener: TwitchIO + summarizer + SE + topics loop
   chatterbot tui         # streamer-only Textual viewer
   chatterbot dashboard   # streamer-only FastAPI dashboard
+  chatterbot diagnose    # write a privacy-safe .cbreport bundle for bug reports
 
-All three modes are independent processes. They share the SQLite DB via WAL,
-so they can run simultaneously.
+The first three are independent processes — they share the SQLite DB via WAL
+so they can run simultaneously. `diagnose` is a one-shot.
 """
 
 from __future__ import annotations
@@ -14,25 +15,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import sys
+from pathlib import Path
 
 from .bot import ChatterListener
 from .config import Settings, get_settings
+from .diagnose import build_diagnostic_bundle, default_bundle_filename
 from .llm.ollama_client import OllamaClient
+from .logging_setup import setup_logging
 from .repo import ChatterRepo
 from .streamelements import StreamElementsListener
 from .summarizer import Summarizer
 from .tui import run_tui
 
 logger = logging.getLogger(__name__)
-
-
-def setup_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
 
 
 async def run_bot(settings: Settings) -> None:
@@ -102,20 +97,39 @@ def run_dashboard(settings: Settings) -> None:
         repo.close()
 
 
+def run_diagnose(settings: Settings, with_recent_activity: bool) -> Path:
+    out = Path(default_bundle_filename())
+    path = build_diagnostic_bundle(out, settings, with_recent_activity=with_recent_activity)
+    print(f"wrote {path}  ({path.stat().st_size:,} bytes)")
+    if with_recent_activity:
+        print("(includes opt-in recent_activity.json — usernames + per-user message counts)")
+    else:
+        print("(minimal mode — no chat content, no usernames, no secrets)")
+    return path
+
+
 def main() -> None:
-    setup_logging()
     parser = argparse.ArgumentParser(prog="chatterbot")
     parser.add_argument(
         "mode",
         nargs="?",
-        choices=("bot", "tui", "dashboard"),
+        choices=("bot", "tui", "dashboard", "diagnose"),
         default=None,
-        help="bot = silent listener; tui = Textual viewer; dashboard = FastAPI viewer",
+        help="bot = silent listener; tui = Textual viewer; "
+             "dashboard = FastAPI viewer; diagnose = write a .cbreport bundle",
+    )
+    parser.add_argument(
+        "--with-recent-activity",
+        action="store_true",
+        help="(diagnose only) include usernames + per-user message counts "
+             "from the last 24h. Off by default for privacy.",
     )
     args = parser.parse_args()
 
     settings = get_settings()
     mode = args.mode or settings.run_mode
+
+    setup_logging(mode)
 
     if mode == "bot":
         try:
@@ -130,6 +144,8 @@ def main() -> None:
             repo.close()
     elif mode == "dashboard":
         run_dashboard(settings)
+    elif mode == "diagnose":
+        run_diagnose(settings, with_recent_activity=args.with_recent_activity)
     else:
         parser.error(f"unknown mode: {mode!r}")
 
