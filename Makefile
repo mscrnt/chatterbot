@@ -1,4 +1,4 @@
-.PHONY: help install bot tui dashboard tailwind tailwind-watch build run-bot run-tui run-dashboard logs shell clean
+.PHONY: help install bot tui dashboard all tailwind tailwind-watch build run-bot run-tui run-dashboard logs shell clean
 
 help:
 	@echo "chatterbot commands:"
@@ -6,6 +6,7 @@ help:
 	@echo "  make bot             - run the silent listener locally"
 	@echo "  make tui             - run the streamer-only Textual viewer"
 	@echo "  make dashboard       - run the FastAPI dashboard"
+	@echo "  make all             - bot in background + dashboard in foreground (Ctrl+C kills both)"
 	@echo "  make tailwind        - build the Tailwind CSS bundle (optional; CDN by default)"
 	@echo "  make tailwind-watch  - rebuild Tailwind on file changes"
 	@echo "  make build           - build Docker image"
@@ -26,6 +27,17 @@ tui:
 	uv run chatterbot tui
 
 dashboard:
+	uv run chatterbot dashboard
+
+# Run bot in the background (logs to logs/bot.log) and dashboard in the
+# foreground. Ctrl+C in the dashboard shell kills the backgrounded bot too.
+all:
+	@mkdir -p logs
+	@uv run chatterbot bot > logs/bot.log 2>&1 & \
+	BOT_PID=$$!; \
+	echo "bot started (pid $$BOT_PID, logs/bot.log) — tail with: tail -f logs/bot.log"; \
+	echo "dashboard starting in foreground (Ctrl+C stops both)..."; \
+	trap "echo; echo 'stopping bot pid $$BOT_PID'; kill $$BOT_PID 2>/dev/null" INT TERM EXIT; \
 	uv run chatterbot dashboard
 
 tailwind:
