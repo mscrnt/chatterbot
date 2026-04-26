@@ -58,7 +58,7 @@
       {% include "components/_stat_tile.html" %}
     {% endwith %}
     {% with icon='fa-note-sticky', label='Notes',
-            value=notes|length, subtitle='LLM-extracted facts' %}
+            value=notes_with_sources|length, subtitle='LLM-extracted facts' %}
       {% include "components/_stat_tile.html" %}
     {% endwith %}
     {% with icon='fa-star', label='Sub Status',

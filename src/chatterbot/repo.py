@@ -56,6 +56,15 @@ class Note:
 
 
 @dataclass
+class NoteWithSources:
+    """A note plus the message rows the LLM cited as supporting it.
+    Manual notes (and pre-migration LLM notes) have an empty sources list."""
+
+    note: Note
+    sources: list[Message]
+
+
+@dataclass
 class Alias:
     name: str
     first_seen: str
@@ -328,6 +337,22 @@ class ChatterRepo:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_notes_user ON notes(user_id)")
+            # Link a note back to the message(s) the LLM cited as supporting
+            # it — provenance for "where did this fact come from?" Many-to-
+            # many because the model often aggregates several lines into one
+            # note. Manual notes (added from the dashboard) have no rows here.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS note_sources (
+                    note_id    INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+                    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                    PRIMARY KEY (note_id, message_id)
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_note_sources_note ON note_sources(note_id)"
+            )
             cur.execute("CREATE INDEX IF NOT EXISTS idx_events_user ON events(user_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_events_name ON events(LOWER(twitch_name))")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)")
@@ -504,7 +529,17 @@ class ChatterRepo:
             )
             return [r["user_id"] for r in cur.fetchall()]
 
-    def add_note(self, user_id: str, text: str, embedding: list[float] | None) -> int:
+    def add_note(
+        self,
+        user_id: str,
+        text: str,
+        embedding: list[float] | None,
+        source_message_ids: list[int] | None = None,
+    ) -> int:
+        """Insert a note. `source_message_ids` (when supplied) links this note
+        back to the specific message ids the LLM cited as supporting it. Pass
+        None or [] for manual notes — they show up in the dashboard with no
+        provenance link."""
         blob = _vec_to_blob(embedding) if embedding else None
         with self._cursor() as cur:
             cur.execute(
@@ -517,6 +552,20 @@ class ChatterRepo:
                     "INSERT INTO vec_notes(note_id, embedding) VALUES (?, ?)",
                     (note_id, blob),
                 )
+            if source_message_ids:
+                # Filter to ids that actually belong to this user — defends
+                # against hallucinated ids slipping through validation.
+                placeholders = ",".join("?" for _ in source_message_ids)
+                cur.execute(
+                    f"SELECT id FROM messages WHERE user_id = ? AND id IN ({placeholders})",
+                    (user_id, *source_message_ids),
+                )
+                valid = [int(r["id"]) for r in cur.fetchall()]
+                for mid in valid:
+                    cur.execute(
+                        "INSERT OR IGNORE INTO note_sources(note_id, message_id) VALUES (?, ?)",
+                        (note_id, mid),
+                    )
             return note_id
 
     def recent_global_messages(self, limit: int = 30) -> list[Message]:
@@ -773,6 +822,40 @@ class ChatterRepo:
                 Alias(name=r["name"], first_seen=r["first_seen"], last_seen_as=r["last_seen_as"])
                 for r in cur.fetchall()
             ]
+
+    def get_note_sources(self, note_id: int) -> list[Message]:
+        """Hydrate the source messages cited for one note, oldest-first."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.id, m.user_id, u.name, m.ts, m.content,
+                       m.reply_parent_login, m.reply_parent_body
+                FROM note_sources ns
+                JOIN messages m ON m.id = ns.message_id
+                JOIN users u    ON u.twitch_id = m.user_id
+                WHERE ns.note_id = ?
+                ORDER BY m.id ASC
+                """,
+                (note_id,),
+            )
+            return [
+                Message(
+                    id=int(r["id"]), user_id=r["user_id"], name=r["name"],
+                    ts=r["ts"], content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
+                )
+                for r in cur.fetchall()
+            ]
+
+    def get_notes_with_sources(self, user_id: str) -> list[NoteWithSources]:
+        """All notes for a user, each bundled with its cited source messages.
+        Convenience wrapper for the user-detail render path."""
+        notes = self.get_notes(user_id)
+        return [
+            NoteWithSources(note=n, sources=self.get_note_sources(n.id))
+            for n in notes
+        ]
 
     def get_notes(self, user_id: str) -> list[Note]:
         with self._cursor() as cur:

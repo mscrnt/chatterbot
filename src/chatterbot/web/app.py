@@ -163,7 +163,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         user = repo.get_user(twitch_id)
         if not user:
             raise HTTPException(404, "user not found")
-        notes = repo.get_notes(twitch_id)
+        notes_with_sources = repo.get_notes_with_sources(twitch_id)
         events = repo.get_user_events(twitch_id, limit=50)
         summary = repo.get_user_event_summary(twitch_id)
         messages = repo.get_messages(twitch_id, limit=MESSAGE_PAGE_SIZE)
@@ -180,7 +180,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "user.html",
             {
                 "user": user,
-                "notes": notes,
+                "notes_with_sources": notes_with_sources,
                 "events": events,
                 "summary": summary,
                 "messages": messages,
@@ -299,10 +299,9 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         text = text.strip()
         if not text:
             # Empty submissions: just re-render the current list, no insert.
-            user = repo.get_user(twitch_id)
-            notes = repo.get_notes(twitch_id) if user else []
+            nws = repo.get_notes_with_sources(twitch_id) if repo.get_user(twitch_id) else []
             return TEMPLATES.TemplateResponse(
-                request, "partials/notes_list.html", {"notes": notes}
+                request, "partials/notes_list.html", {"notes_with_sources": nws}
             )
         user = repo.get_user(twitch_id)
         if not user:
@@ -314,10 +313,12 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         except Exception:
             logger.exception("embed failed for manual note; storing without vector")
             embedding = None
+        # Manual notes have no source_message_ids — they show "manual / unlinked"
+        # in the template instead of an expandable source list.
         repo.add_note(twitch_id, text[:500], embedding)
-        notes = repo.get_notes(twitch_id)
+        nws = repo.get_notes_with_sources(twitch_id)
         return TEMPLATES.TemplateResponse(
-            request, "partials/notes_list.html", {"notes": notes}
+            request, "partials/notes_list.html", {"notes_with_sources": nws}
         )
 
     @app.patch("/notes/{note_id}", response_class=HTMLResponse)

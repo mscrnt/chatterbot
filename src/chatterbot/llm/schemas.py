@@ -26,12 +26,21 @@ NoteString = Annotated[
 ]
 
 
+class NoteEntry(BaseModel):
+    """One extracted fact, plus the message_ids the model cited as supporting
+    it. Provenance for "where did this fact come from?" — surfaced in the
+    dashboard as expandable source messages on each note."""
+
+    text: NoteString
+    source_message_ids: list[int] = Field(default_factory=list, max_length=5)
+
+
 class NoteExtractionResponse(BaseModel):
     """Reply for `summarizer._summarize_user`. The LLM is asked to extract 0-3
     factual notes about a single viewer. Empty list means "nothing notable",
     which is a valid (and common) result."""
 
-    notes: list[NoteString] = Field(default_factory=list, max_length=3)
+    notes: list[NoteEntry] = Field(default_factory=list, max_length=3)
 
 
 # ---- channel topic snapshotter ----

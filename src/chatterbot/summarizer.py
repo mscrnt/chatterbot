@@ -35,16 +35,30 @@ logger = logging.getLogger(__name__)
 
 NOTE_EXTRACTION_SYSTEM = """You analyze recent Twitch chat messages from one viewer and extract short factual notes about that viewer.
 
+Each input line is prefixed with the message id in square brackets, e.g.
+`[42] my cat Loki keeps walking on my keyboard`.
+
+For each note you produce, include the `source_message_ids` list — the
+specific message ids that support that note. The streamer uses this to
+trace any fact back to the exact line(s) it came from.
+
 RULES:
 - Extract 0 to 3 notes maximum.
-- Only facts the viewer explicitly stated about themselves: interests, pets, gear, location, games they play, jobs, family, etc.
-- No personality judgments. No inferred sentiment. No speculation about mood or intent.
+- Only facts the viewer explicitly stated about themselves: interests, pets,
+  gear, location, games they play, jobs, family, etc.
+- No personality judgments. No inferred sentiment. No speculation about
+  mood or intent.
 - If nothing notable was stated, return an empty list.
-- Each note: one short third-person sentence about the viewer (e.g., "Has a cat named Loki.").
-- Ignore stream meta-chatter, reactions to gameplay, emote spam, and questions to the streamer.
-- Some lines are tagged `(replying to X: "...")` — that's a Twitch native reply.
-  Use the quoted parent only as context to understand what the viewer is responding to.
-  Do NOT extract facts about person X or about the parent message itself.
+- Each note: one short third-person sentence about the viewer (e.g.,
+  "Has a cat named Loki.").
+- Ignore stream meta-chatter, reactions to gameplay, emote spam, and
+  questions to the streamer.
+- Some lines are tagged `(replying to X: "...")` — that's a Twitch native
+  reply. Use the quoted parent only as context to understand what the
+  viewer is responding to. Do NOT extract facts about person X or about
+  the parent message itself.
+- source_message_ids must reference ids that actually appear in the input.
+  If a note is supported by multiple messages, list them all (cap 5).
 """
 
 
@@ -116,10 +130,10 @@ class Summarizer:
                     snippet = m.reply_parent_body[:160].replace('"', "'")
                     parent = m.reply_parent_login or "?"
                     corpus_lines.append(
-                        f'- (replying to {parent}: "{snippet}") {content}'
+                        f'[{mid}] (replying to {parent}: "{snippet}") {content}'
                     )
                 else:
-                    corpus_lines.append(f"- {content}")
+                    corpus_lines.append(f"[{mid}] {content}")
             corpus = "\n".join(corpus_lines)
             prompt = f"Viewer username: {display_name}\n\nMessages:\n{corpus}"
 
@@ -137,13 +151,19 @@ class Summarizer:
                 logger.exception("LLM generate failed for user %s", user_id)
                 return
 
-            for text in response.notes:
+            for entry in response.notes:
                 try:
-                    embedding = await self.llm.embed(text)
+                    embedding = await self.llm.embed(entry.text)
                 except Exception:
                     logger.exception("embed failed for note; storing without vector")
                     embedding = None
-                await asyncio.to_thread(self.repo.add_note, user_id, text, embedding)
+                await asyncio.to_thread(
+                    self.repo.add_note,
+                    user_id,
+                    entry.text,
+                    embedding,
+                    list(entry.source_message_ids),
+                )
 
             last_id = rows[-1][0]
             await asyncio.to_thread(self.repo.set_watermark, user_id, last_id)

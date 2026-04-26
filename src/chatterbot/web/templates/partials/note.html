@@ -17,5 +17,42 @@
       </button>
     </div>
   </div>
-  <p class="text-xs text-muted mt-1">{{ note.ts | short_ts }}</p>
+
+  <div class="text-xs text-muted mt-1 flex items-center gap-2 flex-wrap">
+    <span>{{ note.ts | short_ts }}</span>
+    {% if sources %}
+      <span class="text-muted">·</span>
+      <span class="inline-flex items-center gap-1 text-accent">
+        <i class="fa-solid fa-link text-[10px]"></i>
+        {{ sources | length }} source{{ '' if sources|length == 1 else 's' }}
+      </span>
+    {% else %}
+      <span class="text-muted">·</span>
+      <span class="text-muted">manual / unlinked</span>
+    {% endif %}
+  </div>
+
+  {% if sources %}
+    <details class="mt-2 group/sources">
+      <summary class="cursor-pointer text-xs text-muted hover:text-primary inline-flex items-center gap-1 select-none">
+        <i class="fa-solid fa-chevron-right text-[10px] transition-transform group-open/sources:rotate-90"></i>
+        view source{{ '' if sources|length == 1 else 's' }}
+      </summary>
+      <ul class="mt-2 space-y-1.5 border-l-2 border-accent/40 pl-3">
+        {% for m in sources %}
+          <li class="text-xs">
+            {% if m.reply_parent_body %}
+              <div class="text-[10px] text-muted inline-flex items-center gap-1 mb-0.5">
+                <i class="fa-solid fa-reply text-[9px]"></i>
+                replying to <span class="text-accent">{{ m.reply_parent_login or '?' }}</span>:
+                <span class="italic truncate max-w-[20rem]">"{{ m.reply_parent_body }}"</span>
+              </div>
+            {% endif %}
+            <span class="text-muted">{{ m.ts | short_ts }}</span>
+            <span class="ml-1 text-primary break-words">{{ m.content }}</span>
+          </li>
+        {% endfor %}
+      </ul>
+    </details>
+  {% endif %}
 </div>
