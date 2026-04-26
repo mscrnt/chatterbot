@@ -1,0 +1,147 @@
+{% macro thread_card(t, hot=False) -%}
+{% set tone = {
+  'gaming':    'accent',
+  'personal':  'success',
+  'meta':      'warning',
+  'tech':      'accent',
+  'off-topic': 'neutral',
+  'other':     'neutral',
+}.get(t.category or 'other', 'neutral') %}
+{% set status_tone = {'active': 'success', 'dormant': 'warning', 'archived': 'neutral'}[t.status] %}
+{% set status_icon = {'active': 'fa-circle-dot', 'dormant': 'fa-moon', 'archived': 'fa-box-archive'}[t.status] %}
+<button type="button"
+        class="text-left w-full rounded-xl border bg-surface p-3 sm:p-4 shadow-sm transition-all duration-150 ease-out
+               {% if hot %}border-accent/50{% else %}border-subtle{% endif %}
+               hover:bg-surface-raised hover:border-accent/40"
+        hx-get="/modals/thread/{{ t.id }}"
+        hx-target="#modal-root"
+        hx-swap="innerHTML">
+  <header class="flex items-baseline justify-between gap-2 flex-wrap">
+    <h3 class="font-semibold text-primary text-sm sm:text-base">{{ t.title }}</h3>
+    <span class="text-[10px] text-muted">last {{ t.last_ts | short_ts }}</span>
+  </header>
+
+  <div class="flex items-center gap-1 flex-wrap mt-1.5">
+    {% with label=t.status, tone=status_tone, icon=status_icon %}{% include "components/_pill.html" %}{% endwith %}
+    {% if t.category and t.category != 'other' %}
+      {% with label=t.category, tone=tone %}{% include "components/_pill.html" %}{% endwith %}
+    {% endif %}
+    {% if t.member_count > 1 %}
+      {% with label=('↻ ' ~ t.member_count ~ ' times'), tone='accent', icon='fa-rotate' %}
+        {% include "components/_pill.html" %}{% endwith %}
+    {% endif %}
+  </div>
+
+  {% if t.drivers %}
+  <p class="text-xs text-muted mt-2">
+    <i class="fa-solid fa-users text-[10px] mr-1"></i>
+    {{ t.drivers | join(', ') }}
+  </p>
+  {% endif %}
+
+  {# Phase-4 timeline strip: a dot per member snapshot, evenly spaced. #}
+  {% if t.member_count > 1 %}
+    <div class="flex items-center gap-1 mt-2 h-2">
+      {% for _ in range(t.member_count) %}
+        <span class="block w-1.5 h-1.5 rounded-full bg-accent/70"></span>
+      {% endfor %}
+      <span class="text-[10px] text-muted ml-2">
+        first {{ t.first_ts | short_ts }}
+      </span>
+    </div>
+  {% endif %}
+</button>
+{%- endmacro %}
+
+<div id="topics-body" class="space-y-5"
+     hx-get="/topics?partial=1&status={{ status }}&q={{ q | urlencode }}"
+     hx-trigger="every 30s"
+     hx-swap="outerHTML">
+
+  {# Latest snapshot pinned at the top — anchor for "right now" #}
+  {% if latest and (status in ('all', 'active')) and not q %}
+    <section class="rounded-xl border border-accent/40 bg-accent/5 p-3 sm:p-4">
+      <header class="flex items-baseline justify-between gap-2 mb-2">
+        <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+          <i class="fa-solid fa-fire text-accent"></i> Right now
+        </h2>
+        <span class="text-xs text-muted">snapshot {{ latest.ts | short_ts }}</span>
+      </header>
+      <pre class="whitespace-pre-wrap text-sm sm:text-base font-sans text-primary leading-relaxed">{{ latest.summary }}</pre>
+    </section>
+  {% endif %}
+
+  {# Active threads #}
+  {% if status in ('all', 'active') %}
+    <section class="space-y-2">
+      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+        <i class="fa-solid fa-circle-dot text-success"></i> Active
+        <span class="text-xs text-muted">last hour · {{ active | length }}</span>
+      </h2>
+      {% if not active %}
+        <p class="text-muted italic text-sm">Nothing currently active{% if q %} matching “{{ q }}”{% endif %}.</p>
+      {% else %}
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {% for t in active %}
+          {{ thread_card(t, hot=True) }}
+        {% endfor %}
+      </div>
+      {% endif %}
+    </section>
+  {% endif %}
+
+  {# Dormant threads — "follow up on this" sweet spot #}
+  {% if status in ('all', 'dormant') %}
+    <section class="space-y-2">
+      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+        <i class="fa-solid fa-moon text-warning"></i> Dormant — pull these back?
+        <span class="text-xs text-muted">last 24h · {{ dormant | length }}</span>
+      </h2>
+      {% if not dormant %}
+        <p class="text-muted italic text-sm">Nothing dormant{% if q %} matching “{{ q }}”{% endif %}.</p>
+      {% else %}
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {% for t in dormant %}
+          {{ thread_card(t) }}
+        {% endfor %}
+      </div>
+      {% endif %}
+    </section>
+  {% endif %}
+
+  {# Archived threads #}
+  {% if status in ('all', 'archived') %}
+    <section class="space-y-2">
+      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+        <i class="fa-solid fa-box-archive text-muted"></i> Archive
+        <span class="text-xs text-muted">older than 24h · {{ archived | length }}</span>
+      </h2>
+      {% if not archived %}
+        <p class="text-muted italic text-sm">No archived threads{% if q %} matching “{{ q }}”{% endif %}.</p>
+      {% else %}
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {% for t in archived %}
+          {{ thread_card(t) }}
+        {% endfor %}
+      </div>
+      {% endif %}
+    </section>
+  {% endif %}
+
+  {# Legacy text-only snapshots (pre-topics_json era) #}
+  {% if legacy and not q and status == 'all' %}
+    <section class="space-y-2">
+      <h2 class="font-semibold text-muted inline-flex items-center gap-2 text-sm">
+        <i class="fa-solid fa-clock-rotate-left"></i> Legacy snapshots
+        <span class="text-xs text-muted">pre-clustering era</span>
+      </h2>
+      {% for s in legacy %}
+        <article class="rounded-xl border border-subtle bg-surface p-3 sm:p-4">
+          <header class="text-xs text-muted mb-2">{{ s.ts | short_ts }}</header>
+          <pre class="whitespace-pre-wrap text-sm font-sans text-primary">{{ s.summary }}</pre>
+        </article>
+      {% endfor %}
+    </section>
+  {% endif %}
+
+</div>

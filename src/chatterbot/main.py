@@ -73,6 +73,16 @@ async def run_bot(settings: Settings) -> None:
     listener = ChatterListener(settings, repo, summarizer)
     se = StreamElementsListener(repo, settings)
 
+    # One-time backfill of any pre-existing topic_snapshots into the
+    # topic_threads index. Idempotent — only operates on snapshots that
+    # don't yet have thread members. Non-fatal: bot keeps running on error.
+    try:
+        n = await summarizer._threader.backfill()
+        if n:
+            logger.info("threader: backfilled %d existing snapshots into threads", n)
+    except Exception:
+        logger.exception("threader: backfill failed — clustering will catch up on the next snapshot")
+
     tasks: list[asyncio.Task] = [
         asyncio.create_task(listener.start(), name="twitch_listener"),
         asyncio.create_task(summarizer.idle_loop(), name="summarizer_idle"),

@@ -55,9 +55,22 @@ DriverName = Annotated[
 ]
 
 
+TopicCategory = Literal[
+    "gaming",     # game mechanics, runs, builds, in-game events
+    "personal",   # life, pets, family, work, location
+    "meta",       # stream meta, schedule, gear, OBS, technical broadcast
+    "tech",       # hardware, software, programming
+    "off-topic",  # jokes, banter, memes
+    "other",
+]
+
+
 class TopicEntry(BaseModel):
     topic: TopicTitle
     drivers: list[DriverName] = Field(default_factory=list, max_length=10)
+    # Phase-4 thread tag. Older topics_json rows that pre-date this field
+    # validate cleanly because of the default.
+    category: TopicCategory = "other"
 
 
 class TopicsResponse(BaseModel):

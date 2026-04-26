@@ -788,6 +788,13 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         random_facts = _random.sample(facts, min(3, len(facts)))
 
         # Compose payload. JSON-friendly only — Jinja's tojson handles it all.
+        # Word cloud — top words across all chat (cheap-ish; cap at 100).
+        try:
+            top_words = repo.stats_top_words(limit=120, min_count=2)
+        except Exception:
+            logger.exception("stats: word-cloud query failed")
+            top_words = []
+
         return TEMPLATES.TemplateResponse(
             request,
             "stats.html",
@@ -804,6 +811,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "new_per_week_values": [n for _, n in new_per_week],
                 "facts": random_facts,
                 "longest": longest,
+                "word_cloud": [[w, c] for w, c in top_words],
             },
         )
 
@@ -871,17 +879,106 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         tpl = "partials/live_rows.html" if partial else "live.html"
         return TEMPLATES.TemplateResponse(request, tpl, ctx)
 
-    # ---------------- topics ----------------
+    # ---------------- topics (now thread-grouped) ----------------
+
+    _THREAD_STATUSES = ("active", "dormant", "archived", "all")
 
     @app.get("/topics", response_class=HTMLResponse)
     async def topics(
         request: Request,
         partial: int = Query(0),
+        status: str = Query("all"),
+        q: str = Query(""),
     ):
-        snapshots = repo.list_topic_snapshots(limit=30)
-        ctx = {"snapshots": snapshots, "settings": settings}
-        tpl = "partials/topics_list.html" if partial else "topics.html"
+        if status not in _THREAD_STATUSES:
+            status = "all"
+        status_filter = None if status == "all" else status
+
+        threads = repo.list_threads(
+            status_filter=status_filter, query=q, limit=100
+        )
+        # Bucket the resulting threads for the UI sections. When the user
+        # explicitly filters, only the requested bucket is non-empty.
+        buckets = {"active": [], "dormant": [], "archived": []}
+        for t in threads:
+            buckets.setdefault(t.status, []).append(t)
+
+        # Latest snapshot pinned at the top — the "what's chat doing right
+        # now" anchor independent of the threading view.
+        snapshots = repo.list_topic_snapshots(limit=10)
+        latest = snapshots[0] if snapshots else None
+
+        # Legacy text-only snapshots (no topics_json => never threaded).
+        # Tucked at the bottom so the new view dominates.
+        legacy = [s for s in snapshots if not s.topics_json][:5]
+
+        ctx = {
+            "active":   buckets["active"],
+            "dormant":  buckets["dormant"],
+            "archived": buckets["archived"],
+            "status": status,
+            "q": q,
+            "latest": latest,
+            "legacy": legacy,
+            "settings": settings,
+            "total": len(threads),
+        }
+        tpl = "partials/topics_body.html" if partial else "topics.html"
         return TEMPLATES.TemplateResponse(request, tpl, ctx)
+
+    @app.get("/modals/thread/{thread_id}", response_class=HTMLResponse)
+    async def modal_thread(request: Request, thread_id: int):
+        thread = repo.get_thread(thread_id)
+        if not thread:
+            raise HTTPException(404, "thread not found")
+        members = repo.get_thread_members(thread_id)
+        # Resolve drivers to user_ids (alias-aware) for clickable pills.
+        driver_links = []
+        for name in thread.drivers:
+            user = repo.find_user_by_alias_or_name(name)
+            driver_links.append({"name": name, "user_id": user.twitch_id if user else None})
+        # Sample a handful of messages for at-a-glance context.
+        messages = repo.get_thread_messages(thread_id, limit=30)
+        return TEMPLATES.TemplateResponse(
+            request,
+            "modals/_thread.html",
+            {
+                "thread": thread,
+                "members": members,
+                "driver_links": driver_links,
+                "messages": messages,
+            },
+        )
+
+    @app.get("/threads/{thread_id}/explain")
+    async def thread_explain(thread_id: int):
+        from .thread_rag import explain_thread
+
+        async def stream():
+            try:
+                ctx = await explain_thread(repo, llm, thread_id)
+            except Exception:
+                logger.exception("thread explain setup failed")
+                yield _sse("error", "internal error during retrieval")
+                yield _sse("done", "")
+                return
+            if ctx is None:
+                yield _sse("error", "thread not found")
+                yield _sse("done", "")
+                return
+            try:
+                async for chunk in ctx.stream:
+                    yield _sse("chunk", chunk)
+            except Exception:
+                logger.exception("thread explain stream failed")
+                yield _sse("error", "stream interrupted")
+            yield _sse("done", "")
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     # ---------------- events ----------------
 

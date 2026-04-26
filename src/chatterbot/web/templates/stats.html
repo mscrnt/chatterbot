@@ -112,6 +112,19 @@
     {% endif %}
   </section>
 
+  {# Word cloud #}
+  {% if word_cloud %}
+  <section class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 shadow-sm">
+    <h3 class="text-sm font-semibold mb-2 inline-flex items-center gap-2">
+      <i class="fa-solid fa-cloud text-accent"></i> Word cloud
+      <span class="text-[11px] text-muted ml-auto">
+        top {{ word_cloud | length }} words across chat (stopwords removed)
+      </span>
+    </h3>
+    <div id="wordcloud-host" class="relative w-full" style="height: 360px;"></div>
+  </section>
+  {% endif %}
+
   {# Longest message showcase #}
   {% if longest %}
   <section class="rounded-xl border border-subtle bg-surface p-3 sm:p-4">
@@ -129,6 +142,7 @@
 
 {% block scripts %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/wordcloud@1.2.2/src/wordcloud2.min.js"></script>
 <script>
 (function () {
   // Tailwind token-aware colors so charts read in both themes.
@@ -221,6 +235,34 @@
     },
     options: { responsive: true, maintainAspectRatio: false, ...noLegend, ...tightAxes },
   });
+
+  // Word cloud (wordcloud2.js). Renders into a <canvas> we inject.
+  {% if word_cloud %}
+  (function () {
+    const host = document.getElementById('wordcloud-host');
+    if (!host || typeof WordCloud !== 'function') return;
+    const cnv = document.createElement('canvas');
+    cnv.width = host.clientWidth || 800;
+    cnv.height = host.clientHeight || 360;
+    host.appendChild(cnv);
+    const palette = ['#9146FF', '#10B981', '#F59E0B', '#A266FF', '#7A2BFF'];
+    WordCloud(cnv, {
+      list: {{ word_cloud | tojson }},
+      gridSize: Math.round(8 * cnv.width / 800),
+      weightFactor: function (size) {
+        // size is the raw count; scale into a readable range.
+        return Math.max(8, Math.min(60, 6 + Math.log2(size + 1) * 8));
+      },
+      fontFamily: 'Inter, system-ui, sans-serif',
+      color: function () { return palette[Math.floor(Math.random() * palette.length)]; },
+      backgroundColor: 'transparent',
+      rotateRatio: 0.25,
+      rotationSteps: 2,
+      shrinkToFit: true,
+    });
+    // Re-render on theme change (colors stay; size could shift).
+  })();
+  {% endif %}
 
   // Support breakdown (donut). Tips → $, bits → $/100 (1 bit ≈ $0.01),
   // sub months → $5 each (Tier-1 baseline). Rough but useful.

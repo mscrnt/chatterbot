@@ -131,6 +131,32 @@ class TopicSnapshot:
 
 
 @dataclass
+class TopicThread:
+    """A topic that has been observed across one or more snapshots — the
+    streamer's mental model of "ongoing conversation in chat." `status` is
+    computed (active = last_ts within 1h; dormant = within 24h; archived =
+    older). `drivers` is the union across all members."""
+
+    id: int
+    title: str           # canonical (latest member's title wins)
+    first_ts: str
+    last_ts: str
+    drivers: list[str]
+    member_count: int
+    status: str          # 'active' | 'dormant' | 'archived'
+    category: str | None # latest member's category if any (Phase 4 tags)
+
+
+@dataclass
+class TopicThreadMember:
+    thread_id: int
+    snapshot_id: int
+    topic_index: int
+    drivers: list[str]
+    ts: str
+
+
+@dataclass
 class UserEventSummary:
     """Aggregated event totals for a user, for the per-user TUI / dashboard panel."""
 
@@ -271,6 +297,44 @@ class ChatterRepo:
             _cols = {r["name"] for r in cur.fetchall()}
             if "topics_json" not in _cols:
                 cur.execute("ALTER TABLE topic_snapshots ADD COLUMN topics_json TEXT")
+            # Topic threads — recurring conversations across snapshots.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS topic_threads (
+                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title     TEXT NOT NULL,
+                    first_ts  TEXT NOT NULL,
+                    last_ts   TEXT NOT NULL,
+                    category  TEXT,
+                    embedding BLOB
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS topic_thread_members (
+                    thread_id   INTEGER NOT NULL REFERENCES topic_threads(id) ON DELETE CASCADE,
+                    snapshot_id INTEGER NOT NULL REFERENCES topic_snapshots(id) ON DELETE CASCADE,
+                    topic_index INTEGER NOT NULL,
+                    drivers     TEXT NOT NULL,
+                    ts          TEXT NOT NULL,
+                    PRIMARY KEY (thread_id, snapshot_id, topic_index)
+                )
+                """
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_threads_last_ts ON topic_threads(last_ts)")
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_thread_members_snap "
+                "ON topic_thread_members(snapshot_id)"
+            )
+            cur.execute(
+                f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_threads USING vec0(
+                    thread_id INTEGER PRIMARY KEY,
+                    embedding FLOAT[{self.embed_dim}]
+                )
+                """
+            )
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS summarization_state (
@@ -1384,6 +1448,398 @@ class ChatterRepo:
                 )
                 for r in cur.fetchall()
             ]
+
+    # ============================ Topic threads ===========================
+
+    # Computed status thresholds (kept here so the SQL CASE matches
+    # whatever Python uses to interpret it elsewhere if ever needed).
+    THREAD_ACTIVE_HOURS = 1
+    THREAD_DORMANT_HOURS = 24
+
+    def find_thread_by_embedding(
+        self, embedding: list[float], k: int = 1
+    ) -> tuple[int, float] | None:
+        """Nearest-neighbour search over thread title embeddings.
+        Returns (thread_id, distance) of the closest, or None if empty.
+        sqlite-vec returns cosine distance — smaller = more similar."""
+        blob = _vec_to_blob(embedding)
+        with self._cursor() as cur:
+            try:
+                cur.execute(
+                    """
+                    SELECT thread_id, distance
+                    FROM vec_threads
+                    WHERE embedding MATCH ? AND k = ?
+                    ORDER BY distance ASC
+                    LIMIT 1
+                    """,
+                    (blob, max(1, int(k))),
+                )
+                r = cur.fetchone()
+            except sqlite3.OperationalError:
+                return None
+        if not r:
+            return None
+        return (int(r["thread_id"]), float(r["distance"]))
+
+    def attach_topic_to_thread(
+        self,
+        *,
+        thread_id: int,
+        snapshot_id: int,
+        topic_index: int,
+        title: str,
+        category: str | None,
+        drivers: list[str],
+        ts: str,
+    ) -> None:
+        """Append a snapshot/topic_index as a member of an existing thread,
+        and update the thread's title (latest wins) + last_ts + category."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO topic_thread_members(
+                    thread_id, snapshot_id, topic_index, drivers, ts
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (thread_id, snapshot_id, topic_index, json.dumps(drivers), ts),
+            )
+            cur.execute(
+                """
+                UPDATE topic_threads
+                SET title = ?,
+                    last_ts = MAX(last_ts, ?),
+                    category = COALESCE(?, category)
+                WHERE id = ?
+                """,
+                (title, ts, category, thread_id),
+            )
+
+    def create_topic_thread(
+        self,
+        *,
+        snapshot_id: int,
+        topic_index: int,
+        title: str,
+        category: str | None,
+        drivers: list[str],
+        ts: str,
+        embedding: list[float],
+    ) -> int:
+        blob = _vec_to_blob(embedding)
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO topic_threads(title, first_ts, last_ts, category, embedding)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (title, ts, ts, category, blob),
+            )
+            tid = int(cur.lastrowid)
+            cur.execute(
+                "INSERT INTO vec_threads(thread_id, embedding) VALUES (?, ?)",
+                (tid, blob),
+            )
+            cur.execute(
+                """
+                INSERT INTO topic_thread_members(
+                    thread_id, snapshot_id, topic_index, drivers, ts
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (tid, snapshot_id, topic_index, json.dumps(drivers), ts),
+            )
+            return tid
+
+    _STATUS_CASE = (
+        f"CASE "
+        f"  WHEN t.last_ts >= datetime('now', '-{THREAD_ACTIVE_HOURS} hours') "
+        f"    THEN 'active' "
+        f"  WHEN t.last_ts >= datetime('now', '-{THREAD_DORMANT_HOURS} hours') "
+        f"    THEN 'dormant' "
+        f"  ELSE 'archived' "
+        f"END"
+    )
+
+    def list_threads(
+        self,
+        *,
+        status_filter: str | None = None,  # 'active'|'dormant'|'archived' or None
+        query: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[TopicThread]:
+        """Threads with member counts and union-of-driver lists. Search by
+        title or driver name when `query` is non-empty."""
+        params: list[Any] = []
+        clauses: list[str] = []
+        if status_filter:
+            clauses.append(f"{self._STATUS_CASE} = ?")
+            params.append(status_filter)
+        if query:
+            like = f"%{query.lower()}%"
+            clauses.append(
+                "(LOWER(t.title) LIKE ? OR EXISTS ("
+                "  SELECT 1 FROM topic_thread_members m"
+                "  WHERE m.thread_id = t.id AND LOWER(m.drivers) LIKE ?))"
+            )
+            params.extend([like, like])
+        where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.extend([limit, offset])
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT t.id, t.title, t.first_ts, t.last_ts, t.category,
+                       (SELECT COUNT(*) FROM topic_thread_members m WHERE m.thread_id = t.id) AS mc,
+                       {self._STATUS_CASE} AS status
+                FROM topic_threads t
+                {where_sql}
+                ORDER BY t.last_ts DESC
+                LIMIT ? OFFSET ?
+                """,
+                params,
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+        # Drivers are pulled in a separate query per thread; releasing the
+        # cursor lock before that prevents re-entry deadlocks.
+        out: list[TopicThread] = []
+        for r in rows:
+            drivers = self._collect_thread_drivers(int(r["id"]))
+            out.append(
+                TopicThread(
+                    id=int(r["id"]),
+                    title=r["title"],
+                    first_ts=r["first_ts"],
+                    last_ts=r["last_ts"],
+                    drivers=drivers,
+                    member_count=int(r["mc"]),
+                    status=r["status"],
+                    category=r["category"],
+                )
+            )
+        return out
+
+    def count_threads(
+        self, *, status_filter: str | None = None, query: str = ""
+    ) -> int:
+        params: list[Any] = []
+        clauses: list[str] = []
+        if status_filter:
+            clauses.append(f"{self._STATUS_CASE} = ?")
+            params.append(status_filter)
+        if query:
+            like = f"%{query.lower()}%"
+            clauses.append(
+                "(LOWER(t.title) LIKE ? OR EXISTS ("
+                "  SELECT 1 FROM topic_thread_members m"
+                "  WHERE m.thread_id = t.id AND LOWER(m.drivers) LIKE ?))"
+            )
+            params.extend([like, like])
+        where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._cursor() as cur:
+            cur.execute(
+                f"SELECT COUNT(*) AS c FROM topic_threads t {where_sql}", params
+            )
+            return int(cur.fetchone()["c"])
+
+    def _collect_thread_drivers(self, thread_id: int) -> list[str]:
+        """Union of all driver names across the thread's members, preserving
+        first-seen order for a stable display."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT drivers FROM topic_thread_members
+                WHERE thread_id = ? ORDER BY ts ASC
+                """,
+                (thread_id,),
+            )
+            seen: list[str] = []
+            seen_set: set[str] = set()
+            for r in cur.fetchall():
+                try:
+                    arr = json.loads(r["drivers"])
+                except (TypeError, ValueError):
+                    arr = []
+                for name in arr:
+                    if isinstance(name, str) and name not in seen_set:
+                        seen_set.add(name)
+                        seen.append(name)
+            return seen
+
+    def get_thread(self, thread_id: int) -> TopicThread | None:
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT t.id, t.title, t.first_ts, t.last_ts, t.category,
+                       (SELECT COUNT(*) FROM topic_thread_members m WHERE m.thread_id = t.id) AS mc,
+                       {self._STATUS_CASE} AS status
+                FROM topic_threads t
+                WHERE t.id = ?
+                """,
+                (thread_id,),
+            )
+            r = cur.fetchone()
+            if not r:
+                return None
+            row = dict(r)
+        # Re-acquire after releasing — _collect_thread_drivers takes the lock.
+        return TopicThread(
+            id=int(row["id"]),
+            title=row["title"],
+            first_ts=row["first_ts"],
+            last_ts=row["last_ts"],
+            drivers=self._collect_thread_drivers(thread_id),
+            member_count=int(row["mc"]),
+            status=row["status"],
+            category=row["category"],
+        )
+
+    def get_thread_members(self, thread_id: int) -> list[TopicThreadMember]:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT thread_id, snapshot_id, topic_index, drivers, ts
+                FROM topic_thread_members
+                WHERE thread_id = ?
+                ORDER BY ts ASC
+                """,
+                (thread_id,),
+            )
+            out: list[TopicThreadMember] = []
+            for r in cur.fetchall():
+                try:
+                    drivers = json.loads(r["drivers"])
+                except (TypeError, ValueError):
+                    drivers = []
+                out.append(
+                    TopicThreadMember(
+                        thread_id=int(r["thread_id"]),
+                        snapshot_id=int(r["snapshot_id"]),
+                        topic_index=int(r["topic_index"]),
+                        drivers=[str(d) for d in drivers],
+                        ts=r["ts"],
+                    )
+                )
+            return out
+
+    def get_thread_messages(
+        self, thread_id: int, limit: int = 200
+    ) -> list[Message]:
+        """Union of messages from all member-snapshots' id ranges, filtered to
+        members' driver names. Deduped by message id, sorted oldest-first."""
+        members = self.get_thread_members(thread_id)
+        if not members:
+            return []
+        all_drivers: list[str] = []
+        seen: set[str] = set()
+        for m in members:
+            for d in m.drivers:
+                if d not in seen:
+                    seen.add(d)
+                    all_drivers.append(d)
+        msg_seen: set[int] = set()
+        out: list[Message] = []
+        for m in members:
+            snap = self.get_topic_snapshot(m.snapshot_id)
+            if not snap or not snap.message_id_range:
+                continue
+            try:
+                a, b = snap.message_id_range.split("-", 1)
+                first_id, last_id = int(a), int(b)
+            except (ValueError, AttributeError):
+                continue
+            chunk = self.messages_in_id_range_for_names(
+                first_id, last_id, all_drivers, limit=limit,
+            )
+            for msg in chunk:
+                if msg.id in msg_seen:
+                    continue
+                msg_seen.add(msg.id)
+                out.append(msg)
+            if len(out) >= limit:
+                break
+        out.sort(key=lambda m: m.id)
+        return out[:limit]
+
+    def snapshots_without_threads(self) -> list[TopicSnapshot]:
+        """Snapshots that have topics_json but no thread members yet — fed to
+        the Threader's backfill at bot startup."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, ts, summary, message_id_range, topics_json
+                FROM topic_snapshots
+                WHERE topics_json IS NOT NULL
+                  AND id NOT IN (SELECT DISTINCT snapshot_id FROM topic_thread_members)
+                ORDER BY id ASC
+                """
+            )
+            return [
+                TopicSnapshot(
+                    id=int(r["id"]),
+                    ts=r["ts"],
+                    summary=r["summary"],
+                    message_id_range=r["message_id_range"],
+                    topics_json=r["topics_json"],
+                )
+                for r in cur.fetchall()
+            ]
+
+    # ---------------- Word cloud (Stats tab) ----------------
+
+    _WORDCLOUD_STOPWORDS = frozenset(
+        # English stopwords
+        "a an the and or but if while of in on at by for with about against "
+        "between into through during before after above below from up down "
+        "out off over under again further then once here there when where "
+        "why how all any both each few more most other some such no nor not "
+        "only own same so than too very can will just don should now is are "
+        "was were be been being have has had do does did would could may "
+        "might must shall need to as because until i me my myself we our "
+        "ours ourselves you your yours yourself yourselves he him his "
+        "himself she her hers herself it its itself they them their theirs "
+        "themselves what which who whom this that these those am ".split()
+    ) | frozenset(
+        # Chat noise / filler
+        "lol lmao lmfao rofl kek kekw kekl lulw lul pog pogchamp poggers "
+        "gg ez wp hi hello hey yo sup wsg gn bye cya thanks thx ty np "
+        "yes yeah yep yup nope nah ok okay alright sure cool nice good bad "
+        "really actually basically literally definitely probably maybe "
+        "guys guy dude man bro lady stream streamer chat people thing "
+        "things stuff way back even still right left big small new old "
+        "got get make made see seen say said know knew think thought "
+        "want need feel felt look looking looked come came take took use "
+        "used go going gone went well like also much many lot lots one two "
+        "three first last great cool fine pretty kind sort lot ".split()
+    ) | frozenset(
+        # Common contractions w/o apostrophe
+        "im ive ill id youre youve youll youd hes shes its were theyre "
+        "theyve theyll theyd dont doesnt didnt wont wouldnt couldnt shouldnt "
+        "isnt arent wasnt werent havent hasnt hadnt cant cannot lets ".split()
+    )
+
+    def stats_top_words(
+        self, *, limit: int = 100, min_count: int = 3
+    ) -> list[tuple[str, int]]:
+        """Naive top-words for the Stats tab word cloud. Strips URLs and
+        @mentions, lowercases, drops stopwords + chat filler, requires
+        3-20 char alphabetic tokens."""
+        import re as _re
+        from collections import Counter as _Counter
+        url_re = _re.compile(r"https?://\S+", _re.IGNORECASE)
+        mention_re = _re.compile(r"@\S+")
+        word_re = _re.compile(r"\b[a-z]{3,20}\b")
+        counter: _Counter[str] = _Counter()
+        with self._cursor() as cur:
+            cur.execute("SELECT content FROM messages")
+            for r in cur.fetchall():
+                text = (r["content"] or "").lower()
+                text = url_re.sub("", text)
+                text = mention_re.sub("", text)
+                for w in word_re.findall(text):
+                    if w in self._WORDCLOUD_STOPWORDS:
+                        continue
+                    counter[w] += 1
+        return [(w, c) for w, c in counter.most_common(limit) if c >= min_count]
 
     def get_topic_snapshot(self, snapshot_id: int) -> TopicSnapshot | None:
         with self._cursor() as cur:

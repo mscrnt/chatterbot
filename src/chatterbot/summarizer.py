@@ -29,6 +29,7 @@ from .config import Settings
 from .llm.ollama_client import OllamaClient
 from .llm.schemas import NoteExtractionResponse, TopicEntry, TopicsResponse
 from .repo import ChatterRepo
+from .threader import Threader
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,14 @@ RULES:
 - Identify 3 to 5 main topics from the messages provided.
 - One short line per topic.
 - Cite which usernames are driving each topic.
-- No editorializing. No inferred sentiment. Just topic + drivers.
+- For each topic, pick ONE category that fits best:
+    gaming    — game mechanics, runs, builds, in-game events
+    personal  — life updates, pets, family, work, location
+    meta      — stream meta, schedule, gear, OBS, broadcast tech
+    tech      — hardware, software, programming
+    off-topic — jokes, banter, memes, off-the-wall
+    other     — everything else
+- No editorializing. No inferred sentiment. Just topic + drivers + category.
 - If chat is essentially silent or unfocused, return fewer topics or an empty list.
 """
 
@@ -80,6 +88,9 @@ class Summarizer:
         self.settings = settings
         self._user_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._inflight: set[str] = set()
+        # Topic threading runs as a side-effect of each new snapshot. Keep a
+        # single shared instance so backfill state could live here later.
+        self._threader = Threader(repo, llm, settings)
 
     # ---------------- per-user note extraction ----------------
 
@@ -239,10 +250,20 @@ class Summarizer:
         # Persist the structured topics alongside the rendered string so the
         # dashboard can drive the per-topic "tell me more" modal.
         topics_json = response.model_dump_json()
-        await asyncio.to_thread(
+        snapshot_id = await asyncio.to_thread(
             self.repo.add_topic_snapshot, summary, msg_range, topics_json
         )
         logger.info("topic snapshot saved range=%s topics=%d", msg_range, len(response.topics))
+
+        # Cluster each topic into the thread index right after the snapshot
+        # lands. Failure here is non-fatal — the snapshot is already saved
+        # and the backfill on next bot start will pick it up.
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        try:
+            await self._threader.cluster_snapshot(snapshot_id, ts, topics_json)
+        except Exception:
+            logger.exception("threader: cluster_snapshot raised — will be retried via backfill")
 
 
 def _render_topics(topics: list[TopicEntry]) -> str:

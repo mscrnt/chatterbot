@@ -1,0 +1,129 @@
+{% set modal_title = 'Topic thread' %}
+{% set modal_icon = 'fa-comments' %}
+{% set modal_tone = 'accent' %}
+{% set modal_size = 'lg' %}
+{% extends "components/_modal.html" %}
+{% block modal_body %}
+{% set status_tone = {'active': 'success', 'dormant': 'warning', 'archived': 'neutral'}[thread.status] %}
+{% set status_icon = {'active': 'fa-circle-dot', 'dormant': 'fa-moon', 'archived': 'fa-box-archive'}[thread.status] %}
+<div class="space-y-4 text-sm">
+  <div>
+    <p class="text-[11px] uppercase tracking-wider text-muted">topic</p>
+    <h3 class="text-base sm:text-lg font-semibold text-primary">{{ thread.title }}</h3>
+    <div class="flex items-center gap-1 flex-wrap mt-1">
+      {% with label=thread.status, tone=status_tone, icon=status_icon %}{% include "components/_pill.html" %}{% endwith %}
+      {% if thread.category and thread.category != 'other' %}
+        {% with label=thread.category, tone='accent' %}{% include "components/_pill.html" %}{% endwith %}
+      {% endif %}
+      {% if thread.member_count > 1 %}
+        {% with label=('seen ' ~ thread.member_count ~ ' times'), tone='accent', icon='fa-rotate' %}
+          {% include "components/_pill.html" %}{% endwith %}
+      {% endif %}
+    </div>
+    <p class="text-xs text-muted mt-2">
+      first {{ thread.first_ts | short_ts }} · last {{ thread.last_ts | short_ts }}
+    </p>
+  </div>
+
+  <div>
+    <p class="text-[11px] uppercase tracking-wider text-muted mb-1">drivers</p>
+    {% if not driver_links %}
+      <p class="text-muted italic text-xs">none cited</p>
+    {% else %}
+    <div class="flex flex-wrap gap-1">
+      {% for d in driver_links %}
+        {% if d.user_id %}
+          <a href="/users/{{ d.user_id }}"
+             class="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full border border-accent/30 bg-accent/15 text-accent hover:bg-accent/25 transition-all duration-150 ease-out">
+            <i class="fa-solid fa-user text-[10px]"></i> {{ d.name }}
+          </a>
+        {% else %}
+          <span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full border border-subtle bg-surface-raised text-muted">
+            <i class="fa-solid fa-user-slash text-[10px]"></i> {{ d.name }}
+          </span>
+        {% endif %}
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+
+  {% if members and members|length > 1 %}
+  <div>
+    <p class="text-[11px] uppercase tracking-wider text-muted mb-1">timeline</p>
+    <div class="flex items-center gap-1 flex-wrap">
+      {% for m in members %}
+        <span class="inline-flex items-center gap-1 text-[10px] text-muted bg-surface-raised border border-subtle rounded-full px-2 py-0.5"
+              title="snapshot {{ m.snapshot_id }}">
+          <span class="block w-1.5 h-1.5 rounded-full bg-accent/70"></span>
+          {{ m.ts | short_ts }}
+        </span>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <div>
+    <p class="text-[11px] uppercase tracking-wider text-muted mb-1">
+      what they said
+      <span class="text-[10px]">({{ messages | length }} message{{ '' if messages|length == 1 else 's' }})</span>
+    </p>
+    {% if not messages %}
+      <p class="text-muted italic text-xs">No messages from these drivers in the snapshots' windows.</p>
+    {% else %}
+    <ul class="divide-y divide-subtle rounded-xl border border-subtle bg-surface max-h-64 overflow-y-auto">
+      {% for m in messages %}
+        <li class="px-3 py-2 text-sm flex items-baseline gap-2">
+          <span class="text-[11px] text-muted whitespace-nowrap">{{ m.ts | short_ts }}</span>
+          <a href="/users/{{ m.user_id }}" class="text-accent hover:underline font-medium">{{ m.name }}</a>
+          <span class="break-words text-primary">{{ m.content }}</span>
+        </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+
+  <div class="pt-1 border-t border-subtle">
+    <button type="button" id="thread-explain-btn"
+            class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-accent hover:bg-accent-600 text-white font-medium text-sm transition-all duration-150 ease-out">
+      <i class="fa-solid fa-rotate-left"></i> Pull this thread back up
+    </button>
+    <p id="thread-explain-status" class="text-xs text-muted mt-2 hidden"></p>
+    <div id="thread-explain-answer"
+         class="whitespace-pre-wrap text-primary leading-relaxed text-sm mt-2"></div>
+  </div>
+</div>
+
+<script>
+  (function () {
+    const btn = document.getElementById('thread-explain-btn');
+    const status = document.getElementById('thread-explain-status');
+    const answer = document.getElementById('thread-explain-answer');
+    let es = null;
+    btn.addEventListener('click', function () {
+      if (es) es.close();
+      answer.textContent = '';
+      status.textContent = 'thinking…';
+      status.classList.remove('hidden');
+      btn.disabled = true;
+      const url = `/threads/{{ thread.id }}/explain`;
+      es = new EventSource(url);
+      es.addEventListener('chunk', e => {
+        answer.textContent += e.data.replace(/\\n/g, '\n');
+      });
+      es.addEventListener('done', () => {
+        status.classList.add('hidden');
+        btn.disabled = false;
+        es.close();
+      });
+      es.addEventListener('error', e => {
+        if (e.data) answer.textContent += `\n[error: ${e.data}]`;
+      });
+      es.onerror = () => {
+        status.textContent = 'connection lost';
+        btn.disabled = false;
+        if (es) es.close();
+      };
+    });
+  })();
+</script>
+{% endblock %}
