@@ -1082,6 +1082,43 @@ class ChatterRepo:
             )
             return int(cur.fetchone()["c"])
 
+    # -- Newcomers nav-pill acknowledgment ---------------------------------
+
+    _NEWCOMERS_ACK_KEY = "newcomers_acknowledged_at"
+
+    def get_newcomers_ack(self) -> str | None:
+        return self.get_app_setting(self._NEWCOMERS_ACK_KEY)
+
+    def set_newcomers_ack(self, ts: str | None = None) -> None:
+        """Record the moment the streamer last reviewed newcomers (visiting
+        the Insights tab counts). Called by /insights to clear the pill."""
+        self.set_app_setting(self._NEWCOMERS_ACK_KEY, ts or _now_iso())
+
+    def count_first_timers_unacked(self) -> int:
+        """Newcomers in the last 24h whose first_seen is NEWER than the
+        streamer's last acknowledgment. This is what the nav pill displays."""
+        ack = self.get_newcomers_ack()
+        with self._cursor() as cur:
+            if ack:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS c FROM users
+                    WHERE opt_out = 0
+                      AND first_seen >= datetime('now', '-24 hours')
+                      AND first_seen > ?
+                    """,
+                    (ack,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS c FROM users
+                    WHERE opt_out = 0
+                      AND first_seen >= datetime('now', '-24 hours')
+                    """
+                )
+            return int(cur.fetchone()["c"])
+
     def list_opt_out_users(self) -> list[User]:
         with self._cursor() as cur:
             cur.execute(

@@ -103,12 +103,12 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     # Expose runtime settings flags to every template (nav uses these).
     TEMPLATES.env.globals["mod_mode_enabled"] = bool(settings.mod_mode_enabled)
 
-    # Newcomers-today count: rendered in the nav as a small pill so the
-    # streamer notices first-timers without leaving whatever view they're on.
-    # Cheap query (single COUNT with an index), called per page load.
+    # Newcomers nav pill — count of first-timers in the last 24h NEWER than
+    # the streamer's last acknowledgment. Visiting /insights acks. Pill goes
+    # away after the visit until a fresh chatter shows up.
     def _newcomers_today_count() -> int:
         try:
-            return repo.count_first_timers_today()
+            return repo.count_first_timers_unacked()
         except Exception:
             return 0
     TEMPLATES.env.globals["newcomers_today_count"] = _newcomers_today_count
@@ -840,6 +840,15 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         if window not in _INSIGHT_WINDOW_LOOKUP:
             window = "7d"
         modifier, label = _INSIGHT_WINDOW_LOOKUP[window]
+
+        # Visiting /insights = "I've reviewed the newcomers." Acks the pill.
+        # Skip on the HTMX-poll partial path so an auto-refresh in the
+        # background doesn't silently swallow new arrivals.
+        if not partial:
+            try:
+                repo.set_newcomers_ack()
+            except Exception:
+                logger.exception("failed to ack newcomers")
 
         cache = insights.cache
         regulars = repo.list_regulars(since=modifier, limit=10)
