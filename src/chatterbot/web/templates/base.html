@@ -146,6 +146,17 @@
         {% set is_chatters = current_path == "/" or current_path.startswith("/users") %}
         {% include "components/_nav_link.html" with context %}
       </div>
+      {% set _obs = obs_status() %}
+      {% if _obs.streaming or _obs.recording %}
+        {% set _tags = [] %}
+        {% if _obs.streaming %}{% set _ = _tags.append('LIVE') %}{% endif %}
+        {% if _obs.recording %}{% set _ = _tags.append('REC') %}{% endif %}
+        <span class="hidden sm:inline-flex items-center gap-1 px-2 py-1 rounded-full border border-danger/40 bg-danger/10 text-danger text-xs"
+              title="OBS: {{ _tags|join(' + ') }}{% if _obs.scene %} on scene '{{ _obs.scene }}'{% endif %}">
+          <i class="fa-solid fa-circle text-[8px] animate-pulse"></i>
+          {{ _tags|join(' · ') }}{% if _obs.scene %} · {{ _obs.scene }}{% endif %}
+        </span>
+      {% endif %}
       {% set _nt = newcomers_today_count() %}
       {% if _nt > 0 %}
         <a href="/insights"

@@ -118,6 +118,32 @@ ollama pull qwen3.5:9b
 ollama pull nomic-embed-text
 ```
 
+### Sharing one Ollama with another app
+
+If you also run [streamlored](https://github.com/mscrnt/streamlored) (or any
+second LLM client) against the same Ollama host, set the host's
+`OLLAMA_NUM_PARALLEL` to at least `2` so requests from the two apps don't
+queue up serially:
+
+```bash
+# on the Ollama host (Linux/macOS)
+OLLAMA_NUM_PARALLEL=2 ollama serve
+
+# or via systemd: edit /etc/systemd/system/ollama.service.d/override.conf
+[Service]
+Environment="OLLAMA_NUM_PARALLEL=2"
+```
+
+A 9B model + an embeddings model + two-way parallelism is roughly **8–10 GB
+VRAM** on a CUDA card, or fits comfortably in 64 GB unified memory on an
+M-series Mac.
+
+If you want chatterbot's moderation classifier to ride a smaller / faster
+model than note extraction (since moderation runs every few minutes while
+notes are rare), set `OLLAMA_MOD_MODEL=qwen3.5:4b` in `.env` and pull that
+model on the Ollama host. Note extraction, topics, and the dashboard's
+"Ask Qwen" RAG continue to use `OLLAMA_MODEL`.
+
 ## TUI
 
 Three tabs: **Chatters** (search + per-user profile + events + recent messages

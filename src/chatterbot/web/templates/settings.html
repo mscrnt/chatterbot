@@ -6,10 +6,20 @@
     <h1 class="text-xl sm:text-2xl font-semibold inline-flex items-center gap-2">
       <i class="fa-solid fa-sliders text-accent"></i> Settings
     </h1>
-    <button class="text-xs text-muted hover:text-primary inline-flex items-center gap-1"
-            hx-get="/modals/settings" hx-target="#modal-root">
-      <i class="fa-solid fa-circle-info"></i> env / cadence info
-    </button>
+    <div class="flex items-center gap-2">
+      <button type="button"
+              class="text-xs text-muted hover:text-primary inline-flex items-center gap-1"
+              hx-post="/restart-bot"
+              hx-target="#restart-bot-result"
+              hx-swap="outerHTML"
+              hx-confirm="Send SIGTERM to the bot? It restarts automatically when launched via `make all`.">
+        <i class="fa-solid fa-rotate"></i> restart bot
+      </button>
+      <button class="text-xs text-muted hover:text-primary inline-flex items-center gap-1"
+              hx-get="/modals/settings" hx-target="#modal-root">
+        <i class="fa-solid fa-circle-info"></i> env / cadence info
+      </button>
+    </div>
   </header>
   <p class="text-sm text-muted">
     Edit Twitch and StreamElements credentials. Anything left blank stays at its
@@ -17,11 +27,23 @@
   </p>
 
   {% if saved %}
-  <div class="rounded-xl border border-success/40 bg-success/10 px-3 py-2 text-sm text-primary inline-flex items-center gap-2">
-    <i class="fa-solid fa-circle-check text-success"></i>
-    Saved. <strong>Restart the bot</strong> for the new credentials to take effect.
+  <div class="rounded-xl border border-success/40 bg-success/10 px-3 py-2 text-sm text-primary flex flex-col sm:flex-row sm:items-center gap-2">
+    <span class="inline-flex items-center gap-2">
+      <i class="fa-solid fa-circle-check text-success"></i>
+      Saved. Restart the bot to pick up the new settings.
+    </span>
+    <button type="button"
+            class="tap inline-flex items-center justify-center gap-2 px-3 rounded bg-accent hover:bg-accent-600 text-white text-sm font-medium ml-auto"
+            hx-post="/restart-bot"
+            hx-target="#restart-bot-result"
+            hx-swap="outerHTML"
+            hx-confirm="Send SIGTERM to the bot? It restarts automatically when launched via `make all`.">
+      <i class="fa-solid fa-rotate"></i> Restart bot
+    </button>
   </div>
   {% endif %}
+
+  <div id="restart-bot-result"></div>
 
   <div class="rounded-xl border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-primary inline-flex items-start gap-2">
     <i class="fa-solid fa-triangle-exclamation text-warning mt-0.5"></i>

@@ -55,6 +55,7 @@ from ..config import (
 )
 from ..insights import InsightsService
 from ..llm.ollama_client import OllamaClient
+from ..obs import OBSStatusService
 from ..repo import ChatterRepo
 from .auth import make_auth_dependency
 from .rag import answer_for_user
@@ -112,17 +113,29 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             return 0
     TEMPLATES.env.globals["newcomers_today_count"] = _newcomers_today_count
 
+    # OBS live-status snapshot for the nav pill. Returns the cached status —
+    # the background poller refreshes it every ~10s.
+    def _obs_status():
+        return obs_status.status
+    TEMPLATES.env.globals["obs_status"] = _obs_status
+
     auth_dep = make_auth_dependency(settings)
     deps = [Depends(auth_dep)] if settings.dashboard_basic_auth_enabled else []
 
     insights = InsightsService(repo, llm, settings)
+    obs_status = OBSStatusService(settings)
     _bg_tasks: set[asyncio.Task] = set()
 
     async def _lifespan(app):
         # Background talking-points refresher. Runs inside the dashboard
         # process so the page render is always served from cache.
-        task = asyncio.create_task(insights.refresh_loop(), name="insights_refresh")
-        _bg_tasks.add(task)
+        _bg_tasks.add(
+            asyncio.create_task(insights.refresh_loop(), name="insights_refresh")
+        )
+        # Optional OBS poller; no-op when OBS_ENABLED=false.
+        _bg_tasks.add(
+            asyncio.create_task(obs_status.poll_loop(), name="obs_poll")
+        )
         try:
             yield
         finally:
@@ -464,6 +477,65 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "incident not found")
         return TEMPLATES.TemplateResponse(
             request, "partials/incident_card.html", {"row": row}
+        )
+
+    # ---------------- bot restart ----------------
+    # Sends SIGTERM to the bot process via its pid file. The Makefile's
+    # `make all` target re-launches the bot automatically (fail-fast loop),
+    # so the practical effect is "pick up new credentials." Bare `make bot`
+    # users will see the bot exit and need to re-run it themselves.
+
+    @app.post("/restart-bot", response_class=HTMLResponse)
+    async def restart_bot(request: Request):
+        import os
+        import signal as _signal
+        from pathlib import Path as _P
+
+        pid_file = _P("data/.bot.pid")
+        ctx: dict[str, Any] = {"ok": False, "message": ""}
+        if not pid_file.exists():
+            ctx["message"] = (
+                "no bot pid file at data/.bot.pid. If you just updated "
+                "chatterbot, restart `make all` once manually — the bot only "
+                "writes its pid here on versions that include this restart "
+                "feature. After that one restart, this button works going "
+                "forward."
+            )
+            return TEMPLATES.TemplateResponse(
+                request, "partials/restart_bot_result.html", ctx
+            )
+        try:
+            pid = int(pid_file.read_text().strip())
+        except (OSError, ValueError) as e:
+            ctx["message"] = f"could not read pid file: {e}"
+            return TEMPLATES.TemplateResponse(
+                request, "partials/restart_bot_result.html", ctx
+            )
+        try:
+            os.kill(pid, _signal.SIGTERM)
+        except ProcessLookupError:
+            ctx["message"] = (
+                f"bot pid {pid} not running. If you started with `make all`, "
+                "the auto-restart loop will pick up the next launch."
+            )
+            return TEMPLATES.TemplateResponse(
+                request, "partials/restart_bot_result.html", ctx
+            )
+        except PermissionError:
+            ctx["message"] = (
+                f"can't signal pid {pid} — bot is owned by a different user."
+            )
+            return TEMPLATES.TemplateResponse(
+                request, "partials/restart_bot_result.html", ctx
+            )
+        ctx["ok"] = True
+        ctx["message"] = (
+            "sent SIGTERM to bot. If you launched via `make all`, it'll "
+            "respawn within a few seconds with the new settings. "
+            "Otherwise re-run `make bot` to start it again."
+        )
+        return TEMPLATES.TemplateResponse(
+            request, "partials/restart_bot_result.html", ctx
         )
 
     # ---------------- diagnostic bundle ----------------

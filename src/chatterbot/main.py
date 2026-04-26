@@ -31,10 +31,30 @@ from .tui import run_tui
 logger = logging.getLogger(__name__)
 
 
+_PID_FILE = Path("data/.bot.pid")
+
+
+def _write_pid_file() -> None:
+    try:
+        _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _PID_FILE.write_text(str(__import__("os").getpid()))
+    except OSError:
+        logger.warning("could not write %s — restart-bot button won't find this process", _PID_FILE)
+
+
+def _clear_pid_file() -> None:
+    try:
+        _PID_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 async def run_bot(settings: Settings) -> None:
     if not settings.twitch_oauth_token or not settings.twitch_channel:
         logger.error("missing TWITCH_OAUTH_TOKEN or TWITCH_CHANNEL — refusing to start")
         return
+
+    _write_pid_file()
 
     repo = ChatterRepo(settings.db_path, embed_dim=settings.ollama_embed_dim)
     llm = OllamaClient(
@@ -74,6 +94,7 @@ async def run_bot(settings: Settings) -> None:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         repo.close()
+        _clear_pid_file()
 
 
 def run_dashboard(settings: Settings) -> None:

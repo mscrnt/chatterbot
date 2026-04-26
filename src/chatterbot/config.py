@@ -32,6 +32,10 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "streamelements_jwt",
     "streamelements_channel_id",
     "mod_mode_enabled",
+    "obs_enabled",
+    "obs_host",
+    "obs_port",
+    "obs_password",
 )
 
 # Subset that should be rendered as password inputs. Blank submissions for
@@ -41,6 +45,7 @@ SECRET_SETTING_KEYS: frozenset[str] = frozenset(
         "twitch_oauth_token",
         "twitch_client_secret",
         "streamelements_jwt",
+        "obs_password",
     }
 )
 
@@ -65,6 +70,16 @@ class Settings(BaseSettings):
     ollama_model: str = "qwen3.5:9b"
     ollama_embed_model: str = "nomic-embed-text"
     ollama_embed_dim: int = 768
+    # Optional model override for the moderator. Empty string = use ollama_model.
+    # Useful when the moderation classifier (high-frequency, cheap calls) should
+    # ride a smaller / faster model than note extraction (rare, quality-critical).
+    ollama_mod_model: str = ""
+
+    # OBS (read-only status: live state + current scene). Disabled by default.
+    obs_enabled: bool = False
+    obs_host: str = "localhost"
+    obs_port: int = 4455
+    obs_password: str = ""
 
     # StreamElements
     streamelements_enabled: bool = False
@@ -110,8 +125,13 @@ class Settings(BaseSettings):
 
 
 def _coerce(key: str, value: str) -> Any:
-    if key in ("streamelements_enabled", "mod_mode_enabled"):
+    if key in ("streamelements_enabled", "mod_mode_enabled", "obs_enabled"):
         return value.strip().lower() in ("true", "1", "yes", "on")
+    if key == "obs_port":
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 4455
     return value
 
 

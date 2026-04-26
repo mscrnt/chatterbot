@@ -29,15 +29,32 @@ tui:
 dashboard:
 	uv run chatterbot dashboard
 
-# Run bot in the background (logs to logs/bot.log) and dashboard in the
-# foreground. Ctrl+C in the dashboard shell kills the backgrounded bot too.
+# Run bot in the background (logs to logs/bot.log, auto-restart on exit) plus
+# dashboard in the foreground. Ctrl+C in the dashboard shell kills both.
+#
+# The bot is wrapped in a fail-fast restart loop: a clean exit (e.g. SIGTERM
+# from the dashboard's "Restart bot" button) is followed by a fresh launch
+# within ~2s. A near-immediate crash (<5s, e.g. bad token) breaks the loop
+# so a config bug doesn't hot-spin the host.
 all:
 	@mkdir -p logs
-	@uv run chatterbot bot > logs/bot.log 2>&1 & \
-	BOT_PID=$$!; \
-	echo "bot started (pid $$BOT_PID, logs/bot.log) — tail with: tail -f logs/bot.log"; \
+	@( while true; do \
+	    START=$$(date +%s); \
+	    uv run chatterbot bot >> logs/bot.log 2>&1; \
+	    END=$$(date +%s); \
+	    if [ $$((END - START)) -lt 5 ]; then \
+	      echo "bot exited in <5s — likely a config error. check logs/bot.log" >> logs/bot.log; \
+	      break; \
+	    fi; \
+	    echo "bot exited; restarting in 2s..." >> logs/bot.log; \
+	    sleep 2; \
+	  done ) & \
+	LOOP_PID=$$!; \
+	echo "bot launched in restart-loop (logs/bot.log) — tail with: tail -f logs/bot.log"; \
 	echo "dashboard starting in foreground (Ctrl+C stops both)..."; \
-	trap "echo; echo 'stopping bot pid $$BOT_PID'; kill $$BOT_PID 2>/dev/null" INT TERM EXIT; \
+	trap "echo; echo 'stopping bot loop pid $$LOOP_PID'; \
+	      pkill -P $$LOOP_PID 2>/dev/null; \
+	      kill $$LOOP_PID 2>/dev/null" INT TERM EXIT; \
 	uv run chatterbot dashboard
 
 tailwind:

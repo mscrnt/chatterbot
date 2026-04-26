@@ -1,0 +1,9 @@
+{% set _tone = 'success' if ok else 'warning' %}
+{% set _icon = 'fa-circle-check' if ok else 'fa-triangle-exclamation' %}
+<div id="restart-bot-result"
+     class="rounded-lg border px-3 py-2 text-sm flex items-start gap-2
+            {% if ok %}border-success/40 bg-success/10 text-primary
+            {% else %}border-warning/40 bg-warning/10 text-primary{% endif %}">
+  <i class="fa-solid {{ _icon }} {% if ok %}text-success{% else %}text-warning{% endif %} mt-0.5"></i>
+  <span class="flex-1">{{ message }}</span>
+</div>

@@ -120,6 +120,10 @@ class Moderator:
                 prompt=prompt,
                 system_prompt=MOD_REVIEW_SYSTEM,
                 response_model=ModerationBatchResponse,
+                # Route through a smaller / faster model when configured —
+                # moderation is the highest-frequency LLM call and benefits
+                # most from running on dedicated capacity.
+                model_override=self.settings.ollama_mod_model or None,
             )
         except ValidationError:
             logger.exception("moderation classifier validation failed")
