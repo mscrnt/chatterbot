@@ -1,6 +1,7 @@
 {# Nav links. Reads `current_path` and `mod_mode_enabled` from base context. #}
 {% set links = [
   ('/',         'Chatters', 'fa-users',    is_chatters),
+  ('/insights', 'Insights', 'fa-lightbulb', current_path == '/insights'),
   ('/topics',   'Topics',   'fa-comments', current_path == '/topics'),
   ('/events',   'Events',   'fa-coins',    current_path == '/events'),
   ('/live',     'Live',     'fa-tower-broadcast', current_path == '/live'),

@@ -53,6 +53,7 @@ from ..config import (
     get_settings,
     get_settings_with_sources,
 )
+from ..insights import InsightsService
 from ..llm.ollama_client import OllamaClient
 from ..repo import ChatterRepo
 from .auth import make_auth_dependency
@@ -101,13 +102,40 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     # Expose runtime settings flags to every template (nav uses these).
     TEMPLATES.env.globals["mod_mode_enabled"] = bool(settings.mod_mode_enabled)
 
+    # Newcomers-today count: rendered in the nav as a small pill so the
+    # streamer notices first-timers without leaving whatever view they're on.
+    # Cheap query (single COUNT with an index), called per page load.
+    def _newcomers_today_count() -> int:
+        try:
+            return repo.count_first_timers_today()
+        except Exception:
+            return 0
+    TEMPLATES.env.globals["newcomers_today_count"] = _newcomers_today_count
+
     auth_dep = make_auth_dependency(settings)
     deps = [Depends(auth_dep)] if settings.dashboard_basic_auth_enabled else []
+
+    insights = InsightsService(repo, llm, settings)
+    _bg_tasks: set[asyncio.Task] = set()
+
+    async def _lifespan(app):
+        # Background talking-points refresher. Runs inside the dashboard
+        # process so the page render is always served from cache.
+        task = asyncio.create_task(insights.refresh_loop(), name="insights_refresh")
+        _bg_tasks.add(task)
+        try:
+            yield
+        finally:
+            for t in _bg_tasks:
+                t.cancel()
+            await asyncio.gather(*_bg_tasks, return_exceptions=True)
+
     app = FastAPI(
         title="chatterbot dashboard",
         docs_url=None,
         redoc_url=None,
         dependencies=deps,
+        lifespan=_lifespan,
     )
     app.mount(
         "/static",
@@ -608,6 +636,57 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    # ---------------- insights (engagement helper) ----------------
+
+    # Time windows offered by the Insights window selector. The regulars +
+    # lapsed sections use this; "Active right now" and "New today" stay at
+    # their fixed semantic windows (10 min / 24 h).
+    _INSIGHT_WINDOWS = [
+        ("7d",       "-7 days",   "last 7 days"),
+        ("30d",      "-30 days",  "last 30 days"),
+        ("90d",      "-90 days",  "last 90 days"),
+        ("ytd",      "start of year", "year to date"),
+        ("1y",       "-365 days", "last 1 year"),
+        ("lifetime", None,        "lifetime"),
+    ]
+    _INSIGHT_WINDOW_LOOKUP = {key: (modifier, label) for key, modifier, label in _INSIGHT_WINDOWS}
+
+    @app.get("/insights", response_class=HTMLResponse)
+    async def insights_page(
+        request: Request,
+        partial: int = Query(0),
+        window: str = Query("7d"),
+    ):
+        import time as _t
+        if window not in _INSIGHT_WINDOW_LOOKUP:
+            window = "7d"
+        modifier, label = _INSIGHT_WINDOW_LOOKUP[window]
+
+        cache = insights.cache
+        regulars = repo.list_regulars(since=modifier, limit=10)
+        lapsed = repo.list_lapsed_regulars(
+            active_since=modifier, lapsed_for="-7 days", limit=10
+        )
+        newcomers = repo.list_first_timers_today(limit=20)
+        age = (
+            int(_t.time() - cache.refreshed_at)
+            if cache.refreshed_at is not None
+            else None
+        )
+        ctx = {
+            "talking_points": cache.talking_points,
+            "talking_points_age_seconds": age,
+            "talking_points_error": cache.error,
+            "regulars": regulars,
+            "lapsed": lapsed,
+            "newcomers": newcomers,
+            "window": window,
+            "window_label": label,
+            "window_options": _INSIGHT_WINDOWS,
+        }
+        tpl = "partials/insights_body.html" if partial else "insights.html"
+        return TEMPLATES.TemplateResponse(request, tpl, ctx)
 
     # ---------------- live chat (widget + full page) ----------------
 

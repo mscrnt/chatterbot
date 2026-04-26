@@ -146,6 +146,15 @@
         {% set is_chatters = current_path == "/" or current_path.startswith("/users") %}
         {% include "components/_nav_link.html" with context %}
       </div>
+      {% set _nt = newcomers_today_count() %}
+      {% if _nt > 0 %}
+        <a href="/insights"
+           class="hidden sm:inline-flex items-center gap-1 px-2 py-1 rounded-full border border-accent/30 bg-accent/10 text-accent text-xs hover:bg-accent/20 transition-all duration-150 ease-out"
+           title="{{ _nt }} first-timer{{ '' if _nt == 1 else 's' }} in the last 24h">
+          <i class="fa-solid fa-user-plus text-[10px]"></i>
+          {{ _nt }} new
+        </a>
+      {% endif %}
       <button type="button"
               @click="toggleTheme()"
               class="tap inline-flex items-center justify-center px-3 rounded text-muted hover:text-primary hover:bg-surface-raised transition-all duration-150 ease-out"

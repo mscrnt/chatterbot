@@ -100,3 +100,27 @@ class ModerationBatchResponse(BaseModel):
     an empty list is the expected, common case when chat is calm."""
 
     classifications: list[IncidentClassification] = Field(default_factory=list)
+
+
+# ---- engagement / "talking points" helper ----
+
+TalkingPointText = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=300, strip_whitespace=True),
+]
+
+
+class TalkingPoint(BaseModel):
+    """One conversation hook for a single active chatter, keyed by the index
+    we numbered them with in the prompt (1-based)."""
+
+    chatter_index: int
+    point: TalkingPointText
+
+
+class TalkingPointsResponse(BaseModel):
+    """Reply for `insights.InsightsService._refresh`. The model gets a numbered
+    list of currently-active chatters with their notes + recent messages and
+    returns one short conversation-hook per chatter for the streamer to use."""
+
+    points: list[TalkingPoint] = Field(default_factory=list, max_length=20)

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Insights · chatterbot{% endblock %}
+{% block content %}
+<div class="space-y-3">
+  <header class="flex items-baseline justify-between gap-2">
+    <h1 class="text-xl sm:text-2xl font-semibold inline-flex items-center gap-2">
+      <i class="fa-solid fa-lightbulb text-accent"></i> Insights
+    </h1>
+    <span class="text-xs text-muted">
+      talking points refresh every ~3 min · the rest live every poll
+    </span>
+  </header>
+  {% include "partials/insights_body.html" %}
+</div>
+{% endblock %}

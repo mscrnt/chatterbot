@@ -673,6 +673,161 @@ class ChatterRepo:
 
     # ============================ READ surface (TUI / dashboard) ===========
 
+    # ============================ Insights queries =========================
+    # Streamer-only views: who's chatting now, who are the regulars, who's
+    # lapsed, who's new today. All read-only / aggregate; no LLM calls here.
+
+    def list_active_chatters(self, window_minutes: int = 10, limit: int = 30) -> list[User]:
+        """Users with at least one message in the last `window_minutes`."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out
+                FROM users u
+                JOIN messages m ON m.user_id = u.twitch_id
+                WHERE u.opt_out = 0
+                  AND m.ts >= datetime('now', ?)
+                ORDER BY u.last_seen DESC
+                LIMIT ?
+                """,
+                (f"-{int(window_minutes)} minutes", limit),
+            )
+            return [
+                User(
+                    twitch_id=r["twitch_id"], name=r["name"],
+                    first_seen=r["first_seen"], last_seen=r["last_seen"],
+                    opt_out=False,
+                )
+                for r in cur.fetchall()
+            ]
+
+    def list_regulars(
+        self, *, since: str | None = "-7 days", limit: int = 10
+    ) -> list[ChatterRow]:
+        """Top chatters by message count.
+
+        `since` is either a SQLite `datetime('now', ...)` modifier
+        (e.g. '-7 days', '-30 days', 'start of year') or None for lifetime
+        (no date filter)."""
+        if since is None:
+            where = "WHERE u.opt_out = 0"
+            params: list[Any] = [limit]
+        else:
+            where = "WHERE u.opt_out = 0 AND m.ts >= datetime('now', ?)"
+            params = [since, limit]
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out,
+                       COUNT(m.id) AS msg_count,
+                       (SELECT COUNT(*) FROM notes n WHERE n.user_id = u.twitch_id) AS note_count,
+                       MAX(m.ts) AS last_msg_ts
+                FROM users u
+                JOIN messages m ON m.user_id = u.twitch_id
+                {where}
+                GROUP BY u.twitch_id
+                ORDER BY msg_count DESC
+                LIMIT ?
+                """,
+                params,
+            )
+            return [
+                ChatterRow(
+                    user=User(
+                        twitch_id=r["twitch_id"], name=r["name"],
+                        first_seen=r["first_seen"], last_seen=r["last_seen"],
+                        opt_out=False,
+                    ),
+                    note_count=int(r["note_count"]),
+                    msg_count=int(r["msg_count"]),
+                    last_message_ts=r["last_msg_ts"],
+                )
+                for r in cur.fetchall()
+            ]
+
+    def list_lapsed_regulars(
+        self,
+        *,
+        active_since: str | None = "-30 days",
+        lapsed_for: str = "-7 days",
+        limit: int = 10,
+    ) -> list[ChatterRow]:
+        """Chatters who were active within `active_since` but quiet for at
+        least `lapsed_for`. The "lapsed" definition stays a relative window;
+        the "active" lookback is the streamer's lever."""
+        if active_since is None:
+            where = "WHERE u.opt_out = 0"
+            having = "HAVING MAX(m.ts) <= datetime('now', ?)"
+            params: list[Any] = [lapsed_for, limit]
+        else:
+            where = "WHERE u.opt_out = 0 AND m.ts >= datetime('now', ?)"
+            having = "HAVING MAX(m.ts) <= datetime('now', ?)"
+            params = [active_since, lapsed_for, limit]
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out,
+                       COUNT(m.id) AS msg_count,
+                       (SELECT COUNT(*) FROM notes n WHERE n.user_id = u.twitch_id) AS note_count,
+                       MAX(m.ts) AS last_msg_ts
+                FROM users u
+                JOIN messages m ON m.user_id = u.twitch_id
+                {where}
+                GROUP BY u.twitch_id
+                {having}
+                ORDER BY msg_count DESC
+                LIMIT ?
+                """,
+                params,
+            )
+            return [
+                ChatterRow(
+                    user=User(
+                        twitch_id=r["twitch_id"], name=r["name"],
+                        first_seen=r["first_seen"], last_seen=r["last_seen"],
+                        opt_out=False,
+                    ),
+                    note_count=int(r["note_count"]),
+                    msg_count=int(r["msg_count"]),
+                    last_message_ts=r["last_msg_ts"],
+                )
+                for r in cur.fetchall()
+            ]
+
+    def list_first_timers_today(self, limit: int = 20) -> list[User]:
+        """Users whose first_seen is in the last 24h."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT twitch_id, name, first_seen, last_seen, opt_out
+                FROM users
+                WHERE opt_out = 0
+                  AND first_seen >= datetime('now', '-24 hours')
+                ORDER BY first_seen DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            return [
+                User(
+                    twitch_id=r["twitch_id"], name=r["name"],
+                    first_seen=r["first_seen"], last_seen=r["last_seen"],
+                    opt_out=False,
+                )
+                for r in cur.fetchall()
+            ]
+
+    def count_first_timers_today(self) -> int:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS c FROM users
+                WHERE opt_out = 0
+                  AND first_seen >= datetime('now', '-24 hours')
+                """
+            )
+            return int(cur.fetchone()["c"])
+
     def list_opt_out_users(self) -> list[User]:
         with self._cursor() as cur:
             cur.execute(

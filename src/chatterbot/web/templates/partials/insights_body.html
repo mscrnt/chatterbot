@@ -1,0 +1,145 @@
+<div id="insights-body" class="space-y-5"
+     hx-get="/insights?partial=1&window={{ window }}"
+     hx-trigger="every 60s"
+     hx-swap="outerHTML">
+
+  {# ---------------- Window selector (Regulars + Lapsed) ---------------- #}
+  <div class="flex items-center gap-2 flex-wrap">
+    <span class="text-[11px] uppercase tracking-wider text-muted">window</span>
+    <select name="window"
+            class="tap bg-surface border border-subtle rounded px-2 text-sm text-primary focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out"
+            hx-get="/insights?partial=1"
+            hx-target="#insights-body"
+            hx-swap="outerHTML"
+            hx-trigger="change">
+      {% for key, _modifier, label in window_options %}
+        <option value="{{ key }}" {% if key == window %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <span class="text-[11px] text-muted">
+      affects Regulars + Lapsed regulars · "Active" and "New today" stay live
+    </span>
+  </div>
+
+  {# ---------------- Active right now: talking points ---------------- #}
+  <section class="space-y-2">
+    <header class="flex items-baseline justify-between gap-2">
+      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+        <i class="fa-solid fa-fire text-accent"></i> Active right now
+      </h2>
+      <span class="text-[11px] text-muted">
+        {% if talking_points_age_seconds is not none %}
+          refreshed {{ talking_points_age_seconds }}s ago
+        {% else %}
+          warming up…
+        {% endif %}
+      </span>
+    </header>
+
+    {% if talking_points_error %}
+      <p class="text-xs text-warning italic">
+        <i class="fa-solid fa-triangle-exclamation"></i>
+        couldn't generate talking points: {{ talking_points_error }}
+      </p>
+    {% elif not talking_points %}
+      {% with icon='fa-comments-slash',
+              heading='No active chatters right now',
+              body='As soon as people start talking, suggestions appear here.' %}
+        {% include "components/_empty_state.html" %}
+      {% endwith %}
+    {% else %}
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+        {% for tp in talking_points %}
+          <a href="/users/{{ tp.user_id }}"
+             class="block rounded-xl border border-subtle bg-surface p-3 hover:bg-surface-raised transition-all duration-150 ease-out">
+            <div class="flex items-center gap-2 mb-1">
+              {% with name=tp.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+              <span class="text-accent font-medium">{{ tp.name }}</span>
+            </div>
+            <p class="text-sm text-primary leading-snug">{{ tp.point }}</p>
+          </a>
+        {% endfor %}
+      </div>
+    {% endif %}
+  </section>
+
+  {# ---------------- Newcomers today ---------------- #}
+  <section class="space-y-2">
+    <header>
+      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+        <i class="fa-solid fa-user-plus text-accent"></i> New today
+        <span class="text-[11px] text-muted">({{ newcomers | length }})</span>
+      </h2>
+    </header>
+    {% if not newcomers %}
+      <p class="text-muted italic text-sm">No first-timers in the last 24h.</p>
+    {% else %}
+      <div class="flex flex-wrap gap-2">
+        {% for u in newcomers %}
+          <a href="/users/{{ u.twitch_id }}"
+             class="inline-flex items-center gap-2 px-2 py-1 rounded-full border border-subtle bg-surface hover:bg-surface-raised text-sm">
+            {% with name=u.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+            <span class="text-accent">{{ u.name }}</span>
+            <span class="text-[10px] text-muted">{{ u.first_seen | short_ts }}</span>
+          </a>
+        {% endfor %}
+      </div>
+    {% endif %}
+  </section>
+
+  {# ---------------- Regulars (last 7d) ---------------- #}
+  <section class="space-y-2">
+    <header>
+      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+        <i class="fa-solid fa-crown text-accent"></i> Regulars
+        <span class="text-[11px] text-muted">{{ window_label }} · top {{ regulars | length }}</span>
+      </h2>
+    </header>
+    {% if not regulars %}
+      <p class="text-muted italic text-sm">No data yet.</p>
+    {% else %}
+      <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
+        {% for r in regulars %}
+          <li class="px-3 py-2 text-sm flex items-center gap-3 hover:bg-surface-raised">
+            {% with name=r.user.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+            <a href="/users/{{ r.user.twitch_id }}" class="text-accent hover:underline font-medium">{{ r.user.name }}</a>
+            <span class="ml-auto text-xs text-muted">
+              <i class="fa-regular fa-comment mr-1"></i>{{ r.msg_count }}
+              <span class="mx-1">·</span>
+              <i class="fa-regular fa-note-sticky mr-1"></i>{{ r.note_count }}
+              <span class="mx-1">·</span>
+              last {{ r.last_message_ts | short_ts }}
+            </span>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  </section>
+
+  {# ---------------- Lapsed regulars ---------------- #}
+  <section class="space-y-2">
+    <header>
+      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+        <i class="fa-solid fa-user-clock text-accent"></i> Lapsed regulars
+        <span class="text-[11px] text-muted">active {{ window_label }} · quiet last 7d</span>
+      </h2>
+    </header>
+    {% if not lapsed %}
+      <p class="text-muted italic text-sm">Nobody's lapsed — keep it up.</p>
+    {% else %}
+      <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
+        {% for r in lapsed %}
+          <li class="px-3 py-2 text-sm flex items-center gap-3 hover:bg-surface-raised">
+            {% with name=r.user.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+            <a href="/users/{{ r.user.twitch_id }}" class="text-accent hover:underline font-medium">{{ r.user.name }}</a>
+            <span class="ml-auto text-xs text-muted">
+              <i class="fa-regular fa-comment mr-1"></i>{{ r.msg_count }} in window
+              <span class="mx-1">·</span>
+              last seen {{ r.last_message_ts | short_ts }}
+            </span>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  </section>
+</div>
