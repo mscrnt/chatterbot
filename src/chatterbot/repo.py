@@ -1772,6 +1772,17 @@ class ChatterRepo:
         the Insights tab counts). Called by /insights to clear the pill."""
         self.set_app_setting(self._NEWCOMERS_ACK_KEY, ts or _now_iso())
 
+    def get_surface_ack(self, surface: str) -> str | None:
+        """Last-read timestamp for a named dashboard surface (e.g. 'topics',
+        'insights'). None means the streamer has never marked it read.
+
+        Used to render a 'NEW' badge on items whose ts is newer than the
+        ack — same pattern as `count_first_timers_unacked` but generic."""
+        return self.get_app_setting(f"surface_acked_at:{surface}")
+
+    def set_surface_ack(self, surface: str, ts: str | None = None) -> None:
+        self.set_app_setting(f"surface_acked_at:{surface}", ts or _now_iso())
+
     def count_first_timers_unacked(self) -> int:
         """Newcomers in the last 24h whose first_seen is NEWER than the
         streamer's last acknowledgment. This is what the nav pill displays."""
@@ -2640,7 +2651,8 @@ class ChatterRepo:
     ) -> list[tuple[str, int]]:
         """Naive top-words for the Stats tab word cloud. Strips URLs and
         @mentions, lowercases, drops stopwords + chat filler, requires
-        3-20 char alphabetic tokens."""
+        3-20 char alphabetic tokens. Skips messages flagged as emote-only
+        so 'bawkCrazy' style hype spam doesn't dominate."""
         import re as _re
         from collections import Counter as _Counter
         url_re = _re.compile(r"https?://\S+", _re.IGNORECASE)
@@ -2648,7 +2660,7 @@ class ChatterRepo:
         word_re = _re.compile(r"\b[a-z]{3,20}\b")
         counter: _Counter[str] = _Counter()
         with self._cursor() as cur:
-            cur.execute("SELECT content FROM messages")
+            cur.execute("SELECT content FROM messages WHERE is_emote_only = 0")
             for r in cur.fetchall():
                 text = (r["content"] or "").lower()
                 text = url_re.sub("", text)

@@ -79,6 +79,10 @@
           {% with name=u.name, size='md' %}{% include "components/_avatar.html" %}{% endwith %}
           <div class="min-w-0 flex-1">
             <div class="flex items-center gap-2">
+              {# Anniversaries don't have a "fired" ts; treat them as new for
+                 the day until the streamer marks read. Use last_seen as the
+                 most recent activity stamp so per-day clicks dismiss them. #}
+              {% with item_ts=u.last_seen, acked_at=acked_at %}{% include "components/_new_badge.html" %}{% endwith %}
               <span class="text-accent font-medium truncate">{{ u.name }}</span>
               {% with label=milestone, tone='accent', icon='fa-star' %}{% include "components/_pill.html" %}{% endwith %}
             </div>
@@ -105,6 +109,7 @@
         {% for u in newcomers %}
           <a href="/users/{{ u.twitch_id }}"
              class="inline-flex items-center gap-2 px-2 py-1 rounded-full border border-subtle bg-surface hover:bg-surface-raised text-sm">
+            {% with item_ts=u.first_seen, acked_at=acked_at %}{% include "components/_new_badge.html" %}{% endwith %}
             {% with name=u.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
             <span class="text-accent">{{ u.name }}</span>
             <span class="text-[10px] text-muted">{{ u.first_seen | short_ts }}</span>

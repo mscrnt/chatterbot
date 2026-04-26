@@ -1090,6 +1090,11 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             tp for tp in cache.talking_points
             if not (tp.point or "").lstrip().lower().startswith("skip:")
         ]
+        # Per-surface "last read" — items with a ts newer than this get a
+        # NEW badge in the templates. Distinct from newcomers ack so the
+        # streamer can scan-and-dismiss without losing context for items
+        # they just want to monitor.
+        insights_acked_at = repo.get_surface_ack("insights")
         ctx = {
             "talking_points": tps,
             "talking_points_age_seconds": age,
@@ -1101,9 +1106,16 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "window": window,
             "window_label": label,
             "window_options": _INSIGHT_WINDOWS,
+            "acked_at": insights_acked_at,
         }
         tpl = "partials/insights_body.html" if partial else "insights.html"
         return TEMPLATES.TemplateResponse(request, tpl, ctx)
+
+    @app.post("/insights/mark-read", response_class=HTMLResponse)
+    async def insights_mark_read(request: Request):
+        repo.set_surface_ack("insights")
+        # Re-render the body partial so HTMX can swap it in place.
+        return await insights_page(request, partial=1, window="7d")
 
     # ---------------- live chat (widget + full page) ----------------
 
@@ -1173,6 +1185,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         # Tucked at the bottom so the new view dominates.
         legacy = [s for s in snapshots if not s.topics_json][:5]
 
+        topics_acked_at = repo.get_surface_ack("topics")
         ctx = {
             "active":   buckets["active"],
             "dormant":  buckets["dormant"],
@@ -1184,9 +1197,15 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "legacy": legacy,
             "settings": settings,
             "total": len(threads),
+            "acked_at": topics_acked_at,
         }
         tpl = "partials/topics_body.html" if partial else "topics.html"
         return TEMPLATES.TemplateResponse(request, tpl, ctx)
+
+    @app.post("/topics/mark-read", response_class=HTMLResponse)
+    async def topics_mark_read(request: Request):
+        repo.set_surface_ack("topics")
+        return await topics(request, partial=1, status="all", q="")
 
     @app.get("/modals/thread/{thread_id}", response_class=HTMLResponse)
     async def modal_thread(request: Request, thread_id: int):

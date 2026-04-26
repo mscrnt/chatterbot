@@ -1,4 +1,4 @@
-{% macro thread_card(t, hot=False) -%}
+{% macro thread_card(t, hot=False, acked_at=None) -%}
 {% set tone = {
   'gaming':    'accent',
   'personal':  'success',
@@ -17,7 +17,10 @@
         hx-target="#modal-root"
         hx-swap="innerHTML">
   <header class="flex items-baseline justify-between gap-2 flex-wrap">
-    <h3 class="font-semibold text-primary text-sm sm:text-base">{{ t.title }}</h3>
+    <h3 class="font-semibold text-primary text-sm sm:text-base">
+      {% with item_ts=t.last_ts, acked_at=acked_at %}{% include "components/_new_badge.html" %}{% endwith %}
+      {{ t.title }}
+    </h3>
     <span class="text-[10px] text-muted">last {{ t.last_ts | short_ts }}</span>
   </header>
 
@@ -64,6 +67,7 @@
       <header class="flex items-baseline justify-between gap-2 mb-2">
         <h2 class="font-semibold text-primary inline-flex items-center gap-2">
           <i class="fa-solid fa-fire text-accent"></i> Right now
+          {% with item_ts=latest.ts, acked_at=acked_at %}{% include "components/_new_badge.html" %}{% endwith %}
         </h2>
         <span class="text-xs text-muted">snapshot {{ latest.ts | short_ts }}</span>
       </header>
@@ -126,7 +130,7 @@
       {% else %}
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         {% for t in active %}
-          {{ thread_card(t, hot=True) }}
+          {{ thread_card(t, hot=True, acked_at=acked_at) }}
         {% endfor %}
       </div>
       {% endif %}
@@ -145,7 +149,7 @@
       {% else %}
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         {% for t in dormant %}
-          {{ thread_card(t) }}
+          {{ thread_card(t, acked_at=acked_at) }}
         {% endfor %}
       </div>
       {% endif %}
@@ -164,7 +168,7 @@
       {% else %}
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         {% for t in archived %}
-          {{ thread_card(t) }}
+          {{ thread_card(t, acked_at=acked_at) }}
         {% endfor %}
       </div>
       {% endif %}

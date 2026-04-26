@@ -2,13 +2,23 @@
 {% block title %}Insights · chatterbot{% endblock %}
 {% block content %}
 <div class="space-y-3">
-  <header class="flex items-baseline justify-between gap-2">
+  <header class="flex items-baseline justify-between gap-2 flex-wrap">
     <h1 class="text-xl sm:text-2xl font-semibold inline-flex items-center gap-2">
       <i class="fa-solid fa-lightbulb text-accent"></i> Insights
     </h1>
-    <span class="text-xs text-muted">
-      talking points refresh every ~3 min · the rest live every poll
-    </span>
+    <div class="flex items-center gap-3">
+      <span class="text-xs text-muted hidden sm:inline">
+        talking points refresh every ~3 min · the rest live every poll
+      </span>
+      <button type="button"
+              class="tap inline-flex items-center justify-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary text-sm"
+              hx-post="/insights/mark-read"
+              hx-target="#insights-body"
+              hx-swap="outerHTML"
+              title="Clear NEW badges across this page">
+        <i class="fa-solid fa-check-double text-xs"></i> Mark all read
+      </button>
+    </div>
   </header>
   {% include "partials/insights_body.html" %}
 </div>
