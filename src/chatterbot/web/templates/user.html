@@ -77,7 +77,8 @@
       <span class="text-xs text-muted hidden sm:inline">browser-only · never sent to chat</span>
     </div>
     <form id="ask-form" class="flex flex-col sm:flex-row gap-2">
-      <input id="ask-q" name="q" type="text" placeholder="e.g. has Bob ever mentioned a pet?"
+      <input id="ask-q" name="q" type="text"
+             placeholder="e.g. has {{ user.name }} ever mentioned a pet?"
              class="flex-1 tap bg-surface border border-subtle rounded px-3 text-base text-primary placeholder:text-muted
                     focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out">
       <button type="button" id="ask-submit"
@@ -98,19 +99,20 @@
     <h2 class="font-semibold text-primary inline-flex items-center gap-2">
       <i class="fa-solid fa-id-card text-accent"></i> Profile
     </h2>
-    <div id="notes-list" class="space-y-2">
-      {% if not notes %}
-        {% with icon='fa-note-sticky',
-                heading='No notes yet',
-                body='Notes appear after the summarizer processes this viewer\'s messages.' %}
-          {% include "components/_empty_state.html" %}
-        {% endwith %}
-      {% else %}
-        {% for note in notes %}
-          {% include "partials/note.html" %}
-        {% endfor %}
-      {% endif %}
-    </div>
+    <form hx-post="/users/{{ user.twitch_id }}/notes"
+          hx-target="#notes-list"
+          hx-swap="outerHTML"
+          hx-on::after-request="this.reset()"
+          class="flex flex-col sm:flex-row gap-2">
+      <input type="text" name="text" required maxlength="500"
+             placeholder="add a note manually (e.g. 'Owns a black cat named Loki')"
+             class="flex-1 tap bg-surface border border-subtle rounded px-3 text-base text-primary placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out">
+      <button type="submit"
+              class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-accent hover:bg-accent-600 text-white font-medium text-sm transition-all duration-150 ease-out">
+        <i class="fa-solid fa-plus"></i> add
+      </button>
+    </form>
+    {% include "partials/notes_list.html" %}
   </section>
 
   {# Donations & events log #}

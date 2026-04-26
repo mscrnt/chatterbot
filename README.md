@@ -7,6 +7,37 @@ events, and builds lightweight per-chatter profiles via local LLM
 summarization. The streamer reads this through a terminal UI **or** a browser
 dashboard. The bot itself **never** writes to chat.
 
+## Quickstart
+
+You need Python 3.11+, [`uv`](https://github.com/astral-sh/uv), and a local
+[Ollama](https://ollama.com) reachable on the network.
+
+```bash
+# 1. clone + install
+git clone https://github.com/mscrnt/chatterbot.git
+cd chatterbot
+uv sync
+
+# 2. pull the Ollama models (on your Ollama host)
+ollama pull qwen3.5:9b
+ollama pull nomic-embed-text
+
+# 3. configure
+cp .env.example .env
+# Edit .env: set TWITCH_BOT_NICK, TWITCH_OAUTH_TOKEN (oauth:...),
+# TWITCH_CHANNEL, and OLLAMA_HOST. Get a token at
+# https://twitchtokengenerator.com (Bot Chat Token, scope chat:read).
+
+# 4. run both bot + dashboard in one shell
+make all
+```
+
+Open the dashboard at <http://127.0.0.1:8765>. Bot logs land in `logs/bot.log`.
+Ctrl+C in the dashboard terminal stops both.
+
+> Need separate processes? `make bot` and `make dashboard` (and optionally
+> `make tui`) all run independently and share the SQLite DB via WAL.
+
 ## Architectural rule (non-negotiable)
 
 Profile data, event data, message logs, and topic summaries must **never** enter

@@ -273,6 +273,36 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             {"user": user},
         )
 
+    @app.post("/users/{twitch_id}/notes", response_class=HTMLResponse)
+    async def add_user_note(
+        request: Request,
+        twitch_id: str,
+        text: Annotated[str, Form()],
+    ):
+        text = text.strip()
+        if not text:
+            # Empty submissions: just re-render the current list, no insert.
+            user = repo.get_user(twitch_id)
+            notes = repo.get_notes(twitch_id) if user else []
+            return TEMPLATES.TemplateResponse(
+                request, "partials/notes_list.html", {"notes": notes}
+            )
+        user = repo.get_user(twitch_id)
+        if not user:
+            raise HTTPException(404, "user not found")
+        # Embed for RAG; non-fatal if Ollama is unreachable.
+        embedding: list[float] | None
+        try:
+            embedding = await llm.embed(text[:500])
+        except Exception:
+            logger.exception("embed failed for manual note; storing without vector")
+            embedding = None
+        repo.add_note(twitch_id, text[:500], embedding)
+        notes = repo.get_notes(twitch_id)
+        return TEMPLATES.TemplateResponse(
+            request, "partials/notes_list.html", {"notes": notes}
+        )
+
     @app.patch("/notes/{note_id}", response_class=HTMLResponse)
     async def patch_note(
         request: Request,

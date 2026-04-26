@@ -24,7 +24,8 @@
             <button type="button"
                     class="w-full text-left rounded-lg px-2 py-1.5 hover:bg-surface-raised transition-all duration-150 ease-out flex items-start gap-2 group"
                     hx-get="/modals/topic/{{ s.id }}/{{ loop.index0 }}"
-                    hx-target="#modal-root">
+                    hx-target="#modal-root"
+                    hx-swap="innerHTML">
               <i class="fa-solid fa-circle text-accent text-[6px] mt-2 shrink-0"></i>
               <span class="flex-1 min-w-0">
                 <span class="text-primary text-sm sm:text-base">{{ t.topic }}</span>
