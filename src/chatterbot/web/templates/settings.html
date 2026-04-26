@@ -49,10 +49,22 @@
       Also include usernames + per-user message <em>counts</em> over the last 24h
       <span class="text-[10px] uppercase tracking-wider text-warning">opt-in</span>
     </label>
-    <a :href="withRecent ? '/diagnose?with_recent_activity=1' : '/diagnose'"
-       class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-accent hover:bg-accent-600 text-white font-medium text-sm transition-all duration-150 ease-out">
-      <i class="fa-solid fa-download"></i> Download bundle
-    </a>
+    <div class="flex flex-col sm:flex-row gap-2">
+      <a :href="withRecent ? '/diagnose?with_recent_activity=1' : '/diagnose'"
+         class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-accent hover:bg-accent-600 text-white font-medium text-sm transition-all duration-150 ease-out">
+        <i class="fa-solid fa-download"></i> Download bundle
+      </a>
+      <a href="{{ github_issue_url }}" target="_blank" rel="noopener"
+         class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-surface-raised hover:bg-subtle text-primary font-medium text-sm transition-all duration-150 ease-out">
+        <i class="fa-brands fa-github"></i> Open issue on GitHub
+      </a>
+    </div>
+    <p class="text-[11px] text-muted">
+      <i class="fa-solid fa-circle-info text-accent"></i>
+      GitHub doesn't allow file attachments via URL — after the issue page
+      opens, drag the <code>.cbreport</code> you just downloaded into the
+      issue body.
+    </p>
   </section>
 
   <form method="post" action="/settings" class="space-y-4">

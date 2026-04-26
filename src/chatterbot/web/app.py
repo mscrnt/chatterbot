@@ -351,10 +351,15 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                     "source": "db" if key in db_sources else "env",
                 }
             )
+        from ..diagnose import make_github_issue_url
         return TEMPLATES.TemplateResponse(
             request,
             "settings.html",
-            {"rows": rows, "saved": bool(saved)},
+            {
+                "rows": rows,
+                "saved": bool(saved),
+                "github_issue_url": make_github_issue_url(),
+            },
         )
 
     @app.post("/settings")

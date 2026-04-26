@@ -87,6 +87,43 @@ def default_bundle_filename() -> str:
     return f"chatterbot-diagnose-{ts}.cbreport"
 
 
+# Where bug reports go. The repo is hard-coded to mscrnt/chatterbot — fork
+# users can override by setting an env var if/when that ever matters.
+ISSUE_REPO = os.environ.get("CHATTERBOT_ISSUE_REPO", "mscrnt/chatterbot")
+
+
+def make_github_issue_url() -> str:
+    """Build a github.com/.../issues/new URL with a prefilled title + body.
+
+    GitHub's web UI doesn't support attaching files via URL params, so the
+    body explicitly tells the streamer to drag the .cbreport they just
+    downloaded into the textarea. Includes a system-info footer so the
+    maintainer has versions even before the .cbreport lands."""
+    from urllib.parse import urlencode
+
+    sysinfo = (
+        f"chatterbot {__version__} · "
+        f"python {sys.version.split()[0]} · "
+        f"{platform.system().lower()} {platform.release()} · "
+        f"sqlite {sqlite3.sqlite_version}"
+    )
+    body = (
+        "## What happened?\n\n"
+        "<!-- describe the bug -->\n\n"
+        "## What did you expect?\n\n"
+        "<!-- what should have happened instead? -->\n\n"
+        "## Steps to reproduce\n\n"
+        "1. \n2. \n3. \n\n"
+        "## Diagnostic bundle\n\n"
+        "📎 **Please drag the `.cbreport` file you just downloaded into this "
+        "textarea so it gets attached to this issue.**\n\n"
+        "---\n"
+        f"_{sysinfo}_\n"
+    )
+    params = urlencode({"title": "Bug report: ", "body": body, "labels": "bug"})
+    return f"https://github.com/{ISSUE_REPO}/issues/new?{params}"
+
+
 # ----------------------------- builders ----------------------------------
 
 def _meta() -> dict[str, Any]:
