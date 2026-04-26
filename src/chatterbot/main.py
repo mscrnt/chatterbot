@@ -20,6 +20,7 @@ from pathlib import Path
 from .bot import ChatterListener
 from .config import Settings, get_settings
 from .diagnose import build_diagnostic_bundle, default_bundle_filename
+from .discord_bot import DiscordListener
 from .llm.ollama_client import OllamaClient
 from .logging_setup import setup_logging
 from .moderator import Moderator
@@ -27,6 +28,7 @@ from .repo import ChatterRepo
 from .streamelements import StreamElementsListener
 from .summarizer import Summarizer
 from .tui import run_tui
+from .youtube import YouTubeListener
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,14 @@ async def run_bot(settings: Settings) -> None:
         moderator = Moderator(repo, llm, settings)
         tasks.append(asyncio.create_task(moderator.review_loop(), name="moderator"))
         logger.info("moderation mode ENABLED — advisory-only classifier active")
+    # Cross-platform listeners — both are stubs today; their start() returns
+    # immediately when disabled or unconfigured.
+    if settings.youtube_enabled:
+        yt = YouTubeListener(settings, repo, summarizer)
+        tasks.append(asyncio.create_task(yt.start(), name="youtube_listener"))
+    if settings.discord_enabled:
+        dc = DiscordListener(settings, repo, summarizer)
+        tasks.append(asyncio.create_task(dc.start(), name="discord_listener"))
 
     try:
         await asyncio.gather(*tasks)

@@ -53,6 +53,12 @@ class User:
     is_mod: bool = False
     is_vip: bool = False
     is_founder: bool = False
+    # Cross-platform identity. `source` ∈ {twitch, youtube, discord}; the
+    # twitch_id PK is namespaced for non-Twitch (e.g. 'yt:UCxxx', 'dc:1234').
+    source: str = "twitch"
+    # If non-null, this user has been merged into another (the parent).
+    # Aggregations should follow the link before reporting on this row.
+    merged_into: str | None = None
 
 
 @dataclass
@@ -285,6 +291,16 @@ class ChatterRepo:
                 ("is_mod",     "INTEGER NOT NULL DEFAULT 0"),
                 ("is_vip",     "INTEGER NOT NULL DEFAULT 0"),
                 ("is_founder", "INTEGER NOT NULL DEFAULT 0"),
+                # Cross-platform identity. `source` ∈ {twitch, youtube, discord}.
+                # The `twitch_id` PK is platform-namespaced for non-Twitch
+                # rows (e.g. 'yt:UCxxx', 'dc:1234567890') so collisions across
+                # platforms are impossible.
+                ("source",      "TEXT NOT NULL DEFAULT 'twitch'"),
+                # When a user is merged into another, this points at the
+                # canonical user's twitch_id (the parent). All FKs are also
+                # rewritten to the parent at merge time, so the child row
+                # exists only for "merged from X" provenance.
+                ("merged_into", "TEXT"),
             ):
                 if col not in _ucols:
                     cur.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
@@ -513,18 +529,18 @@ class ChatterRepo:
 
     # ============================ WRITE surface (bot) ======================
 
-    def upsert_user(self, twitch_id: str, name: str) -> None:
+    def upsert_user(self, twitch_id: str, name: str, *, source: str = "twitch") -> None:
         now = _now_iso()
         with self._cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO users(twitch_id, name, first_seen, last_seen, opt_out)
-                VALUES (?, ?, ?, ?, 0)
+                INSERT INTO users(twitch_id, name, first_seen, last_seen, opt_out, source)
+                VALUES (?, ?, ?, ?, 0, ?)
                 ON CONFLICT(twitch_id) DO UPDATE SET
                     name = excluded.name,
                     last_seen = excluded.last_seen
                 """,
-                (twitch_id, name, now, now),
+                (twitch_id, name, now, now, source),
             )
             # Record every name we see this user under. Twitch IDs are stable;
             # display names are not.
@@ -607,6 +623,158 @@ class ChatterRepo:
                 (user_id, _now_iso(), content, reply_parent_login, reply_parent_body),
             )
             return int(cur.lastrowid)
+
+    def merge_users(self, child_id: str, parent_id: str) -> dict[str, int]:
+        """Merge `child_id` into `parent_id`. Rewrites every FK to point at
+        the parent, sets `merged_into` on the child, and folds the child's
+        aliases under the parent. The child row stays around for "merged
+        from X" provenance — it just no longer owns any data.
+
+        Idempotent for any (child, parent) pair where child still exists.
+        Refuses if either is missing or if parent is itself merged.
+
+        Returns a dict of how many rows were rewritten per table."""
+        if child_id == parent_id:
+            raise ValueError("cannot merge a user into itself")
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT twitch_id, merged_into FROM users WHERE twitch_id IN (?, ?)",
+                (child_id, parent_id),
+            )
+            rows = {r["twitch_id"]: r for r in cur.fetchall()}
+            if child_id not in rows or parent_id not in rows:
+                raise ValueError("child or parent not found")
+            if rows[parent_id]["merged_into"]:
+                raise ValueError(
+                    f"parent {parent_id} is itself merged into "
+                    f"{rows[parent_id]['merged_into']}"
+                )
+
+            counts: dict[str, int] = {}
+            for table in ("messages", "notes", "events", "reminders", "incidents"):
+                cur.execute(
+                    f"UPDATE {table} SET user_id = ? WHERE user_id = ?",
+                    (parent_id, child_id),
+                )
+                counts[table] = int(cur.rowcount)
+
+            # Watermark — keep the larger of the two (we've definitely
+            # summarized everything up to it on the parent side).
+            cur.execute(
+                "SELECT user_id, last_summarized_msg_id FROM summarization_state "
+                "WHERE user_id IN (?, ?)",
+                (child_id, parent_id),
+            )
+            wms = {r["user_id"]: int(r["last_summarized_msg_id"]) for r in cur.fetchall()}
+            new_wm = max(wms.get(child_id, 0), wms.get(parent_id, 0))
+            if new_wm:
+                cur.execute(
+                    """
+                    INSERT INTO summarization_state(user_id, last_summarized_msg_id)
+                    VALUES (?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        last_summarized_msg_id = excluded.last_summarized_msg_id
+                    """,
+                    (parent_id, new_wm),
+                )
+            cur.execute(
+                "DELETE FROM summarization_state WHERE user_id = ?", (child_id,)
+            )
+
+            # Aliases — insert child's under parent (skip on conflict), then
+            # drop the child's rows. The child's display name itself becomes
+            # an alias of the parent.
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO user_aliases(user_id, name, first_seen, last_seen_as)
+                SELECT ?, name, first_seen, last_seen_as FROM user_aliases WHERE user_id = ?
+                """,
+                (parent_id, child_id),
+            )
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO user_aliases(user_id, name, first_seen, last_seen_as)
+                SELECT ?, name, first_seen, last_seen FROM users WHERE twitch_id = ?
+                """,
+                (parent_id, child_id),
+            )
+            cur.execute(
+                "DELETE FROM user_aliases WHERE user_id = ?", (child_id,)
+            )
+
+            # Anything that pointed at the child via its old id should keep
+            # working through the merged_into hop.
+            cur.execute(
+                "UPDATE users SET merged_into = ? WHERE twitch_id = ?",
+                (parent_id, child_id),
+            )
+            return counts
+
+    def list_merged_children(self, parent_id: str) -> list[User]:
+        """Users that were merged INTO this one. Used by the user page to
+        show 'merged from: X (Discord), Y (YouTube)'."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT twitch_id, name, first_seen, last_seen, opt_out, "
+                "sub_tier, sub_months, is_mod, is_vip, is_founder, "
+                "source, merged_into "
+                "FROM users WHERE merged_into = ? ORDER BY source, name",
+                (parent_id,),
+            )
+            return [
+                User(
+                    twitch_id=r["twitch_id"], name=r["name"],
+                    first_seen=r["first_seen"], last_seen=r["last_seen"],
+                    opt_out=bool(r["opt_out"]),
+                    sub_tier=r["sub_tier"],
+                    sub_months=int(r["sub_months"] or 0),
+                    is_mod=bool(r["is_mod"]),
+                    is_vip=bool(r["is_vip"]),
+                    is_founder=bool(r["is_founder"]),
+                    source=r["source"] or "twitch",
+                    merged_into=r["merged_into"],
+                )
+                for r in cur.fetchall()
+            ]
+
+    def search_users_for_merge(
+        self, query: str, *, exclude_id: str, limit: int = 10
+    ) -> list[User]:
+        """Name-search across un-merged users for the merge picker. Excludes
+        the user being merged FROM and any other already-merged children."""
+        q = f"%{query.strip().lower()}%"
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT u.twitch_id, u.name, u.first_seen, u.last_seen,
+                                u.opt_out, u.sub_tier, u.sub_months,
+                                u.is_mod, u.is_vip, u.is_founder,
+                                u.source, u.merged_into
+                FROM users u
+                LEFT JOIN user_aliases a ON a.user_id = u.twitch_id
+                WHERE u.twitch_id != ?
+                  AND u.merged_into IS NULL
+                  AND (LOWER(u.name) LIKE ? OR LOWER(a.name) LIKE ?)
+                ORDER BY u.last_seen DESC
+                LIMIT ?
+                """,
+                (exclude_id, q, q, int(limit)),
+            )
+            return [
+                User(
+                    twitch_id=r["twitch_id"], name=r["name"],
+                    first_seen=r["first_seen"], last_seen=r["last_seen"],
+                    opt_out=bool(r["opt_out"]),
+                    sub_tier=r["sub_tier"],
+                    sub_months=int(r["sub_months"] or 0),
+                    is_mod=bool(r["is_mod"]),
+                    is_vip=bool(r["is_vip"]),
+                    is_founder=bool(r["is_founder"]),
+                    source=r["source"] or "twitch",
+                    merged_into=r["merged_into"],
+                )
+                for r in cur.fetchall()
+            ]
 
     def is_opted_out(self, twitch_id: str) -> bool:
         with self._cursor() as cur:
@@ -1726,7 +1894,10 @@ class ChatterRepo:
     def get_user(self, twitch_id: str) -> User | None:
         with self._cursor() as cur:
             cur.execute(
-                "SELECT twitch_id, name, first_seen, last_seen, opt_out, sub_tier, sub_months, is_mod, is_vip, is_founder FROM users WHERE twitch_id = ?",
+                "SELECT twitch_id, name, first_seen, last_seen, opt_out, "
+                "sub_tier, sub_months, is_mod, is_vip, is_founder, "
+                "source, merged_into "
+                "FROM users WHERE twitch_id = ?",
                 (twitch_id,),
             )
             r = cur.fetchone()
@@ -1743,6 +1914,8 @@ class ChatterRepo:
                 is_mod=bool(r["is_mod"]),
                 is_vip=bool(r["is_vip"]),
                 is_founder=bool(r["is_founder"]),
+                source=r["source"] or "twitch",
+                merged_into=r["merged_into"],
             )
 
     def get_user_aliases(self, user_id: str) -> list[Alias]:

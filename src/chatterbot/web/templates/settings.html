@@ -60,7 +60,7 @@
               :class="tab === '{{ g.id }}'
                       ? 'border-accent text-accent'
                       : 'border-transparent text-muted hover:text-primary hover:bg-surface-raised'">
-        <i class="fa-solid {{ g.icon }} text-xs"></i> {{ g.title }}
+        <i class="{{ g.icon }} text-xs"></i> {{ g.title }}
       </button>
     {% endfor %}
     <button type="button"
@@ -83,7 +83,7 @@
       <section x-show="tab === '{{ g.id }}'" x-cloak class="space-y-4">
         {% if g.blurb %}
           <p class="text-sm text-muted inline-flex items-start gap-2">
-            <i class="fa-solid {{ g.icon }} text-accent mt-0.5"></i>
+            <i class="{{ g.icon }} text-accent mt-0.5"></i>
             {{ g.blurb }}
           </p>
         {% endif %}

@@ -36,6 +36,12 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "obs_host",
     "obs_port",
     "obs_password",
+    "youtube_enabled",
+    "youtube_api_key",
+    "youtube_channel_id",
+    "discord_enabled",
+    "discord_bot_token",
+    "discord_channel_ids",
     "live_widget_enabled",
 )
 
@@ -47,6 +53,8 @@ SECRET_SETTING_KEYS: frozenset[str] = frozenset(
         "twitch_client_secret",
         "streamelements_jwt",
         "obs_password",
+        "youtube_api_key",
+        "discord_bot_token",
     }
 )
 
@@ -86,6 +94,16 @@ class Settings(BaseSettings):
     streamelements_enabled: bool = False
     streamelements_jwt: str = ""
     streamelements_channel_id: str = ""
+
+    # YouTube — STUB. The listener exists but no API polling is wired yet.
+    youtube_enabled: bool = False
+    youtube_api_key: str = ""
+    youtube_channel_id: str = ""
+
+    # Discord — STUB. The listener exists but no gateway connection yet.
+    discord_enabled: bool = False
+    discord_bot_token: str = ""
+    discord_channel_ids: str = ""  # comma-separated
 
     # Dashboard
     dashboard_host: str = "127.0.0.1"
@@ -132,6 +150,7 @@ def _coerce(key: str, value: str) -> Any:
     if key in (
         "streamelements_enabled", "mod_mode_enabled",
         "obs_enabled", "live_widget_enabled",
+        "youtube_enabled", "discord_enabled",
     ):
         return value.strip().lower() in ("true", "1", "yes", "on")
     if key == "obs_port":

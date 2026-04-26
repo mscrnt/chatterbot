@@ -1,0 +1,54 @@
+{% set modal_title = 'Merge ' ~ child.name ~ ' (' ~ child.source ~ ') into another chatter' %}
+{% set modal_icon = 'fa-code-merge' %}
+{% set modal_tone = 'accent' %}
+{% set modal_size = 'lg' %}
+{% extends "components/_modal.html" %}
+{% block modal_body %}
+<div class="space-y-3 text-sm">
+  <p class="text-muted">
+    Pick the canonical chatter to fold this account into. All messages,
+    notes, events, reminders, and incidents from
+    <span class="text-accent font-medium">{{ child.name }}</span>
+    will be re-attributed to the chosen target. {{ child.name }}'s row sticks
+    around with a "merged from" pointer so you can see where they came from.
+    <strong>This is one-way</strong> — keep it for confirmed identity matches.
+  </p>
+
+  <input type="search" name="q" value="{{ q }}"
+         placeholder="search by name or alias…"
+         autofocus
+         class="w-full tap bg-canvas border border-subtle rounded px-3 text-base text-primary placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out"
+         hx-get="/modals/merge/{{ child.twitch_id }}"
+         hx-trigger="keyup changed delay:200ms, search"
+         hx-target="closest .relative"
+         hx-swap="outerHTML">
+
+  {% if q and not candidates %}
+    <p class="text-muted italic text-xs">No matches for "{{ q }}".</p>
+  {% elif candidates %}
+    <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface max-h-80 overflow-y-auto">
+      {% for c in candidates %}
+        {% set _src_tone = {'twitch': 'accent', 'youtube': 'danger', 'discord': 'accent'}.get(c.source, 'neutral') %}
+        <li class="px-3 py-2 flex items-center gap-3">
+          {% with name=c.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="text-primary font-medium truncate">{{ c.name }}</span>
+              {% with label=c.source, tone=_src_tone %}{% include "components/_pill.html" %}{% endwith %}
+            </div>
+            <p class="text-[11px] text-muted">last seen {{ c.last_seen | short_ts }} · id {{ c.twitch_id }}</p>
+          </div>
+          <form hx-post="/users/{{ child.twitch_id }}/merge" hx-swap="none">
+            <input type="hidden" name="parent_id" value="{{ c.twitch_id }}">
+            <button type="submit"
+                    hx-confirm="Merge '{{ child.name }}' INTO '{{ c.name }}'? Cannot be undone from the dashboard."
+                    class="tap inline-flex items-center justify-center gap-1 px-3 rounded bg-accent hover:bg-accent-600 text-white font-medium text-xs transition-all duration-150 ease-out">
+              <i class="fa-solid fa-code-merge"></i> merge here
+            </button>
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</div>
+{% endblock %}

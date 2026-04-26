@@ -256,6 +256,10 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         )
         reminders = repo.get_reminders_for_user(twitch_id)
         msg_stats = repo.user_message_stats(twitch_id)
+        merged_children = repo.list_merged_children(twitch_id)
+        merged_parent = (
+            repo.get_user(user.merged_into) if user.merged_into else None
+        )
         return TEMPLATES.TemplateResponse(
             request,
             "user.html",
@@ -272,6 +276,8 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "incidents": incidents,
                 "reminders": reminders,
                 "msg_stats": msg_stats,
+                "merged_children": merged_children,
+                "merged_parent": merged_parent,
                 "mod_mode_enabled": settings.mod_mode_enabled,
             },
         )
@@ -427,11 +433,11 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     # to 127.0.0.1; flagged to the user on the page.
 
     # Settings groups — drives the section layout on /settings. Each entry is
-    # (group_id, title, icon, blurb, [keys]). Keys not listed here fall into
-    # the "Other" bucket so nothing silently disappears.
+    # (group_id, title, icon_classes, blurb, [keys]). icon_classes is the
+    # full Font Awesome class string ("fa-solid fa-tv" or "fa-brands fa-youtube").
     _SETTINGS_GROUPS: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         (
-            "twitch", "Twitch", "fa-tv",
+            "twitch", "Twitch", "fa-brands fa-twitch",
             "Bot identity + chat connection. Restart bot after changes.",
             (
                 "twitch_bot_nick", "twitch_oauth_token", "twitch_channel",
@@ -439,12 +445,12 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             ),
         ),
         (
-            "obs", "OBS", "fa-circle-dot",
+            "obs", "OBS", "fa-solid fa-circle-dot",
             "Read-only WebSocket peek at live + scene state. Disabled by default.",
             ("obs_enabled", "obs_host", "obs_port", "obs_password"),
         ),
         (
-            "streamelements", "StreamElements", "fa-coins",
+            "streamelements", "StreamElements", "fa-solid fa-coins",
             "Pulls tip / sub / cheer / raid / follow events into the dashboard.",
             (
                 "streamelements_enabled", "streamelements_jwt",
@@ -452,12 +458,22 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             ),
         ),
         (
-            "moderation", "Moderation", "fa-shield-halved",
+            "youtube", "YouTube", "fa-brands fa-youtube",
+            "Stub — listener wired, no API polling yet. Configure to reserve credentials.",
+            ("youtube_enabled", "youtube_api_key", "youtube_channel_id"),
+        ),
+        (
+            "discord", "Discord", "fa-brands fa-discord",
+            "Stub — listener wired, no gateway connection yet. Channel IDs comma-separated.",
+            ("discord_enabled", "discord_bot_token", "discord_channel_ids"),
+        ),
+        (
+            "moderation", "Moderation", "fa-solid fa-shield-halved",
             "Opt-in advisory classifier. The bot never takes chat action.",
             ("mod_mode_enabled",),
         ),
         (
-            "dashboard", "Dashboard UI", "fa-sliders",
+            "dashboard", "Dashboard UI", "fa-solid fa-sliders",
             "Display preferences for this dashboard. No bot restart needed.",
             ("live_widget_enabled",),
         ),
@@ -516,6 +532,8 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "mod_mode_enabled",
             "obs_enabled",
             "live_widget_enabled",
+            "youtube_enabled",
+            "discord_enabled",
         }
     )
 
@@ -770,6 +788,38 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "modals/_event_detail.html",
             {"event": event, "raw_pretty": raw_pretty},
         )
+
+    @app.get("/modals/merge/{twitch_id}", response_class=HTMLResponse)
+    async def modal_merge(
+        request: Request,
+        twitch_id: str,
+        q: str = Query(""),
+    ):
+        child = repo.get_user(twitch_id)
+        if not child:
+            raise HTTPException(404, "user not found")
+        candidates = repo.search_users_for_merge(q, exclude_id=twitch_id, limit=20) if q else []
+        return TEMPLATES.TemplateResponse(
+            request,
+            "modals/_merge.html",
+            {"child": child, "candidates": candidates, "q": q},
+        )
+
+    @app.post("/users/{twitch_id}/merge", response_class=HTMLResponse)
+    async def merge_user(
+        request: Request,
+        twitch_id: str,
+        parent_id: Annotated[str, Form()],
+    ):
+        try:
+            counts = repo.merge_users(twitch_id, parent_id)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        # Tell the browser to navigate to the parent — the child is now
+        # provenance-only and would be confusing to land on.
+        resp = Response(status_code=204)
+        resp.headers["HX-Redirect"] = f"/users/{parent_id}"
+        return resp
 
     @app.get("/modals/message/{message_id}", response_class=HTMLResponse)
     async def modal_message(request: Request, message_id: int):
