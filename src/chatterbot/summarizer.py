@@ -260,19 +260,34 @@ class Summarizer:
                 logger.exception("LLM generate failed for user %s", user_id)
                 return
 
+            saved_notes = 0
+            dropped_uncited = 0
             for entry in response.notes:
                 try:
                     embedding = await self.llm.embed(entry.text)
                 except Exception:
                     logger.exception("embed failed for note; storing without vector")
                     embedding = None
-                await asyncio.to_thread(
+                # add_note with origin='llm' returns None when none of the
+                # cited source ids resolve to messages this user actually
+                # sent — that's the hallucination guard. Don't save.
+                note_id = await asyncio.to_thread(
                     self.repo.add_note,
                     user_id,
                     entry.text,
                     embedding,
                     list(entry.source_message_ids),
+                    origin="llm",
                 )
+                if note_id is None:
+                    dropped_uncited += 1
+                    logger.warning(
+                        "summarizer: dropped uncited LLM note for %s: %r "
+                        "(model cited ids=%s, none belong to this user)",
+                        user_id, entry.text[:80], list(entry.source_message_ids),
+                    )
+                else:
+                    saved_notes += 1
 
             # Soft-profile extraction — separate LLM call with a softer
             # rubric so we still build a useful "who is this" view even
@@ -306,10 +321,12 @@ class Summarizer:
             last_id = rows[-1][0]
             await asyncio.to_thread(self.repo.set_watermark, user_id, last_id)
             logger.info(
-                "summarized user=%s msgs=%d -> notes=%d profile=(%s) watermark=%d",
+                "summarized user=%s msgs=%d -> notes=%d (dropped_uncited=%d) "
+                "profile=(%s) watermark=%d",
                 display_name,
                 len(rows),
-                len(response.notes),
+                saved_notes,
+                dropped_uncited,
                 profile_summary,
                 last_id,
             )

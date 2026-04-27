@@ -103,6 +103,10 @@ class Note:
     user_id: str
     ts: str
     text: str
+    # 'manual' for streamer-typed, 'llm' for summarizer-extracted. Lets the
+    # UI label provenance honestly instead of inferring from the presence
+    # of source citations (a uncited LLM note ≠ a manual note).
+    origin: str = "manual"
 
 
 @dataclass
@@ -365,10 +369,22 @@ class ChatterRepo:
                     user_id    TEXT NOT NULL REFERENCES users(twitch_id) ON DELETE CASCADE,
                     ts         TEXT NOT NULL,
                     text       TEXT NOT NULL,
-                    embedding  BLOB
+                    embedding  BLOB,
+                    origin     TEXT NOT NULL DEFAULT 'manual'
                 )
                 """
             )
+            # Idempotent migration: 'origin' distinguishes LLM-extracted
+            # notes from streamer-typed ones. Default 'manual' is the
+            # conservative (don't-lie-about-existing-data) choice; new
+            # writes get the explicit origin from add_note's caller.
+            cur.execute("PRAGMA table_info(notes)")
+            _ncols = {r["name"] for r in cur.fetchall()}
+            if "origin" not in _ncols:
+                cur.execute(
+                    "ALTER TABLE notes ADD COLUMN origin TEXT NOT NULL "
+                    "DEFAULT 'manual'"
+                )
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS events (
@@ -980,16 +996,40 @@ class ChatterRepo:
         text: str,
         embedding: list[float] | None,
         source_message_ids: list[int] | None = None,
-    ) -> int:
-        """Insert a note. `source_message_ids` (when supplied) links this note
-        back to the specific message ids the LLM cited as supporting it. Pass
-        None or [] for manual notes — they show up in the dashboard with no
-        provenance link."""
+        *,
+        origin: str = "manual",
+    ) -> int | None:
+        """Insert a note. `origin` ∈ {'manual', 'llm'} marks provenance so
+        the dashboard can label it correctly.
+
+        For LLM notes, `source_message_ids` MUST resolve to at least one
+        message owned by this user — that's the hallucination guard. If
+        none validate, the note is dropped entirely and None is returned
+        (the LLM is making things up and we won't store it).
+
+        Manual notes never need sources; they save unconditionally.
+        """
+        valid: list[int] = []
+        if source_message_ids:
+            with self._cursor() as cur:
+                placeholders = ",".join("?" for _ in source_message_ids)
+                cur.execute(
+                    f"SELECT id FROM messages WHERE user_id = ? AND id IN ({placeholders})",
+                    (user_id, *source_message_ids),
+                )
+                valid = [int(r["id"]) for r in cur.fetchall()]
+
+        if origin == "llm" and not valid:
+            # Hallucination guard: the LLM emitted a note it can't tie to
+            # any actual message this user sent. Drop it.
+            return None
+
         blob = _vec_to_blob(embedding) if embedding else None
         with self._cursor() as cur:
             cur.execute(
-                "INSERT INTO notes(user_id, ts, text, embedding) VALUES (?, ?, ?, ?)",
-                (user_id, _now_iso(), text, blob),
+                "INSERT INTO notes(user_id, ts, text, embedding, origin) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (user_id, _now_iso(), text, blob, origin),
             )
             note_id = int(cur.lastrowid)
             if blob is not None:
@@ -997,20 +1037,12 @@ class ChatterRepo:
                     "INSERT INTO vec_notes(note_id, embedding) VALUES (?, ?)",
                     (note_id, blob),
                 )
-            if source_message_ids:
-                # Filter to ids that actually belong to this user — defends
-                # against hallucinated ids slipping through validation.
-                placeholders = ",".join("?" for _ in source_message_ids)
+            for mid in valid:
                 cur.execute(
-                    f"SELECT id FROM messages WHERE user_id = ? AND id IN ({placeholders})",
-                    (user_id, *source_message_ids),
+                    "INSERT OR IGNORE INTO note_sources(note_id, message_id) "
+                    "VALUES (?, ?)",
+                    (note_id, mid),
                 )
-                valid = [int(r["id"]) for r in cur.fetchall()]
-                for mid in valid:
-                    cur.execute(
-                        "INSERT OR IGNORE INTO note_sources(note_id, message_id) VALUES (?, ?)",
-                        (note_id, mid),
-                    )
             return note_id
 
     def arrival_signals_for_users(
@@ -2112,24 +2144,30 @@ class ChatterRepo:
     def get_notes(self, user_id: str) -> list[Note]:
         with self._cursor() as cur:
             cur.execute(
-                "SELECT id, user_id, ts, text FROM notes WHERE user_id = ? ORDER BY ts DESC",
+                "SELECT id, user_id, ts, text, origin FROM notes "
+                "WHERE user_id = ? ORDER BY ts DESC",
                 (user_id,),
             )
             return [
-                Note(id=int(r["id"]), user_id=r["user_id"], ts=r["ts"], text=r["text"])
+                Note(
+                    id=int(r["id"]), user_id=r["user_id"], ts=r["ts"],
+                    text=r["text"], origin=r["origin"] or "manual",
+                )
                 for r in cur.fetchall()
             ]
 
     def get_note(self, note_id: int) -> Note | None:
         with self._cursor() as cur:
             cur.execute(
-                "SELECT id, user_id, ts, text FROM notes WHERE id = ?", (note_id,)
+                "SELECT id, user_id, ts, text, origin FROM notes WHERE id = ?",
+                (note_id,),
             )
             r = cur.fetchone()
             if not r:
                 return None
             return Note(
-                id=int(r["id"]), user_id=r["user_id"], ts=r["ts"], text=r["text"]
+                id=int(r["id"]), user_id=r["user_id"], ts=r["ts"],
+                text=r["text"], origin=r["origin"] or "manual",
             )
 
     def update_note(self, note_id: int, text: str) -> None:

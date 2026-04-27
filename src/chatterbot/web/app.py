@@ -404,9 +404,9 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         except Exception:
             logger.exception("embed failed for manual note; storing without vector")
             embedding = None
-        # Manual notes have no source_message_ids — they show "manual / unlinked"
-        # in the template instead of an expandable source list.
-        repo.add_note(twitch_id, text[:500], embedding)
+        # Manual notes have no source_message_ids — origin='manual' so the
+        # template shows them as such (vs llm-extracted ones with sources).
+        repo.add_note(twitch_id, text[:500], embedding, origin="manual")
         nws = repo.get_notes_with_sources(twitch_id)
         return TEMPLATES.TemplateResponse(
             request, "partials/notes_list.html", {"notes_with_sources": nws}

@@ -20,15 +20,24 @@
 
   <div class="text-xs text-muted mt-1 flex items-center gap-2 flex-wrap">
     <span>{{ note.ts | short_ts }}</span>
+    <span class="text-muted">·</span>
     {% if sources %}
-      <span class="text-muted">·</span>
       <span class="inline-flex items-center gap-1 text-accent">
         <i class="fa-solid fa-link text-[10px]"></i>
-        {{ sources | length }} source{{ '' if sources|length == 1 else 's' }}
+        LLM · {{ sources | length }} source{{ '' if sources|length == 1 else 's' }}
+      </span>
+    {% elif note.origin == 'llm' %}
+      {# Pre-hallucination-guard era: LLM extracted but couldn't cite.
+         Suspect by definition. Surface as a warning so the streamer can
+         delete or verify. New writes won't produce these — see
+         repo.add_note's origin='llm' path. #}
+      <span class="inline-flex items-center gap-1 text-warning"
+            title="LLM-extracted but with no valid citations — possibly fabricated. Verify or delete.">
+        <i class="fa-solid fa-triangle-exclamation text-[10px]"></i>
+        LLM · uncited (suspect)
       </span>
     {% else %}
-      <span class="text-muted">·</span>
-      <span class="text-muted">manual / unlinked</span>
+      <span class="text-muted">manual</span>
     {% endif %}
   </div>
 
