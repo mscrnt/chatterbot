@@ -36,11 +36,12 @@ class NoteEntry(BaseModel):
 
 
 class NoteExtractionResponse(BaseModel):
-    """Reply for `summarizer._summarize_user`. The LLM is asked to extract 0-3
-    factual notes about a single viewer. Empty list means "nothing notable",
-    which is a valid (and common) result."""
+    """Reply for `summarizer._summarize_user`. The LLM extracts 0-5 short
+    third-person notes about a single viewer — covering hard self-disclosure
+    (pets, gear, location, jobs), stated opinions / takes, recurring
+    references, and explicit preferences. Empty is valid and common."""
 
-    notes: list[NoteEntry] = Field(default_factory=list, max_length=3)
+    notes: list[NoteEntry] = Field(default_factory=list, max_length=5)
 
 
 # ---- per-user soft-profile extraction ----

@@ -105,29 +105,37 @@ EXPECTED and NORMAL — do NOT fabricate.
 
 
 NOTE_EXTRACTION_SYSTEM = (_AUDIENCE_BLOCK + "\n" + _INPUT_FORMAT_BLOCK + """
-TASK: extract short factual notes about ONE chat viewer (the focal user)
-from their own messages.
+TASK: extract short third-person notes about ONE chat viewer (the focal
+user) from their own messages.
 
 For each note, include `source_message_ids` — the specific focal-line ids
-that support that note. The streamer uses this to trace any fact back to
+that support that note. The streamer uses this to trace any note back to
 the exact line(s) it came from. Context lines (`[ctx id]`) are NOT
 allowed in source_message_ids.
 
+WHAT COUNTS AS A NOTE (any of these):
+- Hard self-disclosure: pets, gear, location, jobs, family, games they
+  play, hobbies. ("Has a cat named Loki.")
+- Stated opinions or takes: positions they explicitly voiced.
+  ("Defends Trump.", "Thinks Putin is a threat.", "Calls Hasan based.")
+- Recurring references: a person, show, game, or topic they've brought
+  up across multiple focal lines. ("Often references David Lynch.")
+- Stated preferences: things they've explicitly liked, disliked, or
+  championed. ("Hates the Resident Evil 4 remake.", "Champions the
+  classic Silent Hill 2 ending.")
+
 RULES:
-- Extract 0 to 3 notes maximum.
-- Only facts the focal viewer explicitly stated about themselves:
-  interests, pets, gear, location, games they play, jobs, family, etc.
-- No personality judgments. No inferred sentiment. No speculation about
-  mood or intent.
-- A SARCASTIC statement is NOT a fact. If the viewer says "great, I love
-  dying repeatedly to one zombie" right after a death context line,
-  do NOT record "loves dying to zombies." Skip it entirely.
-- Reactions to the stream content (kills, deaths, jump-scares, RNG, the
-  streamer's plays) are not facts about the viewer. Skip them.
-- If nothing notable was stated, return an empty list. Empty is normal
-  for this genre — most chat is reactions, not self-disclosure.
-- Each note: one short third-person sentence about the viewer (e.g.,
-  "Has a cat named Loki.").
+- Extract 0 to 5 notes maximum. 0 is fine and common — don't fabricate.
+- Each note is one short third-person sentence grounded in what the
+  viewer ACTUALLY said. Do not infer beliefs they didn't state.
+- A SARCASTIC statement is NOT a real opinion. If the viewer says
+  "great, I love dying repeatedly to one zombie" right after a death
+  context line, do NOT record "loves dying to zombies." Skip it.
+- Pure reactions to the stream content (kills, deaths, jump-scares, RNG,
+  the streamer's plays) are not notes. "BASED" or "LMAO" alone tells us
+  nothing about the viewer.
+- No personality judgments — describe what they SAID, not who they ARE.
+  "Often makes political comments" is OK; "Is opinionated" is not.
 - source_message_ids must reference focal `[id]` lines that actually
   appear in the input. If a note is supported by multiple lines, list
   them all (cap 5).
