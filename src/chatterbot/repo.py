@@ -111,6 +111,22 @@ class InsightState:
 
 
 @dataclass
+class TranscriptChunk:
+    """One VAD-bounded utterance the streamer spoke on stream, transcribed
+    by whisper. When the embedding cosine-matches an open insight card
+    above threshold, matched_* + similarity are populated AND that card
+    auto-flips to 'addressed' with this chunk's text as its note."""
+
+    id: int
+    ts: str
+    duration_ms: int
+    text: str
+    matched_kind: str | None = None
+    matched_item_key: str | None = None
+    similarity: float | None = None
+
+
+@dataclass
 class StreamRecap:
     id: int
     started_at: str
@@ -654,6 +670,41 @@ class ChatterRepo:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_insight_history_ts "
                 "ON insight_state_history(ts)"
+            )
+            # Live transcript chunks from the OBS audio relay → whisper
+            # pipeline. Each row is one VAD-bounded utterance the streamer
+            # spoke on stream. matched_* fields are populated when the
+            # chunk's embedding cosine-matches an open insight card above
+            # the configured threshold; the match auto-sets that card's
+            # state to 'addressed'.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS transcript_chunks (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts                TEXT NOT NULL,
+                    duration_ms       INTEGER NOT NULL DEFAULT 0,
+                    text              TEXT NOT NULL,
+                    matched_kind      TEXT,
+                    matched_item_key  TEXT,
+                    similarity        REAL
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_transcript_ts "
+                "ON transcript_chunks(ts)"
+            )
+            # Vector index over transcript chunk embeddings — drives the
+            # bidirectional link: a chat message can find the recent
+            # streamer utterance that's semantically close to it. Cosine
+            # metric so the threshold means cosine-distance directly.
+            cur.execute(
+                f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_transcripts USING vec0(
+                    chunk_id INTEGER PRIMARY KEY,
+                    embedding FLOAT[{self.embed_dim}] distance_metric=cosine
+                )
+                """
             )
             # End-of-stream LLM-generated recaps. Triggered when OBS
             # transitions from streaming → not-streaming. One row per
@@ -1493,7 +1544,41 @@ class ChatterRepo:
     # Per-card state for the Insights page. The streamer's primary surface
     # for managing what they've addressed on stream vs what to come back to.
 
-    _INSIGHT_STATES = frozenset({"addressed", "snoozed", "pinned", "skipped"})
+    # 'auto_pending' is set by the transcript service when whisper hears
+    # the streamer say something matching an open card (cosine sim
+    # ≥ whisper_match_threshold). The UI shows a confirm/reject prompt;
+    # an auto_confirm_loop flips remaining pendings → addressed after a
+    # short timeout so passive workflow still works.
+    _INSIGHT_STATES = frozenset({
+        "addressed", "snoozed", "pinned", "skipped", "auto_pending",
+    })
+
+    def list_pending_auto_addresses(
+        self, *, older_than_seconds: int = 60,
+    ) -> list[InsightState]:
+        """Auto-pending entries whose `updated_at` is older than the
+        confirmation window. Drives the auto_confirm_loop."""
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=int(older_than_seconds))
+        ).isoformat(timespec="seconds")
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT kind, item_key, state, due_ts, note, updated_at
+                FROM insight_states
+                WHERE state = 'auto_pending' AND updated_at <= ?
+                ORDER BY updated_at ASC
+                """,
+                (cutoff,),
+            )
+            return [
+                InsightState(
+                    kind=r["kind"], item_key=r["item_key"], state=r["state"],
+                    due_ts=r["due_ts"], note=r["note"],
+                    updated_at=r["updated_at"],
+                )
+                for r in cur.fetchall()
+            ]
 
     def set_insight_state(
         self,
@@ -1625,6 +1710,184 @@ class ChatterRepo:
                     kind=r["kind"], item_key=r["item_key"], state=r["state"],
                     due_ts=r["due_ts"], note=r["note"],
                     updated_at=r["updated_at"],
+                )
+                for r in cur.fetchall()
+            ]
+
+    # ============================ Transcript chunks =======================
+
+    def add_transcript_chunk(
+        self,
+        *,
+        text: str,
+        duration_ms: int = 0,
+        matched_kind: str | None = None,
+        matched_item_key: str | None = None,
+        similarity: float | None = None,
+        embedding: list[float] | None = None,
+    ) -> int:
+        """Persist one whisper-transcribed utterance + any auto-match
+        state. The embedding (when provided) is mirrored into
+        `vec_transcripts` so a chat message can later find a recent
+        utterance it semantically responded to."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO transcript_chunks(
+                    ts, duration_ms, text,
+                    matched_kind, matched_item_key, similarity
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _now_iso(), int(duration_ms), text,
+                    matched_kind, matched_item_key, similarity,
+                ),
+            )
+            chunk_id = int(cur.lastrowid)
+            if embedding:
+                blob = _vec_to_blob(embedding)
+                cur.execute(
+                    "INSERT INTO vec_transcripts(chunk_id, embedding) "
+                    "VALUES (?, ?)",
+                    (chunk_id, blob),
+                )
+            return chunk_id
+
+    def get_transcript_chunk(self, chunk_id: int) -> TranscriptChunk | None:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT id, ts, duration_ms, text, "
+                "       matched_kind, matched_item_key, similarity "
+                "FROM transcript_chunks WHERE id = ?",
+                (int(chunk_id),),
+            )
+            r = cur.fetchone()
+            if not r:
+                return None
+            return TranscriptChunk(
+                id=int(r["id"]), ts=r["ts"],
+                duration_ms=int(r["duration_ms"] or 0),
+                text=r["text"],
+                matched_kind=r["matched_kind"],
+                matched_item_key=r["matched_item_key"],
+                similarity=float(r["similarity"]) if r["similarity"] is not None else None,
+            )
+
+    def transcript_context_around(
+        self, chunk_id: int, *, before: int = 3, after: int = 3,
+    ) -> dict[str, Any]:
+        """Focal transcript chunk + N adjacent ones for the context modal."""
+        focal = self.get_transcript_chunk(chunk_id)
+        if not focal:
+            return {"focal": None, "before": [], "after": []}
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT id, ts, duration_ms, text, "
+                "       matched_kind, matched_item_key, similarity "
+                "FROM transcript_chunks WHERE id < ? ORDER BY id DESC LIMIT ?",
+                (int(chunk_id), int(before)),
+            )
+            before_rows = [
+                TranscriptChunk(
+                    id=int(r["id"]), ts=r["ts"],
+                    duration_ms=int(r["duration_ms"] or 0),
+                    text=r["text"],
+                    matched_kind=r["matched_kind"],
+                    matched_item_key=r["matched_item_key"],
+                    similarity=float(r["similarity"]) if r["similarity"] is not None else None,
+                )
+                for r in cur.fetchall()
+            ]
+            before_rows.reverse()
+            cur.execute(
+                "SELECT id, ts, duration_ms, text, "
+                "       matched_kind, matched_item_key, similarity "
+                "FROM transcript_chunks WHERE id > ? ORDER BY id ASC LIMIT ?",
+                (int(chunk_id), int(after)),
+            )
+            after_rows = [
+                TranscriptChunk(
+                    id=int(r["id"]), ts=r["ts"],
+                    duration_ms=int(r["duration_ms"] or 0),
+                    text=r["text"],
+                    matched_kind=r["matched_kind"],
+                    matched_item_key=r["matched_item_key"],
+                    similarity=float(r["similarity"]) if r["similarity"] is not None else None,
+                )
+                for r in cur.fetchall()
+            ]
+        return {"focal": focal, "before": before_rows, "after": after_rows}
+
+    def find_related_transcript(
+        self,
+        query_embedding: list[float],
+        *,
+        max_age_minutes: int = 5,
+        threshold: float = 0.40,
+    ) -> tuple[TranscriptChunk, float] | None:
+        """KNN-search vec_transcripts for the most-similar recent
+        utterance to the query embedding. Used to link a chat message
+        back to the streamer utterance it likely responded to."""
+        blob = _vec_to_blob(query_embedding)
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(minutes=int(max_age_minutes))
+        ).isoformat(timespec="seconds")
+        with self._cursor() as cur:
+            try:
+                cur.execute(
+                    """
+                    SELECT v.chunk_id, v.distance, t.id, t.ts,
+                           t.duration_ms, t.text,
+                           t.matched_kind, t.matched_item_key, t.similarity
+                    FROM vec_transcripts v
+                    JOIN transcript_chunks t ON t.id = v.chunk_id
+                    WHERE v.embedding MATCH ? AND k = 5
+                      AND t.ts >= ?
+                    ORDER BY v.distance ASC LIMIT 1
+                    """,
+                    (blob, cutoff),
+                )
+                r = cur.fetchone()
+            except sqlite3.OperationalError:
+                return None
+        if not r:
+            return None
+        # vec0 cosine returns cosine DISTANCE (1 - cos). Convert to
+        # similarity for the caller, gate on threshold.
+        cosine_sim = 1.0 - float(r["distance"])
+        if cosine_sim < threshold:
+            return None
+        chunk = TranscriptChunk(
+            id=int(r["id"]), ts=r["ts"],
+            duration_ms=int(r["duration_ms"] or 0),
+            text=r["text"],
+            matched_kind=r["matched_kind"],
+            matched_item_key=r["matched_item_key"],
+            similarity=float(r["similarity"]) if r["similarity"] is not None else None,
+        )
+        return chunk, cosine_sim
+
+    def list_transcript_chunks(self, *, limit: int = 30) -> list[TranscriptChunk]:
+        """Recent utterances, newest first. Drives the live transcript
+        strip on Insights."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, ts, duration_ms, text,
+                       matched_kind, matched_item_key, similarity
+                FROM transcript_chunks
+                ORDER BY id DESC LIMIT ?
+                """,
+                (int(limit),),
+            )
+            return [
+                TranscriptChunk(
+                    id=int(r["id"]), ts=r["ts"],
+                    duration_ms=int(r["duration_ms"] or 0),
+                    text=r["text"],
+                    matched_kind=r["matched_kind"],
+                    matched_item_key=r["matched_item_key"],
+                    similarity=float(r["similarity"]) if r["similarity"] is not None else None,
                 )
                 for r in cur.fetchall()
             ]

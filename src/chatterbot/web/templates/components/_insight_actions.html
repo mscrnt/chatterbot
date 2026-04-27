@@ -20,7 +20,34 @@
      onclick="event.stopPropagation()"
      data-insight-kind="{{ kind }}"
      data-insight-key="{{ item_key }}">
-  {% if _state in ('addressed', 'skipped') %}
+  {% if _state == 'auto_pending' %}
+    {# Whisper transcribed something that matched this card. Streamer
+       confirms or rejects; auto-promotes to 'addressed' on timeout. #}
+    <span class="inline-flex items-center gap-1 text-warning">
+      <i class="fa-solid fa-microphone-lines text-[10px]"></i>
+      heard you address this — confirm?
+    </span>
+    <form hx-post="/insights/state" hx-swap="none" class="inline-flex">
+      <input type="hidden" name="kind" value="{{ kind }}">
+      <input type="hidden" name="item_key" value="{{ item_key }}">
+      <input type="hidden" name="action" value="confirm_pending">
+      <button type="submit"
+              class="ml-1 px-1.5 py-0.5 rounded bg-success/15 hover:bg-success/25 text-success"
+              title="yes — mark addressed">
+        <i class="fa-solid fa-check text-[10px]"></i> yes
+      </button>
+    </form>
+    <form hx-post="/insights/state" hx-swap="none" class="inline-flex">
+      <input type="hidden" name="kind" value="{{ kind }}">
+      <input type="hidden" name="item_key" value="{{ item_key }}">
+      <input type="hidden" name="action" value="reject_pending">
+      <button type="submit"
+              class="px-1.5 py-0.5 rounded bg-danger/15 hover:bg-danger/25 text-danger"
+              title="no — leave open">
+        <i class="fa-solid fa-xmark text-[10px]"></i> no
+      </button>
+    </form>
+  {% elif _state in ('addressed', 'skipped') %}
     {# Already handled — show undo only. #}
     <span class="italic">{{ 'addressed on stream' if _state == 'addressed' else 'skipped' }}</span>
     <form hx-post="/insights/state"

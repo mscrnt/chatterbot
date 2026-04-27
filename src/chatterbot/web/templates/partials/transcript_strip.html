@@ -1,0 +1,70 @@
+{# Live transcript strip — what whisper just heard the streamer say.
+   Each chunk shows match state: green check if auto-addressed an open
+   insight card, dot otherwise. Auto-refreshes every 4s while the
+   service is enabled. #}
+<div id="transcript-strip"
+     hx-get="/transcript?limit=15&last_pending={{ pending_count or 0 }}"
+     {% if service_status.enabled %}hx-trigger="every 4s"{% endif %}
+     hx-swap="outerHTML"
+     class="rounded-xl border border-subtle bg-surface p-3">
+  <header class="flex items-baseline justify-between gap-2 mb-2">
+    <h3 class="text-sm font-semibold text-primary inline-flex items-center gap-2">
+      <i class="fa-solid fa-microphone text-accent"></i> Live transcript
+      {% if not service_status.enabled %}
+        <span class="text-[10px] text-muted italic">disabled — turn on in Settings → Whisper</span>
+      {% elif service_status.model_error %}
+        <span class="text-[10px] text-danger italic">model error: {{ service_status.model_error }}</span>
+      {% elif not service_status.model_loaded %}
+        <span class="text-[10px] text-warning italic">waiting for first audio…</span>
+      {% else %}
+        <span class="text-[10px] text-muted">{{ service_status.model }} · {{ service_status.card_embeds }} cards indexed</span>
+      {% endif %}
+    </h3>
+    {% if chunks %}
+      <span class="text-[10px] text-muted">{{ chunks | length }} recent</span>
+    {% endif %}
+  </header>
+
+  {% if not chunks %}
+    <p class="text-xs text-muted italic">
+      Nothing heard yet. Drop
+      <code class="text-accent">obs_scripts/chatterbot_audio_relay.py</code>
+      into your OBS scripts folder to feed audio in.
+    </p>
+  {% else %}
+    {# Threshold the dashboard considers "auto-address". Hard-coded
+       here to match config; if you change WHISPER_MATCH_THRESHOLD the
+       icon colors here update on next render. #}
+    {% set _thr = 0.55 %}
+    <ul class="space-y-1 text-sm">
+      {% for c in chunks %}
+        {% set _sim = c.similarity %}
+        {% set _hit = _sim is not none and _sim >= _thr %}
+        {% set _close = _sim is not none and _sim >= 0.30 and not _hit %}
+        <li>
+          <button type="button"
+                  class="w-full flex items-baseline gap-2 hover:bg-surface-raised/50 rounded px-1 py-0.5 text-left"
+                  hx-get="/modals/transcript/{{ c.id }}"
+                  hx-target="#modal-root"
+                  hx-swap="innerHTML"
+                  title="Open with surrounding context + matched card">
+            <span class="text-[10px] text-muted whitespace-nowrap shrink-0">{{ c.ts | short_ts }}</span>
+            {% if _hit %}
+              <i class="fa-solid fa-check-circle text-success text-[10px] shrink-0"></i>
+            {% elif _close %}
+              <i class="fa-solid fa-circle-notch text-warning text-[10px] shrink-0"></i>
+            {% elif _sim is not none %}
+              <i class="fa-solid fa-circle text-muted text-[8px] shrink-0"></i>
+            {% else %}
+              <i class="fa-solid fa-circle text-subtle text-[6px] shrink-0"></i>
+            {% endif %}
+            <span class="text-primary break-words flex-1 leading-snug">{{ c.text }}</span>
+            {% if _sim is not none %}
+              <span class="text-[10px] text-muted tabular-nums shrink-0">{{ '%.2f'|format(_sim) }}</span>
+            {% endif %}
+          </button>
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</div>

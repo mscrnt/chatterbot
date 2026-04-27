@@ -1,0 +1,96 @@
+{% set modal_title = 'Transcript context' %}
+{% set modal_icon = 'fa-microphone-lines' %}
+{% set modal_tone = 'accent' %}
+{% set modal_size = 'lg' %}
+{% extends "components/_modal.html" %}
+{% block modal_body %}
+<div class="space-y-4 text-sm">
+  {# Matched insight card — what the streamer was talking about. #}
+  {% if matched_card %}
+  <section class="rounded-lg border border-success/40 bg-success/5 p-3">
+    <div class="flex items-baseline gap-2 mb-1">
+      <i class="fa-solid fa-check-circle text-success text-[10px]"></i>
+      <span class="text-[11px] uppercase tracking-wider text-muted">matched topic thread</span>
+      {% if focal.similarity is not none %}
+        <span class="text-[10px] text-muted ml-auto">sim {{ '%.2f'|format(focal.similarity) }}</span>
+      {% endif %}
+    </div>
+    <button type="button"
+            class="text-left text-primary leading-snug hover:underline"
+            hx-get="/modals/thread/{{ matched_card.id }}"
+            hx-target="#modal-root"
+            hx-swap="innerHTML">
+      {{ matched_card.title }}
+    </button>
+  </section>
+  {% elif focal.matched_kind %}
+  <section class="rounded-lg border border-success/40 bg-success/5 p-3">
+    <div class="text-[11px] text-muted">
+      matched {{ focal.matched_kind }} card
+      {% if focal.similarity is not none %}
+        (sim {{ '%.2f'|format(focal.similarity) }})
+      {% endif %}
+    </div>
+  </section>
+  {% endif %}
+
+  {# Transcript transcript with focal in the middle. #}
+  <section>
+    <p class="text-[11px] uppercase tracking-wider text-muted mb-1">
+      live transcript ({{ before|length }} before · the line · {{ after|length }} after)
+    </p>
+    <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
+      {% for c in before %}
+        <li class="px-3 py-2 hover:bg-surface-raised/60">
+          <div class="flex items-baseline gap-2">
+            <span class="text-[11px] text-muted whitespace-nowrap w-32 shrink-0">{{ c.ts | short_ts }}</span>
+            <i class="fa-solid fa-microphone text-muted text-[10px] shrink-0"></i>
+            <span class="text-primary break-words flex-1">{{ c.text }}</span>
+            {% if c.similarity is not none %}
+              <span class="text-[10px] text-muted tabular-nums shrink-0">{{ '%.2f'|format(c.similarity) }}</span>
+            {% endif %}
+            <button type="button"
+                    class="text-muted hover:text-accent text-[10px] shrink-0"
+                    hx-get="/modals/transcript/{{ c.id }}"
+                    hx-target="#modal-root"
+                    hx-swap="innerHTML"
+                    title="Re-anchor on this line">
+              <i class="fa-solid fa-crosshairs"></i>
+            </button>
+          </div>
+        </li>
+      {% endfor %}
+      <li class="px-3 py-3 bg-accent/10 border-l-4 border-accent">
+        <div class="flex items-baseline gap-2">
+          <span class="text-[11px] text-muted whitespace-nowrap w-32 shrink-0">{{ focal.ts | short_ts }}</span>
+          <i class="fa-solid fa-microphone text-accent text-[10px] shrink-0"></i>
+          <span class="text-primary font-medium break-words flex-1">{{ focal.text }}</span>
+          {% if focal.duration_ms %}
+            <span class="text-[10px] text-muted shrink-0">{{ '%.1f'|format(focal.duration_ms / 1000) }}s</span>
+          {% endif %}
+        </div>
+      </li>
+      {% for c in after %}
+        <li class="px-3 py-2 hover:bg-surface-raised/60">
+          <div class="flex items-baseline gap-2">
+            <span class="text-[11px] text-muted whitespace-nowrap w-32 shrink-0">{{ c.ts | short_ts }}</span>
+            <i class="fa-solid fa-microphone text-muted text-[10px] shrink-0"></i>
+            <span class="text-primary break-words flex-1">{{ c.text }}</span>
+            {% if c.similarity is not none %}
+              <span class="text-[10px] text-muted tabular-nums shrink-0">{{ '%.2f'|format(c.similarity) }}</span>
+            {% endif %}
+            <button type="button"
+                    class="text-muted hover:text-accent text-[10px] shrink-0"
+                    hx-get="/modals/transcript/{{ c.id }}"
+                    hx-target="#modal-root"
+                    hx-swap="innerHTML"
+                    title="Re-anchor on this line">
+              <i class="fa-solid fa-crosshairs"></i>
+            </button>
+          </div>
+        </li>
+      {% endfor %}
+    </ul>
+  </section>
+</div>
+{% endblock %}

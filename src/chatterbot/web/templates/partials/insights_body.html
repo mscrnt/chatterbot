@@ -7,6 +7,13 @@
      hx-trigger="every 60s, insights-state-changed from:body"
      hx-swap="outerHTML">
 
+  {# ---------------- Live transcript strip (whisper) ---------------- #}
+  {% if transcript_status and (transcript_status.enabled or transcript_chunks) %}
+    {% with chunks=transcript_chunks, service_status=transcript_status %}
+      {% include "partials/transcript_strip.html" %}
+    {% endwith %}
+  {% endif %}
+
   {# ---------------- Stream goals panel ---------------- #}
   {% if goals_state %}
     {% with goals=goals_state %}{% include "partials/goals_panel.html" %}{% endwith %}
@@ -220,7 +227,17 @@
         {% else %}{% set _ = _open_tps.append((tp, _s)) %}
         {% endif %}
       {% endfor %}
-      {% set _ordered = _pinned_tps + _due_tps + _open_tps + _addr_tps %}
+      {% set _pending_tps = [] %}
+      {% for tp in talking_points %}
+        {% set _s = (tp_states.get(tp.item_key) if tp_states else None) %}
+        {% if _s and _s.state == 'auto_pending' %}
+          {% set _ = _pending_tps.append((tp, _s)) %}
+        {% endif %}
+      {% endfor %}
+      {# Auto-pending lands at the very top so the streamer sees it
+         instantly; the rest follow the normal pinned → due → open
+         → addressed order. #}
+      {% set _ordered = _pending_tps + _pinned_tps + _due_tps + _open_tps + _addr_tps %}
       {% set _snoozed_tps = [] %}
       {% for tp in talking_points %}
         {% set _s = (tp_states.get(tp.item_key) if tp_states else None) %}
@@ -234,8 +251,19 @@
           {% set _is_pinned  = _s and _s.state == 'pinned' %}
           {% set _is_due     = _s and _s.state == 'snoozed' and _s.due_ts and _s.due_ts <= now_iso() %}
           {% set _is_addr    = _s and _s.state == 'addressed' %}
+          {% set _is_pending = _s and _s.state == 'auto_pending' %}
           <div class="insight-card-root rounded-xl border bg-surface p-3 transition-all duration-150 ease-out
-                      {% if _is_pinned %}border-accent ring-1 ring-accent/40{% elif _is_due %}border-warning ring-1 ring-warning/40{% elif _is_addr %}border-subtle opacity-50{% else %}border-subtle{% endif %}">
+                      {% if _is_pending %}border-warning ring-2 ring-warning/40
+                      {% elif _is_pinned %}border-accent ring-1 ring-accent/40
+                      {% elif _is_due %}border-warning ring-1 ring-warning/40
+                      {% elif _is_addr %}border-subtle opacity-50
+                      {% else %}border-subtle{% endif %}">
+            {% if (_is_pending or _is_addr) and _s and _s.note and _s.note.startswith('(auto)') %}
+              <div class="text-[11px] {% if _is_pending %}text-warning{% else %}text-muted{% endif %} mb-2 inline-flex items-start gap-1">
+                <i class="fa-solid fa-microphone-lines mt-0.5 text-[10px]"></i>
+                <span class="italic">{{ _s.note }}</span>
+              </div>
+            {% endif %}
             <button type="button"
                     class="text-left block w-full hover:opacity-80 transition-all duration-150 ease-out"
                     hx-get="/modals/insight/talking_point/{{ tp.user_id }}?meta={{ tp.point | urlencode }}"
@@ -245,6 +273,9 @@
               <div class="flex items-center gap-2 mb-1 flex-wrap">
                 {% with name=tp.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
                 <span class="text-accent font-medium">{{ tp.name }}</span>
+                {% if _is_pending %}
+                  <span class="inline-flex items-center gap-1 px-1.5 text-[9px] uppercase tracking-wide rounded-full bg-warning/15 text-warning border border-warning/30 animate-pulse"><i class="fa-solid fa-microphone-lines text-[8px]"></i>auto</span>
+                {% endif %}
                 {% if _is_pinned %}
                   <span class="inline-flex items-center gap-1 px-1.5 text-[9px] uppercase tracking-wide rounded-full bg-accent/15 text-accent border border-accent/30"><i class="fa-solid fa-thumbtack text-[8px]"></i>pinned</span>
                 {% endif %}

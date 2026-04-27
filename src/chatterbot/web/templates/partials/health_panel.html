@@ -27,6 +27,92 @@
     </dl>
   </div>
 
+  {# OBS WebSocket connection state. The streamer needs this connected
+     for the auto-pause logic + end-of-stream recap to fire. #}
+  {% if obs is defined %}
+  <div class="rounded-xl border {% if not obs.enabled %}border-subtle{% elif obs.connected %}border-success/30{% else %}border-danger/40 bg-danger/5{% endif %} p-3">
+    <header class="flex items-baseline justify-between gap-2">
+      <h3 class="font-semibold text-primary inline-flex items-center gap-2">
+        {% if not obs.enabled %}
+          <i class="fa-solid fa-circle-minus text-muted"></i>
+        {% elif obs.connected %}
+          <i class="fa-solid fa-circle-check text-success"></i>
+        {% else %}
+          <i class="fa-solid fa-circle-xmark text-danger"></i>
+        {% endif %}
+        OBS WebSocket
+      </h3>
+      <span class="text-[11px] text-muted">{{ obs_host }}</span>
+    </header>
+    {% if not obs.enabled %}
+      <p class="text-xs text-muted mt-2">
+        Disabled — flip <code>OBS_ENABLED=true</code> + set host/port/password in
+        <a href="/settings?tab=obs" class="text-accent hover:underline">Settings → OBS</a>.
+      </p>
+    {% else %}
+      <dl class="grid grid-cols-2 gap-x-3 gap-y-1 mt-2 text-xs">
+        <dt class="text-muted">connected</dt>
+        <dd class="text-{{ 'success' if obs.connected else 'danger' }} text-right">
+          {{ 'yes' if obs.connected else 'no' }}
+        </dd>
+        <dt class="text-muted">streaming</dt>
+        <dd class="text-{{ 'success' if obs.streaming else 'muted' }} text-right">
+          {{ 'live' if obs.streaming else 'idle' }}
+        </dd>
+        <dt class="text-muted">recording</dt>
+        <dd class="text-{{ 'success' if obs.recording else 'muted' }} text-right">
+          {{ 'on' if obs.recording else 'off' }}
+        </dd>
+        {% if obs.scene %}
+        <dt class="text-muted">scene</dt>
+        <dd class="text-primary text-right truncate">{{ obs.scene }}</dd>
+        {% endif %}
+        {% if obs.error %}
+        <dt class="text-muted col-span-2 mt-1 text-danger">last error</dt>
+        <dd class="text-danger text-xs col-span-2 break-words">{{ obs.error }}</dd>
+        {% endif %}
+      </dl>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {# Whisper transcript service state. #}
+  {% if transcript_status is defined %}
+  <div class="rounded-xl border {% if not transcript_status.enabled %}border-subtle{% elif transcript_status.model_error %}border-danger/40 bg-danger/5{% elif transcript_status.model_loaded %}border-success/30{% else %}border-warning/40 bg-warning/5{% endif %} p-3">
+    <header class="flex items-baseline justify-between gap-2">
+      <h3 class="font-semibold text-primary inline-flex items-center gap-2">
+        {% if not transcript_status.enabled %}
+          <i class="fa-solid fa-circle-minus text-muted"></i>
+        {% elif transcript_status.model_error %}
+          <i class="fa-solid fa-circle-xmark text-danger"></i>
+        {% elif transcript_status.model_loaded %}
+          <i class="fa-solid fa-circle-check text-success"></i>
+        {% else %}
+          <i class="fa-solid fa-circle-dot text-warning"></i>
+        {% endif %}
+        Whisper transcript
+      </h3>
+      <span class="text-[11px] text-muted">{{ transcript_status.model }}</span>
+    </header>
+    {% if not transcript_status.enabled %}
+      <p class="text-xs text-muted mt-2">Disabled — enable in <a href="/settings?tab=whisper" class="text-accent hover:underline">Settings → Whisper</a>.</p>
+    {% elif transcript_status.model_error %}
+      <p class="text-xs text-danger mt-2 break-words">{{ transcript_status.model_error }}</p>
+    {% else %}
+      <dl class="grid grid-cols-2 gap-x-3 gap-y-1 mt-2 text-xs">
+        <dt class="text-muted">model loaded</dt>
+        <dd class="text-{{ 'success' if transcript_status.model_loaded else 'warning' }} text-right">
+          {{ 'yes' if transcript_status.model_loaded else 'waiting for first chunk' }}
+        </dd>
+        <dt class="text-muted">buffered samples</dt>
+        <dd class="text-primary text-right tabular-nums">{{ transcript_status.buffered_samples }}</dd>
+        <dt class="text-muted">cards indexed</dt>
+        <dd class="text-primary text-right tabular-nums">{{ transcript_status.card_embeds }}</dd>
+      </dl>
+    {% endif %}
+  </div>
+  {% endif %}
+
   <div class="rounded-xl border border-subtle p-3">
     <h3 class="font-semibold text-primary inline-flex items-center gap-2">
       <i class="fa-solid fa-database text-accent"></i> Indexes + queues

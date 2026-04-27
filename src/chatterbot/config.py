@@ -43,6 +43,11 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "discord_bot_token",
     "discord_channel_ids",
     "live_widget_enabled",
+    "whisper_enabled",
+    "whisper_model",
+    "whisper_buffer_seconds",
+    "whisper_match_threshold",
+    "whisper_min_silence_ms",
 )
 
 # Subset that should be rendered as password inputs. Blank submissions for
@@ -129,6 +134,23 @@ class Settings(BaseSettings):
     message_embed_interval_seconds: int = 30
     message_embed_batch_size: int = 25
 
+    # Real-time whisper transcription pipeline. The OBS audio relay
+    # script POSTs PCM chunks to /audio/ingest; the service buffers,
+    # transcribes via faster-whisper, embeds each chunk, and cosine-
+    # matches against open insight cards. Match above threshold flips
+    # the card to 'addressed' automatically.
+    whisper_enabled: bool = False
+    whisper_model: str = "base.en"          # tiny.en | base.en | small.en | medium.en
+    whisper_buffer_seconds: float = 5.0     # accumulate this much audio before transcribing
+    whisper_match_threshold: float = 0.55   # cosine sim needed to auto-address
+    whisper_compute_type: str = "auto"      # auto | int8 | float16 | float32
+    # How long a silence must last before whisper splits into a new
+    # utterance. Lower = more fragmented sentences; higher = full
+    # thoughts grouped together. 5000 ms (5s) groups whole thoughts
+    # for natural conversational pacing; drop to 500-1000 if you want
+    # tighter per-clause splits.
+    whisper_min_silence_ms: int = 5000
+
     # Moderation mode — opt-in. When enabled, the bot batches recent
     # messages through a strict-rubric LLM classifier and persists
     # flagged ones as incidents for streamer review. Advisory only —
@@ -153,10 +175,21 @@ class Settings(BaseSettings):
 
 
 def _coerce(key: str, value: str) -> Any:
+    if key == "whisper_buffer_seconds":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 5.0
+    if key == "whisper_match_threshold":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.55
     if key in (
         "streamelements_enabled", "mod_mode_enabled",
         "obs_enabled", "live_widget_enabled",
         "youtube_enabled", "discord_enabled",
+        "whisper_enabled",
     ):
         return value.strip().lower() in ("true", "1", "yes", "on")
     if key == "obs_port":
@@ -164,6 +197,11 @@ def _coerce(key: str, value: str) -> Any:
             return int(value)
         except (TypeError, ValueError):
             return 4455
+    if key == "whisper_min_silence_ms":
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 5000
     return value
 
 

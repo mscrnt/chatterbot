@@ -83,6 +83,9 @@ reminders(id PK, user_id FK, text, created_at, fired_at, dismissed)
 incidents(id PK, user_id FK, message_id FK, severity, categories, status)  -- mod mode only
 user_aliases(user_id FK, name, first_seen, last_seen_as)       -- rename trail
 summarization_state(user_id PK FK, last_summarized_msg_id)
+transcript_chunks(id PK, ts, duration_ms, text,                -- whisper utterances
+                  matched_kind, matched_item_key, similarity)
+vec_transcripts(chunk_id PK, embedding)                        -- cosine vector index
 app_settings(key PK, value, updated_at)                        -- dashboard-managed overrides
 ```
 
@@ -124,7 +127,20 @@ are impossible. The streamer can merge any two users from the dashboard;
    messages through a strict-rubric LLM every `MOD_REVIEW_INTERVAL_MINUTES`
    and persists flagged ones as `incidents` for streamer review. Advisory
    only — the bot never takes chat action.
-8. `opt_out=1` users: no summarization, no new notes. Their watermark still
+8. Real-time whisper transcription (opt-in via `WHISPER_ENABLED=true`). The
+   `obs_scripts/audio_client.py` helper captures system audio on the
+   streamer's machine, resamples to 16 kHz mono, and POSTs 1 s PCM chunks to
+   `/audio/ingest`. The bot buffers `WHISPER_BUFFER_SECONDS` (default 5 s) of
+   audio, runs `faster-whisper` with VAD-filtered segmentation
+   (`WHISPER_MIN_SILENCE_MS` controls how long a pause must last before
+   splitting an utterance — default 5000 ms groups whole thoughts), embeds
+   each utterance, and cosine-matches against open insight cards. A match
+   above `WHISPER_MATCH_THRESHOLD` (default 0.55) flips the card to
+   `auto_pending`; the streamer confirms or rejects, or it auto-promotes to
+   `addressed` after 60 s. Each chat message also gets a reverse-lookup
+   against recent transcripts so the message-context modal can surface
+   "likely a response to what you just said on stream."
+9. `opt_out=1` users: no summarization, no new notes. Their watermark still
    advances so we don't re-evaluate the same messages forever.
 
 > N=20 / M_idle=10 / M_topics=5 are starting points. Tune via env vars after
@@ -220,7 +236,7 @@ Top-level pages:
 - `/events` — StreamElements feed, filter by type
 - `/moderation` — opt-in incident queue (review / dismiss)
 - `/settings` — tabbed: Twitch · OBS · StreamElements · YouTube · Discord ·
-  Moderation · Dashboard UI · Diagnostics
+  Moderation · Dashboard UI · Whisper · Diagnostics
 
 Notable HTMX endpoints:
 
@@ -266,6 +282,14 @@ Off by default. Each is independently toggled in **/settings** or via env.
   `https://id.twitch.tv/oauth2/validate` to derive the matching `client_id`,
   so no extra setup needed.
 - **Moderation classifier** — `MOD_MODE_ENABLED=true`. Advisory only.
+- **Whisper transcription** — `WHISPER_ENABLED=true` plus the `[whisper]`
+  extras (`uv sync --extra whisper`). Pair with the
+  `obs_scripts/audio_client.py` helper running on the streamer's machine to
+  POST mic / desktop audio to `/audio/ingest`; the bot transcribes via
+  `faster-whisper`, embeds each utterance, and auto-marks insight cards as
+  `addressed` when you speak about them. First model load downloads
+  ~75 MB–1 GB depending on `WHISPER_MODEL` (`tiny.en`/`base.en`/`small.en`/
+  `medium.en`).
 - **YouTube ingestion** — STUB. Module exists at
   `src/chatterbot/youtube.py` with the wiring contract; no API polling yet.
 - **Discord ingestion** — STUB. Module exists at
@@ -313,6 +337,7 @@ chatterbot/
 │   ├── threader.py                # topic-snapshot → topic-thread clustering
 │   ├── moderator.py               # advisory-only mod classifier (opt-in)
 │   ├── insights.py                # talking-points + regulars/lapsed
+│   ├── transcript.py              # whisper buffer + VAD + cosine matcher (opt-in)
 │   ├── diagnose.py                # `.cbreport` bundle builder
 │   ├── tui.py                     # Textual streamer UI
 │   ├── llm/ollama_client.py       # Ollama wrapper (think: false)
@@ -322,6 +347,9 @@ chatterbot/
 │       ├── rag.py                 # per-user "Ask Qwen" RAG
 │       ├── templates/             # Jinja2 + HTMX
 │       └── static/                # JS (SSE consumer) + CSS
+├── obs_scripts/
+│   ├── audio_client.py            # streamer-side audio capture → /audio/ingest
+│   └── audio_client.bat           # Windows venv bootstrapper
 ├── pyproject.toml
 ├── package.json                   # optional Tailwind CLI deps
 ├── tailwind.config.js

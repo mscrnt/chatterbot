@@ -187,6 +187,17 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     # The Helix poller consults OBS so it can pause itself while we're
     # not actually streaming. Same defaults-on-uncertainty contract.
     twitch_status = TwitchService(settings, obs=obs_status)
+    # Real-time transcript service. Owns the whisper model (lazy-loaded
+    # on first audio chunk) + match-to-card cache. No-op when disabled.
+    from ..transcript import TranscriptService
+    transcript_service = TranscriptService(repo, llm, settings)
+    # Wire the talking-points provider so the transcript matcher can
+    # auto-address them when the streamer speaks about them.
+    transcript_service._talking_points_provider = lambda: (
+        [tp for tp in insights.cache.talking_points
+         if not (tp.point or "").lstrip().lower().startswith("skip:")]
+        if insights.cache and insights.cache.talking_points else []
+    )
     _bg_tasks: set[asyncio.Task] = set()
 
     async def _lifespan(app):
@@ -203,6 +214,15 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         # token validate fails or creds are missing.
         _bg_tasks.add(
             asyncio.create_task(twitch_status.poll_loop(), name="twitch_poll")
+        )
+        # Whisper auto-confirm loop — promotes auto_pending insight
+        # states to addressed after the confirm timeout. No-op when
+        # whisper is disabled.
+        _bg_tasks.add(
+            asyncio.create_task(
+                transcript_service.auto_confirm_loop(),
+                name="transcript_auto_confirm",
+            )
         )
         try:
             yield
@@ -544,6 +564,17 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "Display preferences for this dashboard. No bot restart needed.",
             ("live_widget_enabled",),
         ),
+        (
+            "whisper", "Whisper", "fa-solid fa-microphone",
+            "Real-time stream transcription via the OBS audio relay script. "
+            "Auto-marks insight cards 'addressed' when you speak about them. "
+            "First time the model loads it'll download ~75MB-1GB depending on size.",
+            (
+                "whisper_enabled", "whisper_model",
+                "whisper_buffer_seconds", "whisper_match_threshold",
+                "whisper_min_silence_ms",
+            ),
+        ),
     )
 
     @app.get("/settings", response_class=HTMLResponse)
@@ -601,6 +632,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "live_widget_enabled",
             "youtube_enabled",
             "discord_enabled",
+            "whisper_enabled",
         }
     )
 
@@ -893,6 +925,22 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         ctx = repo.get_message_context(message_id, before=3, after=3)
         if not ctx["focal"]:
             raise HTTPException(404, "message not found")
+        # Bidirectional link: if this message looks like a response to
+        # something the streamer said on stream in the last few minutes,
+        # surface the matching transcript chunk so the streamer can see
+        # "yeah, this chat message was answering my question."
+        related_transcript = None
+        related_sim = None
+        if transcript_service.enabled:
+            try:
+                qv = await llm.embed(ctx["focal"].content)
+                hit = repo.find_related_transcript(
+                    qv, max_age_minutes=5, threshold=0.40,
+                )
+                if hit:
+                    related_transcript, related_sim = hit
+            except Exception:
+                logger.exception("modal_message: related-transcript lookup failed")
         return TEMPLATES.TemplateResponse(
             request,
             "modals/_message_context.html",
@@ -901,6 +949,8 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "before": ctx["before"],
                 "after": ctx["after"],
                 "parent_ids": ctx.get("parent_ids", {}),
+                "related_transcript": related_transcript,
+                "related_transcript_sim": related_sim,
             },
         )
 
@@ -1191,6 +1241,9 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             ),
             # Per-stream goals + computed progress.
             "goals_state": _build_goals_state(),
+            # Live transcript strip — what whisper just heard.
+            "transcript_chunks": repo.list_transcript_chunks(limit=15),
+            "transcript_status": transcript_service.status(),
         }
 
     def _build_topics_ctx(status: str, q: str) -> dict:
@@ -1357,7 +1410,12 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         """
         from datetime import datetime, timedelta, timezone
         action = action.strip().lower()
-        if action not in ("addressed", "snooze", "pin", "skip", "open"):
+        valid_actions = (
+            "addressed", "snooze", "pin", "skip", "open",
+            # transcript-driven confirm/reject of an auto_pending card.
+            "confirm_pending", "reject_pending",
+        )
+        if action not in valid_actions:
             raise HTTPException(400, f"unknown action: {action}")
 
         state = action
@@ -1376,6 +1434,15 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             state = "skipped"
         elif action == "addressed":
             state = "addressed"
+        elif action == "confirm_pending":
+            # Streamer says "yes, I addressed that one." Promote
+            # auto_pending → addressed; preserve the existing (auto)
+            # transcript note as the rationale.
+            state = "addressed"
+        elif action == "reject_pending":
+            # Streamer says "no, that wasn't really addressing it."
+            # Clear the state — the card returns to the open list.
+            state = "open"
 
         repo.set_insight_state(
             kind, item_key, state,
@@ -1461,6 +1528,80 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             request, "audit.html", {"rows": rows},
         )
 
+    @app.post("/audio/ingest")
+    async def audio_ingest(request: Request):
+        """OBS audio relay endpoint. Body is raw float32 mono PCM. The
+        sample rate is in the X-Sample-Rate header (default 16000).
+        Returns 204 — fire-and-forget; transcription runs as a task.
+
+        Auth/security: this is bound to the dashboard's listen address
+        (default 127.0.0.1). Keep it that way unless you trust the
+        network — anyone who can reach this endpoint can inject audio
+        into the streamer's transcript log.
+        """
+        if not transcript_service.enabled:
+            return Response(status_code=204)
+        try:
+            sr = int(request.headers.get("x-sample-rate") or 16000)
+        except (TypeError, ValueError):
+            sr = 16000
+        body = await request.body()
+        if body:
+            await transcript_service.ingest_chunk(body, sr)
+        return Response(status_code=204)
+
+    @app.get("/modals/transcript/{chunk_id}", response_class=HTMLResponse)
+    async def modal_transcript(request: Request, chunk_id: int):
+        """Detail view for one transcript chunk: the utterance itself,
+        adjacent transcript chunks for chronological context, and the
+        insight card it matched (if any)."""
+        ctx = repo.transcript_context_around(chunk_id, before=3, after=3)
+        if not ctx["focal"]:
+            raise HTTPException(404, "transcript chunk not found")
+        focal = ctx["focal"]
+        matched_card = None
+        if focal.matched_kind and focal.matched_item_key:
+            # Resolve the card to a display title + jump-to URL.
+            if focal.matched_kind == "thread":
+                try:
+                    matched_card = repo.get_thread(int(focal.matched_item_key))
+                except Exception:
+                    matched_card = None
+        return TEMPLATES.TemplateResponse(
+            request, "modals/_transcript_context.html",
+            {
+                "focal": focal,
+                "before": ctx["before"],
+                "after": ctx["after"],
+                "matched_card": matched_card,
+            },
+        )
+
+    @app.get("/transcript", response_class=HTMLResponse)
+    async def transcript_partial(
+        request: Request,
+        limit: int = Query(20, ge=1, le=100),
+        last_pending: int = Query(0, ge=0),
+    ):
+        """Live transcript strip for /insights. HTMX target re-fetches
+        every few seconds to show the streamer what whisper just heard.
+
+        `last_pending` is what the client saw on the previous swap;
+        when the server's pending_count has advanced, we emit
+        HX-Trigger: insights-state-changed so the engagement body
+        re-renders immediately to surface the new auto_pending card.
+        """
+        chunks = repo.list_transcript_chunks(limit=limit)
+        status = transcript_service.status()
+        resp = TEMPLATES.TemplateResponse(
+            request, "partials/transcript_strip.html",
+            {"chunks": chunks, "service_status": status,
+             "pending_count": status["pending_count"]},
+        )
+        if status["pending_count"] > last_pending:
+            resp.headers["HX-Trigger"] = "insights-state-changed"
+        return resp
+
     @app.get("/health", response_class=HTMLResponse)
     async def health_partial(request: Request):
         """Ops-style health snapshot for the Settings page. Uses the
@@ -1476,6 +1617,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         except Exception as e:
             ollama_err = f"{type(e).__name__}: {e}"
         indexed, total = repo.messages_embedding_coverage()
+        obs = obs_status.status
         ctx = {
             "ollama_ok": ollama_ok,
             "ollama_ms": ollama_ms,
@@ -1487,6 +1629,9 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "embed_total": total,
             "due_snoozes": repo.count_due_snoozes(),
             "fired_reminders": repo.count_fired_reminders(),
+            "obs": obs,
+            "obs_host": f"{settings.obs_host}:{settings.obs_port}",
+            "transcript_status": transcript_service.status(),
         }
         return TEMPLATES.TemplateResponse(
             request, "partials/health_panel.html", ctx,

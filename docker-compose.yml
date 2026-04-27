@@ -1,45 +1,80 @@
+# Two services from the same image: the silent ingestion bot + the
+# read-only dashboard. They share the SQLite DB via WAL (mounted from
+# ./data) so the bot writes and the dashboard reads concurrently.
+#
+# Quickstart for the OBS audio relay test:
+#   docker compose up dashboard
+#   # then in /settings → Whisper, tick Enabled
+#   # in OBS, drop obs_scripts/chatterbot_audio_relay.py into Tools → Scripts
+#   # set chatterbot URL to http://<your-docker-host>:8765
+#
+# Both services need the shared whisper-models volume so the faster-
+# whisper model files survive `docker compose build` rebuilds.
+
+x-base: &base
+  build: .
+  environment:
+    - TWITCH_BOT_NICK=${TWITCH_BOT_NICK}
+    - TWITCH_OAUTH_TOKEN=${TWITCH_OAUTH_TOKEN}
+    - TWITCH_CHANNEL=${TWITCH_CHANNEL}
+    - TWITCH_CLIENT_ID=${TWITCH_CLIENT_ID}
+    - TWITCH_CLIENT_SECRET=${TWITCH_CLIENT_SECRET}
+    - OLLAMA_HOST=${OLLAMA_HOST:-192.168.69.229}
+    - OLLAMA_PORT=${OLLAMA_PORT:-11434}
+    - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3.5:9b}
+    - OLLAMA_EMBED_MODEL=${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+    - OLLAMA_EMBED_DIM=${OLLAMA_EMBED_DIM:-768}
+    - OLLAMA_MOD_MODEL=${OLLAMA_MOD_MODEL:-}
+    - OBS_ENABLED=${OBS_ENABLED:-false}
+    - OBS_HOST=${OBS_HOST:-localhost}
+    - OBS_PORT=${OBS_PORT:-4455}
+    - OBS_PASSWORD=${OBS_PASSWORD:-}
+    - STREAMELEMENTS_ENABLED=${STREAMELEMENTS_ENABLED:-false}
+    - STREAMELEMENTS_JWT=${STREAMELEMENTS_JWT}
+    - STREAMELEMENTS_CHANNEL_ID=${STREAMELEMENTS_CHANNEL_ID}
+    - DASHBOARD_HOST=${DASHBOARD_HOST:-0.0.0.0}
+    - DASHBOARD_PORT=${DASHBOARD_PORT:-8765}
+    - DASHBOARD_BASIC_AUTH_USER=${DASHBOARD_BASIC_AUTH_USER}
+    - DASHBOARD_BASIC_AUTH_PASS=${DASHBOARD_BASIC_AUTH_PASS}
+    - DB_PATH=${DB_PATH:-/app/data/chatters.db}
+    - SUMMARIZE_AFTER_MESSAGES=${SUMMARIZE_AFTER_MESSAGES:-20}
+    - SUMMARIZE_IDLE_MINUTES=${SUMMARIZE_IDLE_MINUTES:-10}
+    - IDLE_SWEEP_INTERVAL_SECONDS=${IDLE_SWEEP_INTERVAL_SECONDS:-60}
+    - TOPICS_INTERVAL_MINUTES=${TOPICS_INTERVAL_MINUTES:-5}
+    - TOPICS_MAX_MESSAGES=${TOPICS_MAX_MESSAGES:-200}
+    - MOD_MODE_ENABLED=${MOD_MODE_ENABLED:-false}
+    - MOD_REVIEW_INTERVAL_MINUTES=${MOD_REVIEW_INTERVAL_MINUTES:-5}
+    - MOD_REVIEW_MAX_MESSAGES=${MOD_REVIEW_MAX_MESSAGES:-100}
+    - WHISPER_ENABLED=${WHISPER_ENABLED:-false}
+    - WHISPER_MODEL=${WHISPER_MODEL:-base.en}
+    - WHISPER_BUFFER_SECONDS=${WHISPER_BUFFER_SECONDS:-5.0}
+    - WHISPER_MATCH_THRESHOLD=${WHISPER_MATCH_THRESHOLD:-0.55}
+    - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-auto}
+  volumes:
+    - ./src:/app/src
+    - ./data:/app/data
+    - ./logs:/app/logs
+    - whisper-models:/root/.cache/huggingface
+  # On native-Linux Docker, `host.docker.internal` doesn't resolve by
+  # default the way it does on Docker Desktop. Map it to the host
+  # gateway so OBS_HOST=host.docker.internal works for reaching OBS
+  # WebSocket running on the host machine.
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  restart: unless-stopped
+
 services:
-  chatterbot:
-    build: .
-    stdin_open: true
-    tty: true
-    environment:
-      - TWITCH_BOT_NICK=${TWITCH_BOT_NICK}
-      - TWITCH_OAUTH_TOKEN=${TWITCH_OAUTH_TOKEN}
-      - TWITCH_CHANNEL=${TWITCH_CHANNEL}
-      - TWITCH_CLIENT_ID=${TWITCH_CLIENT_ID}
-      - TWITCH_CLIENT_SECRET=${TWITCH_CLIENT_SECRET}
-      - OLLAMA_HOST=${OLLAMA_HOST:-192.168.69.229}
-      - OLLAMA_PORT=${OLLAMA_PORT:-11434}
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3.5:9b}
-      - OLLAMA_EMBED_MODEL=${OLLAMA_EMBED_MODEL:-nomic-embed-text}
-      - OLLAMA_EMBED_DIM=${OLLAMA_EMBED_DIM:-768}
-      - OLLAMA_MOD_MODEL=${OLLAMA_MOD_MODEL:-}
-      - OBS_ENABLED=${OBS_ENABLED:-false}
-      - OBS_HOST=${OBS_HOST:-localhost}
-      - OBS_PORT=${OBS_PORT:-4455}
-      - OBS_PASSWORD=${OBS_PASSWORD:-}
-      - STREAMELEMENTS_ENABLED=${STREAMELEMENTS_ENABLED:-false}
-      - STREAMELEMENTS_JWT=${STREAMELEMENTS_JWT}
-      - STREAMELEMENTS_CHANNEL_ID=${STREAMELEMENTS_CHANNEL_ID}
-      - DASHBOARD_HOST=${DASHBOARD_HOST:-0.0.0.0}
-      - DASHBOARD_PORT=${DASHBOARD_PORT:-8765}
-      - DASHBOARD_BASIC_AUTH_USER=${DASHBOARD_BASIC_AUTH_USER}
-      - DASHBOARD_BASIC_AUTH_PASS=${DASHBOARD_BASIC_AUTH_PASS}
-      - DB_PATH=${DB_PATH:-/app/data/chatters.db}
-      - SUMMARIZE_AFTER_MESSAGES=${SUMMARIZE_AFTER_MESSAGES:-20}
-      - SUMMARIZE_IDLE_MINUTES=${SUMMARIZE_IDLE_MINUTES:-10}
-      - IDLE_SWEEP_INTERVAL_SECONDS=${IDLE_SWEEP_INTERVAL_SECONDS:-60}
-      - TOPICS_INTERVAL_MINUTES=${TOPICS_INTERVAL_MINUTES:-5}
-      - TOPICS_MAX_MESSAGES=${TOPICS_MAX_MESSAGES:-200}
-      - MOD_MODE_ENABLED=${MOD_MODE_ENABLED:-false}
-      - MOD_REVIEW_INTERVAL_MINUTES=${MOD_REVIEW_INTERVAL_MINUTES:-5}
-      - MOD_REVIEW_MAX_MESSAGES=${MOD_REVIEW_MAX_MESSAGES:-100}
-      - RUN_MODE=${RUN_MODE:-bot}
+  bot:
+    <<: *base
+    command: ["bot"]
+    profiles: ["all", "bot"]
+
+  dashboard:
+    <<: *base
+    command: ["dashboard"]
     ports:
       - "${DASHBOARD_PORT:-8765}:${DASHBOARD_PORT:-8765}"
-    volumes:
-      - ./src:/app/src
-      - ./data:/app/data
-    restart: unless-stopped
-    command: ["${RUN_MODE:-bot}"]
+    profiles: ["all", "dashboard"]
+
+volumes:
+  whisper-models:

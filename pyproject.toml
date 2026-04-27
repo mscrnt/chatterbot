@@ -22,12 +22,22 @@ dependencies = [
     "python-multipart>=0.0.9",
     "obsws-python>=1.6.0",
     "discord-py>=2.3.0",
+    "numpy>=1.26.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
     "ruff>=0.1.0",
+]
+# Real-time stream transcription via the OBS audio relay. Pulls in
+# faster-whisper + ctranslate2 (~300 MB on first install). Streamers
+# who don't enable whisper in /settings can skip this extra entirely;
+# the dashboard boots fine without it (transcript.py lazy-imports).
+#   uv sync --extra whisper
+whisper = [
+    "faster-whisper>=1.0.0",
+    "sounddevice>=0.4.6",
 ]
 
 [project.scripts]

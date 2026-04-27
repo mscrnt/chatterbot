@@ -39,8 +39,32 @@
   {% endif %}
 {%- endmacro %}
 
-<div class="space-y-1 text-sm">
-  <p class="text-[11px] text-muted px-1 pb-2">
+<div class="space-y-3 text-sm">
+  {# Bidirectional link: this chat message looks semantically close to
+     a recent streamer utterance. Streamer can see "they were responding
+     to what I just said." #}
+  {% if related_transcript %}
+  <section class="rounded-lg border border-success/40 bg-success/5 p-3">
+    <div class="flex items-baseline gap-2 mb-1">
+      <i class="fa-solid fa-microphone-lines text-success text-[10px]"></i>
+      <span class="text-[11px] uppercase tracking-wider text-muted">
+        likely a response to what you said on stream
+      </span>
+      <span class="text-[10px] text-muted ml-auto">sim {{ '%.2f'|format(related_transcript_sim) }}</span>
+    </div>
+    <button type="button"
+            class="w-full text-left text-primary hover:underline italic"
+            hx-get="/modals/transcript/{{ related_transcript.id }}"
+            hx-target="#modal-root"
+            hx-swap="innerHTML"
+            title="Open the transcript context">
+      "{{ related_transcript.text }}"
+      <span class="text-[10px] text-muted ml-1">— {{ related_transcript.ts | short_ts }}</span>
+    </button>
+  </section>
+  {% endif %}
+
+  <p class="text-[11px] text-muted px-1 pb-1">
     showing {{ before|length }} before · the message · {{ after|length }} after
     {% if (before|length) < 3 or (after|length) < 3 %}
       <span class="ml-1 italic">(channel boundary)</span>

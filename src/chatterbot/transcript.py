@@ -1,0 +1,434 @@
+"""Real-time whisper transcription + auto-match service.
+
+The OBS audio relay script POSTs raw 16 kHz mono float32 PCM chunks to
+the dashboard's `/audio/ingest` endpoint. This service:
+
+  1. Buffers chunks per session.
+  2. Every `whisper_buffer_seconds`, runs faster-whisper with VAD on the
+     accumulated buffer (skips silence, keeps speech).
+  3. For each transcript utterance, embeds the text via Ollama and
+     cosine-matches against open insight cards (talking points + topic
+     threads). When sim ≥ `whisper_match_threshold`, auto-sets the
+     card's state to 'addressed' with the transcript as the note.
+  4. Persists every chunk to `transcript_chunks` for the live strip
+     on Insights and the audit trail.
+
+`faster-whisper` is heavy (model files are 75 MB → 3 GB depending on
+size). Lazy-imported so the dashboard boots fine when the feature is
+disabled. The whisper model is loaded once on first audio chunk.
+
+Hard rule reminder: this is streamer-only. Transcripts of the streamer's
+voice render to the streamer's private dashboard. They never enter any
+chat-facing prompt.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import math
+import struct
+import time
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from .config import Settings
+from .llm.ollama_client import OllamaClient
+from .repo import ChatterRepo
+
+logger = logging.getLogger(__name__)
+
+
+SAMPLE_RATE = 16000  # whisper's required input rate
+SAMPLE_BYTES = 4     # float32
+
+
+@dataclass
+class _IngestBuffer:
+    """In-memory audio buffer. Float32 mono PCM at 16 kHz."""
+
+    samples: list[np.ndarray] = field(default_factory=list)
+    total_samples: int = 0
+    last_flush: float = field(default_factory=time.time)
+
+    def append(self, pcm: np.ndarray) -> None:
+        self.samples.append(pcm)
+        self.total_samples += pcm.shape[0]
+
+    def flush(self) -> np.ndarray:
+        if not self.samples:
+            return np.zeros(0, dtype=np.float32)
+        out = np.concatenate(self.samples).astype(np.float32, copy=False)
+        self.samples.clear()
+        self.total_samples = 0
+        self.last_flush = time.time()
+        return out
+
+
+class TranscriptService:
+    """Owns the whisper model + ingest buffer + match loop. Thread-safe
+    enough for the dashboard's single-process usage."""
+
+    def __init__(
+        self, repo: ChatterRepo, llm: OllamaClient, settings: Settings,
+    ):
+        self.repo = repo
+        self.llm = llm
+        self.settings = settings
+        self._buffer = _IngestBuffer()
+        self._lock = asyncio.Lock()
+        self._model = None  # lazy-loaded WhisperModel
+        self._model_load_attempted = False
+        self._model_load_error: str | None = None
+        # Cached embeddings of open insight cards. Refreshed every minute
+        # so adds/removes propagate. Keyed by (kind, item_key) → vector.
+        self._card_embeds: dict[tuple[str, str], list[float]] = {}
+        # Original text behind each cached embedding — used for the
+        # debug log line so the streamer can see WHY a transcript chunk
+        # closely matched a card.
+        self._card_embed_texts: dict[tuple[str, str], str] = {}
+        self._card_embeds_refreshed_at: float = 0.0
+        self._card_embeds_lock = asyncio.Lock()
+        # Optional callback that returns the current talking points.
+        # Wired by the dashboard so we can index them too.
+        self._talking_points_provider = None
+        # Counter incremented every time we write 'auto_pending'. The
+        # /transcript route reads this and emits HX-Trigger so the
+        # insights body re-renders the moment a new pending appears.
+        self._pending_count = 0
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.settings.whisper_enabled)
+
+    async def _ensure_model(self):
+        """Lazy-load the whisper model on first ingest. Heavy import +
+        download — keep it off the dashboard boot path."""
+        if self._model is not None or self._model_load_attempted:
+            return self._model
+        self._model_load_attempted = True
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as e:
+            self._model_load_error = (
+                f"faster-whisper not installed: {e}. "
+                "Add it to pyproject.toml and `uv sync`."
+            )
+            logger.error("transcript: %s", self._model_load_error)
+            return None
+        compute = self.settings.whisper_compute_type
+        try:
+            # Run model load in a thread so we don't block the event loop.
+            self._model = await asyncio.to_thread(
+                WhisperModel,
+                self.settings.whisper_model,
+                device="auto",
+                compute_type=compute,
+            )
+            logger.info(
+                "transcript: loaded whisper model=%s compute=%s",
+                self.settings.whisper_model, compute,
+            )
+        except Exception as e:
+            self._model_load_error = f"{type(e).__name__}: {e}"
+            logger.exception("transcript: failed to load whisper model")
+        return self._model
+
+    async def ingest_chunk(self, payload: bytes, sample_rate: int) -> None:
+        """Append a raw PCM chunk to the buffer. The OBS script sends
+        16 kHz mono float32; if a different rate is supplied, we resample."""
+        if not self.enabled:
+            return
+        if sample_rate != SAMPLE_RATE:
+            # Linear resample is fine for VAD/whisper preprocessing —
+            # whisper itself does its own internal mel-spec conversion.
+            x = np.frombuffer(payload, dtype=np.float32)
+            ratio = SAMPLE_RATE / float(sample_rate)
+            n_out = int(x.shape[0] * ratio)
+            if n_out <= 0:
+                return
+            idx = (np.arange(n_out) / ratio).astype(np.int64)
+            idx = np.clip(idx, 0, x.shape[0] - 1)
+            x = x[idx]
+        else:
+            x = np.frombuffer(payload, dtype=np.float32)
+
+        async with self._lock:
+            self._buffer.append(x)
+            should_flush = (
+                self._buffer.total_samples
+                >= int(SAMPLE_RATE * self.settings.whisper_buffer_seconds)
+            )
+
+        if should_flush:
+            asyncio.create_task(self._transcribe_and_match())
+
+    async def _transcribe_and_match(self) -> None:
+        """Pop the buffer, transcribe the audio, embed each segment,
+        match against open insight cards, persist. Runs as a fire-and-
+        forget task so the ingest endpoint stays snappy."""
+        async with self._lock:
+            audio = self._buffer.flush()
+        if audio.shape[0] == 0:
+            return
+        model = await self._ensure_model()
+        if model is None:
+            return
+
+        # Whisper transcribe. VAD filter strips silence inside the buffer
+        # so we don't end up with "you you you" hallucinations on quiet
+        # patches. Run synchronously in a thread — whisper is CPU/GPU
+        # bound and isn't async-friendly.
+        min_silence_ms = max(100, int(self.settings.whisper_min_silence_ms or 5000))
+
+        def _run() -> list[tuple[str, float, float]]:
+            try:
+                segments, _info = model.transcribe(
+                    audio,
+                    vad_filter=True,
+                    vad_parameters={"min_silence_duration_ms": min_silence_ms},
+                    beam_size=1,
+                    condition_on_previous_text=False,
+                )
+                return [(s.text.strip(), s.start, s.end) for s in segments]
+            except Exception:
+                logger.exception("transcript: whisper.transcribe failed")
+                return []
+
+        segments = await asyncio.to_thread(_run)
+        if not segments:
+            return
+
+        # Refresh card embeddings if stale.
+        await self._refresh_card_embeds_if_stale()
+
+        threshold = float(self.settings.whisper_match_threshold)
+        for text, start_s, end_s in segments:
+            text = (text or "").strip()
+            if not text or len(text) < 4:
+                continue
+            duration_ms = max(0, int((end_s - start_s) * 1000))
+            best_kind, best_key, best_sim, best_text, qv = (
+                await self._best_candidate(text)
+            )
+            crossed = (
+                best_sim is not None and best_sim >= threshold
+            )
+            # Always store the best candidate AND the embedding so the
+            # chat ↔ transcript reverse lookup (a chat message can find
+            # a recent utterance it semantically answered) works.
+            chunk_id = await asyncio.to_thread(
+                self.repo.add_transcript_chunk,
+                text=text, duration_ms=duration_ms,
+                matched_kind=best_kind, matched_item_key=best_key,
+                similarity=best_sim, embedding=qv,
+            )
+            if crossed:
+                # Don't auto-flip to 'addressed' immediately — flip to
+                # 'auto_pending' so the streamer can confirm/reject in
+                # the UI before it sticks. The auto_confirm_loop
+                # promotes any unconfirmed pendings to 'addressed' after
+                # the timeout, so passive workflow still works.
+                try:
+                    await asyncio.to_thread(
+                        self.repo.set_insight_state,
+                        best_kind, best_key, "auto_pending",
+                        note=f"(auto) {text}",
+                    )
+                    self._pending_count += 1
+                    logger.info(
+                        "transcript: AUTO-PENDING %s/%s sim=%.3f "
+                        "spoken=%r → card=%r",
+                        best_kind, best_key, best_sim,
+                        text[:80], (best_text or "")[:80],
+                    )
+                except Exception:
+                    logger.exception("transcript: auto-pending write failed")
+            elif best_sim is not None:
+                logger.info(
+                    "transcript: near-miss sim=%.3f (threshold=%.2f) "
+                    "spoken=%r ≈ %s/%s=%r",
+                    best_sim, threshold,
+                    text[:80], best_kind, best_key, (best_text or "")[:80],
+                )
+            else:
+                logger.info(
+                    "transcript: no cards indexed yet — chunk #%d: %r",
+                    chunk_id, text[:80],
+                )
+
+    async def _refresh_card_embeds_if_stale(self, *, max_age_s: float = 60) -> None:
+        async with self._card_embeds_lock:
+            if (time.time() - self._card_embeds_refreshed_at) < max_age_s:
+                return
+            await self._refresh_card_embeds_locked()
+
+    async def _refresh_card_embeds_locked(self) -> None:
+        """Build the cosine-search target set from currently-open cards.
+        Skipped cards (state=skipped) are excluded; addressed/snoozed
+        also excluded so we don't re-flip them. Includes:
+          - active + dormant topic threads (their titles)
+          - talking points from the latest insights cache
+        """
+        targets: list[tuple[str, str, str]] = []  # (kind, item_key, text)
+
+        # Topic threads: title is the searchable text, item_key = id.
+        try:
+            threads = await asyncio.to_thread(
+                self.repo.list_threads, status_filter=None, query="", limit=200,
+            )
+            t_states = await asyncio.to_thread(
+                self.repo.get_insight_states, "thread"
+            )
+        except Exception:
+            threads = []
+            t_states = {}
+        for t in threads:
+            s = t_states.get(str(t.id))
+            if s and s.state in ("addressed", "snoozed", "skipped"):
+                continue
+            if t.status == "archived":
+                continue
+            targets.append(("thread", str(t.id), t.title))
+
+        # Talking points: the LLM's "active right now" suggestions. The
+        # cache is built by InsightsService — we just read it. item_key
+        # has to match the hash format the dashboard renderer uses so
+        # auto-address writes flip the right card.
+        try:
+            from .insights import InsightsService  # type: ignore  # circular-safe in lazy import
+            # The dashboard process owns the InsightsService instance;
+            # we don't have a direct handle, so we fall back to repo
+            # for the current cache by walking through the insights
+            # ack/cache surface. Simplest path: read from the same
+            # talking_points list the dashboard renders.
+        except Exception:
+            pass
+        try:
+            tps = list(self._talking_points_provider() if self._talking_points_provider else [])
+        except Exception:
+            logger.exception("transcript: talking_points_provider raised")
+            tps = []
+        import hashlib as _h
+        for tp in tps:
+            point = (tp.point or "").strip()
+            if not point:
+                continue
+            uid = tp.user_id
+            digest = _h.sha1(f"{uid}|{point}".encode("utf-8")).hexdigest()[:16]
+            item_key = f"{uid}:{digest}"
+            s_states = await asyncio.to_thread(
+                self.repo.get_insight_states, "talking_point"
+            )
+            s = s_states.get(item_key)
+            if s and s.state in ("addressed", "snoozed", "skipped"):
+                continue
+            # Search text: blend chatter name + point so "ask alice
+            # about her cat" can match either side.
+            targets.append(("talking_point", item_key, f"{tp.name}: {point}"))
+
+        # Resolve embeddings — re-use the cached embedding when we have
+        # one for that key; otherwise call Ollama.
+        new_embeds: dict[tuple[str, str], list[float]] = {}
+        for kind, key, text in targets:
+            cached = self._card_embeds.get((kind, key))
+            if cached is not None:
+                new_embeds[(kind, key)] = cached
+                continue
+            try:
+                vec = await self.llm.embed(text)
+                new_embeds[(kind, key)] = vec
+            except Exception:
+                logger.exception("transcript: embed failed for %s/%s", kind, key)
+        self._card_embeds = new_embeds
+        self._card_embed_texts = {(k, key): t for k, key, t in targets}
+        self._card_embeds_refreshed_at = time.time()
+        logger.info(
+            "transcript: refreshed %d card embeddings (%d threads, %d talking-points)",
+            len(new_embeds),
+            sum(1 for k, _ in new_embeds.keys() if k == "thread"),
+            sum(1 for k, _ in new_embeds.keys() if k == "talking_point"),
+        )
+
+    async def _best_candidate(
+        self, text: str,
+    ) -> tuple[str | None, str | None, float | None, str | None, list[float] | None]:
+        """Embed transcript text and return the closest card by cosine
+        similarity, REGARDLESS of threshold. Returns
+        (kind, item_key, similarity, target_text, query_embedding).
+
+        The embedding is also returned so the caller can persist it
+        into vec_transcripts — used for the chat ↔ transcript reverse
+        lookup (chat message can find a recent utterance it answered)."""
+        try:
+            qv = await self.llm.embed(text)
+        except Exception:
+            logger.exception("transcript: query embed failed")
+            return None, None, None, None, None
+        if not self._card_embeds:
+            return None, None, None, None, qv
+        q = np.asarray(qv, dtype=np.float32)
+        qn = float(np.linalg.norm(q))
+        if qn <= 0:
+            return None, None, None, None, qv
+        best_kind: str | None = None
+        best_key: str | None = None
+        best_sim = -1.0
+        for (kind, key), vec in self._card_embeds.items():
+            v = np.asarray(vec, dtype=np.float32)
+            vn = float(np.linalg.norm(v))
+            if vn <= 0:
+                continue
+            sim = float(np.dot(q, v) / (qn * vn))
+            if sim > best_sim:
+                best_sim = sim
+                best_kind = kind
+                best_key = key
+        if best_kind is None:
+            return None, None, None, None, qv
+        target_text = self._card_embed_texts.get((best_kind, best_key))
+        return best_kind, best_key, best_sim, target_text, qv
+
+    AUTO_CONFIRM_SECONDS = 60
+    AUTO_CONFIRM_INTERVAL = 15
+
+    async def auto_confirm_loop(self) -> None:
+        """Promote auto_pending insight states to 'addressed' after
+        AUTO_CONFIRM_SECONDS without explicit confirm/reject. Runs
+        forever; no-op when whisper is disabled."""
+        while True:
+            try:
+                await asyncio.sleep(self.AUTO_CONFIRM_INTERVAL)
+                if not self.enabled:
+                    continue
+                pendings = await asyncio.to_thread(
+                    self.repo.list_pending_auto_addresses,
+                    older_than_seconds=self.AUTO_CONFIRM_SECONDS,
+                )
+                for p in pendings:
+                    await asyncio.to_thread(
+                        self.repo.set_insight_state,
+                        p.kind, p.item_key, "addressed",
+                        note=p.note,
+                    )
+                    logger.info(
+                        "transcript: auto-confirm timeout — %s/%s → addressed",
+                        p.kind, p.item_key,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("transcript: auto_confirm_loop iteration failed")
+
+    def status(self) -> dict:
+        """Snapshot for the Settings → Diagnostics health panel."""
+        return {
+            "enabled": self.enabled,
+            "model_loaded": self._model is not None,
+            "model_error": self._model_load_error,
+            "model": self.settings.whisper_model,
+            "buffered_samples": self._buffer.total_samples,
+            "card_embeds": len(self._card_embeds),
+            "pending_count": self._pending_count,
+        }
