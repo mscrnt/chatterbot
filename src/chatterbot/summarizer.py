@@ -306,6 +306,48 @@ class Summarizer:
                 last_id,
             )
 
+    # ---------------- background message-embedding indexer ----------------
+    # Keeps vec_messages current as new chat arrives so /search has fresh
+    # coverage. Pure local Ollama work — no external API quota at risk —
+    # so we don't pause on OBS offline. Survives Ollama hiccups via the
+    # standard exception swallow on the loop body.
+
+    async def embed_loop(self) -> None:
+        interval = max(5, self.settings.message_embed_interval_seconds)
+        batch = max(1, self.settings.message_embed_batch_size)
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                rows = await asyncio.to_thread(
+                    self.repo.messages_missing_embedding_global, batch
+                )
+                if not rows:
+                    continue
+                wrote = 0
+                for m in rows:
+                    try:
+                        vec = await self.llm.embed(m.content)
+                    except Exception:
+                        logger.exception("embed_loop: embed call failed for msg %d", m.id)
+                        continue
+                    await asyncio.to_thread(
+                        self.repo.upsert_message_embedding, m.id, vec
+                    )
+                    wrote += 1
+                if wrote:
+                    indexed, total = await asyncio.to_thread(
+                        self.repo.messages_embedding_coverage
+                    )
+                    logger.info(
+                        "embed_loop: +%d → %d/%d indexed (%.1f%%)",
+                        wrote, indexed, total,
+                        100 * indexed / total if total else 0.0,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("embed_loop iteration failed")
+
     async def idle_loop(self) -> None:
         interval = self.settings.idle_sweep_interval_seconds
         idle_minutes = self.settings.summarize_idle_minutes

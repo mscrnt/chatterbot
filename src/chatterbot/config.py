@@ -123,6 +123,12 @@ class Settings(BaseSettings):
     topics_interval_minutes: int = 5
     topics_max_messages: int = 200
 
+    # Message embedding indexer — feeds /search semantic-search index.
+    # Runs alongside the summarizer; pure local Ollama work, no external
+    # quota at risk. Set interval=0 to disable.
+    message_embed_interval_seconds: int = 30
+    message_embed_batch_size: int = 25
+
     # Moderation mode — opt-in. When enabled, the bot batches recent
     # messages through a strict-rubric LLM classifier and persists
     # flagged ones as incidents for streamer review. Advisory only —

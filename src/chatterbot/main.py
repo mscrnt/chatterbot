@@ -95,6 +95,10 @@ async def run_bot(settings: Settings) -> None:
         asyncio.create_task(summarizer.idle_loop(), name="summarizer_idle"),
         asyncio.create_task(summarizer.topics_loop(), name="summarizer_topics"),
     ]
+    if settings.message_embed_interval_seconds > 0:
+        tasks.append(
+            asyncio.create_task(summarizer.embed_loop(), name="message_embedder")
+        )
     if settings.obs_enabled:
         tasks.append(asyncio.create_task(obs.poll_loop(), name="obs_poll"))
     if settings.streamelements_enabled:
