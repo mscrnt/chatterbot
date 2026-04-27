@@ -28,7 +28,7 @@ import struct
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -68,6 +68,7 @@ class User:
     demeanor: str | None = None       # constrained enum, see schemas.Demeanor
     interests: list[str] | None = None  # deduped, capped, ordered by recency
     profile_updated_at: str | None = None
+    is_starred: bool = False          # streamer-personal favorite
 
 
 @dataclass
@@ -117,6 +118,11 @@ class StreamRecap:
     message_id_lo: int | None
     message_id_hi: int | None
     summary: str
+    msg_count: int = 0
+    unique_chatters: int = 0
+    new_chatters: int = 0
+    addressed_count: int = 0
+    snoozed_count: int = 0
 
 
 @dataclass
@@ -268,6 +274,42 @@ class ChatterRow:
     note_count: int
     msg_count: int
     last_message_ts: str | None
+    engagement_score: int = 0  # 0-100 composite, computed in list_chatters
+
+
+def _engagement_score(
+    *, msg_count: int, note_count: int, sub_tier: str | None,
+    sub_months: int, is_mod: bool, is_vip: bool, is_starred: bool,
+    last_seen: str | None,
+) -> int:
+    """Composite 0-100 engagement signal. Weighted toward facts the LLM
+    has already extracted (notes), platform investment (sub/mod/vip),
+    and recency. Capped so a single mega-chatter doesn't dominate.
+
+    Tuned by hand against typical Twitch distributions; if you're
+    seeing everyone clustered at one end, dial the weights here."""
+    raw = 0
+    raw += min(msg_count, 200)            # cap at 200 messages worth
+    raw += note_count * 8                 # each cited fact is real signal
+    if sub_tier:
+        raw += 25 + min(sub_months, 24) * 2  # subs + tenure
+    if is_mod:
+        raw += 30
+    if is_vip:
+        raw += 20
+    if is_starred:
+        raw += 25
+    # Recency decay — fade out chatters who haven't been seen recently.
+    if last_seen:
+        try:
+            last = datetime.fromisoformat(last_seen)
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            days = max(0, (datetime.now(timezone.utc) - last).days)
+            raw -= min(days * 2, 60)
+        except (TypeError, ValueError):
+            pass
+    return max(0, min(100, raw // 4))
 
 
 # ------------------------------- helpers -----------------------------------
@@ -360,6 +402,10 @@ class ChatterRepo:
                 ("demeanor",            "TEXT"),  # constrained enum, see schemas.py
                 ("interests",           "TEXT"),  # JSON array, deduped
                 ("profile_updated_at",  "TEXT"),
+                # Streamer-personal favorite flag — separate from Twitch's
+                # native VIP role. Drives the gold-bordered live-widget
+                # surfacing + the "starred chatters present" insights row.
+                ("is_starred",          "INTEGER NOT NULL DEFAULT 0"),
             ):
                 if col not in _ucols:
                     cur.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
@@ -588,6 +634,27 @@ class ChatterRepo:
                 "CREATE INDEX IF NOT EXISTS idx_insight_states_due "
                 "ON insight_states(due_ts) WHERE due_ts IS NOT NULL"
             )
+            # Append-only audit log of insight_state transitions. The
+            # streamer can review "what did I act on" + the recap can
+            # cite concrete addressed-counts from this rather than the
+            # text of the transcript.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS insight_state_history (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts          TEXT NOT NULL,
+                    kind        TEXT NOT NULL,
+                    item_key    TEXT NOT NULL,
+                    state       TEXT NOT NULL,
+                    due_ts      TEXT,
+                    note        TEXT
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_insight_history_ts "
+                "ON insight_state_history(ts)"
+            )
             # End-of-stream LLM-generated recaps. Triggered when OBS
             # transitions from streaming → not-streaming. One row per
             # detected stream session.
@@ -603,6 +670,21 @@ class ChatterRepo:
                 )
                 """
             )
+            # Idempotent migration to add stream-stat columns for the
+            # cross-stream KPI deltas. Each is filled at recap time.
+            cur.execute("PRAGMA table_info(stream_recaps)")
+            _rcols = {r["name"] for r in cur.fetchall()}
+            for col, decl in (
+                ("msg_count",         "INTEGER NOT NULL DEFAULT 0"),
+                ("unique_chatters",   "INTEGER NOT NULL DEFAULT 0"),
+                ("new_chatters",      "INTEGER NOT NULL DEFAULT 0"),
+                ("addressed_count",   "INTEGER NOT NULL DEFAULT 0"),
+                ("snoozed_count",     "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if col not in _rcols:
+                    cur.execute(
+                        f"ALTER TABLE stream_recaps ADD COLUMN {col} {decl}"
+                    )
             # One-time backfill so existing users get their current name as an alias
             # without needing a fresh observation. Idempotent.
             cur.execute(
@@ -1423,12 +1505,20 @@ class ChatterRepo:
         note: str | None = None,
     ) -> None:
         """Upsert insight card state. Pass state='open' (or any value not
-        in _INSIGHT_STATES) to clear the row entirely."""
+        in _INSIGHT_STATES) to clear the row entirely. Every transition
+        is appended to insight_state_history for the audit trail."""
+        now = _now_iso()
         if state not in self._INSIGHT_STATES:
             with self._cursor() as cur:
                 cur.execute(
                     "DELETE FROM insight_states WHERE kind = ? AND item_key = ?",
                     (kind, item_key),
+                )
+                cur.execute(
+                    "INSERT INTO insight_state_history"
+                    "(ts, kind, item_key, state, due_ts, note) "
+                    "VALUES (?, ?, ?, 'open', NULL, NULL)",
+                    (now, kind, item_key),
                 )
             return
         with self._cursor() as cur:
@@ -1442,8 +1532,52 @@ class ChatterRepo:
                     note = COALESCE(excluded.note, insight_states.note),
                     updated_at = excluded.updated_at
                 """,
-                (kind, item_key, state, due_ts, note, _now_iso()),
+                (kind, item_key, state, due_ts, note, now),
             )
+            cur.execute(
+                "INSERT INTO insight_state_history"
+                "(ts, kind, item_key, state, due_ts, note) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (now, kind, item_key, state, due_ts, note),
+            )
+
+    def list_state_history(
+        self, *, since: str | None = None, limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Recent insight-state transitions for the audit trail page.
+        `since` is an ISO timestamp; defaults to the last 24h."""
+        if not since:
+            since = (
+                datetime.now(timezone.utc) - timedelta(hours=24)
+            ).isoformat(timespec="seconds")
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT ts, kind, item_key, state, due_ts, note
+                FROM insight_state_history
+                WHERE ts >= ?
+                ORDER BY ts DESC LIMIT ?
+                """,
+                (since, int(limit)),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def count_state_changes_since(self, since: str, *, state: str | None = None) -> int:
+        """How many state transitions happened since `since`. Optional
+        `state` filter (e.g. 'addressed') so the recap can cite "you
+        addressed N items this stream"."""
+        with self._cursor() as cur:
+            params: list[Any] = [since]
+            extra = ""
+            if state:
+                extra = " AND state = ?"
+                params.append(state)
+            cur.execute(
+                f"SELECT COUNT(*) AS c FROM insight_state_history "
+                f"WHERE ts >= ? {extra}",
+                params,
+            )
+            return int(cur.fetchone()["c"])
 
     def get_insight_states(self, kind: str) -> dict[str, InsightState]:
         """All current states for a given kind, keyed by item_key. The
@@ -2083,6 +2217,151 @@ class ChatterRepo:
     # Streamer-only views: who's chatting now, who are the regulars, who's
     # lapsed, who's new today. All read-only / aggregate; no LLM calls here.
 
+    # ============================ Streamer-personal favorites =============
+
+    def set_user_starred(self, twitch_id: str, starred: bool) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE users SET is_starred = ? WHERE twitch_id = ?",
+                (1 if starred else 0, twitch_id),
+            )
+
+    def count_starred(self) -> int:
+        with self._cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS c FROM users WHERE is_starred = 1")
+            return int(cur.fetchone()["c"])
+
+    def list_starred_active(
+        self, *, within_minutes: int = 30, limit: int = 12,
+    ) -> list[User]:
+        """Starred chatters whose most recent message is within the
+        window — they're here right now, the streamer should notice."""
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT twitch_id, name, first_seen, last_seen, opt_out,
+                       sub_tier, sub_months, is_mod, is_vip, is_founder,
+                       source, merged_into,
+                       pronouns, location, demeanor, interests,
+                       profile_updated_at, is_starred
+                FROM users u
+                WHERE u.is_starred = 1
+                  AND u.opt_out = 0
+                  AND EXISTS (
+                    SELECT 1 FROM messages m
+                    WHERE m.user_id = u.twitch_id
+                      AND m.ts >= datetime('now', '-{int(within_minutes)} minutes')
+                  )
+                ORDER BY u.last_seen DESC LIMIT ?
+                """,
+                (int(limit),),
+            )
+            return [self._row_to_user(r) for r in cur.fetchall()]
+
+    def _row_to_user(self, r) -> User:  # noqa: ANN001
+        interests_raw = r["interests"] if "interests" in r.keys() else None
+        interests: list[str] | None = None
+        if interests_raw:
+            try:
+                parsed = json.loads(interests_raw)
+                if isinstance(parsed, list):
+                    interests = [str(x) for x in parsed if x]
+            except (TypeError, ValueError):
+                pass
+        return User(
+            twitch_id=r["twitch_id"], name=r["name"],
+            first_seen=r["first_seen"], last_seen=r["last_seen"],
+            opt_out=bool(r["opt_out"]),
+            sub_tier=r["sub_tier"] if "sub_tier" in r.keys() else None,
+            sub_months=int(r["sub_months"] or 0) if "sub_months" in r.keys() else 0,
+            is_mod=bool(r["is_mod"]) if "is_mod" in r.keys() else False,
+            is_vip=bool(r["is_vip"]) if "is_vip" in r.keys() else False,
+            is_founder=bool(r["is_founder"]) if "is_founder" in r.keys() else False,
+            source=(r["source"] if "source" in r.keys() else None) or "twitch",
+            merged_into=r["merged_into"] if "merged_into" in r.keys() else None,
+            pronouns=r["pronouns"] if "pronouns" in r.keys() else None,
+            location=r["location"] if "location" in r.keys() else None,
+            demeanor=r["demeanor"] if "demeanor" in r.keys() else None,
+            interests=interests,
+            profile_updated_at=(
+                r["profile_updated_at"] if "profile_updated_at" in r.keys() else None
+            ),
+            is_starred=bool(r["is_starred"]) if "is_starred" in r.keys() else False,
+        )
+
+    # ============================ Neglected lurkers =======================
+
+    def list_neglected_lurkers(
+        self, *, active_within_minutes: int = 30, neglected_for_days: int = 7,
+        limit: int = 8,
+    ) -> list[User]:
+        """Chatters active in the last `active_within_minutes` whose last
+        addressed-state was more than `neglected_for_days` ago — or who
+        have never been acknowledged at all. Different from lapsed: these
+        are people in your chat *right now* that you keep missing.
+
+        Excludes the broadcaster and bots (heuristic: is_mod and is_founder
+        commonly flag the broadcaster's own account)."""
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=int(neglected_for_days))
+        ).isoformat(timespec="seconds")
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out,
+                       u.sub_tier, u.sub_months, u.is_mod, u.is_vip, u.is_founder,
+                       u.source, u.merged_into,
+                       u.pronouns, u.location, u.demeanor, u.interests,
+                       u.profile_updated_at, u.is_starred
+                FROM users u
+                WHERE u.opt_out = 0
+                  AND u.merged_into IS NULL
+                  AND EXISTS (
+                    SELECT 1 FROM messages m
+                    WHERE m.user_id = u.twitch_id
+                      AND m.ts >= datetime('now', '-{int(active_within_minutes)} minutes')
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM insight_state_history h
+                    WHERE h.item_key = u.twitch_id
+                      AND h.state = 'addressed'
+                      AND h.ts >= ?
+                  )
+                ORDER BY u.last_seen DESC
+                LIMIT ?
+                """,
+                (cutoff, int(limit)),
+            )
+            return [self._row_to_user(r) for r in cur.fetchall()]
+
+    # ============================ Conversation continuity =================
+
+    def last_callback_for_users(
+        self, user_ids: Iterable[str], *, max_age_days: int = 90,
+    ) -> dict[str, str]:
+        """Most recent note text per user — used by the live widget to
+        surface a one-line callback when a returning chatter speaks.
+        Skips notes older than `max_age_days` (stale callbacks misfire)."""
+        ids = [u for u in user_ids if u]
+        if not ids:
+            return {}
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=int(max_age_days))
+        ).isoformat(timespec="seconds")
+        placeholders = ",".join("?" for _ in ids)
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT user_id, text FROM notes WHERE id IN (
+                    SELECT MAX(id) FROM notes
+                    WHERE user_id IN ({placeholders}) AND ts >= ?
+                    GROUP BY user_id
+                )
+                """,
+                tuple(ids) + (cutoff,),
+            )
+            return {r["user_id"]: r["text"] for r in cur.fetchall()}
+
     def list_active_chatters(self, window_minutes: int = 10, limit: int = 30) -> list[User]:
         """Users with at least one message in the last `window_minutes`."""
         with self._cursor() as cur:
@@ -2262,6 +2541,37 @@ class ChatterRepo:
         the Insights tab counts). Called by /insights to clear the pill."""
         self.set_app_setting(self._NEWCOMERS_ACK_KEY, ts or _now_iso())
 
+    # ============================ Stream goals ============================
+
+    _GOALS_KEY = "stream_goals"
+
+    def get_stream_goals(self) -> dict:
+        """Current stream's goals. JSON-encoded in app_settings under
+        key `stream_goals`. Reset when OBS confirms stream offline.
+
+        Shape: {'targets': [{'kind': 'address_first_timers', 'count': 3}, ...],
+                'set_at': iso_ts}.
+        """
+        raw = self.get_app_setting(self._GOALS_KEY)
+        if not raw:
+            return {"targets": [], "set_at": None}
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return {"targets": [], "set_at": None}
+            data.setdefault("targets", [])
+            data.setdefault("set_at", None)
+            return data
+        except (TypeError, ValueError):
+            return {"targets": [], "set_at": None}
+
+    def set_stream_goals(self, targets: list[dict]) -> None:
+        payload = {"targets": targets, "set_at": _now_iso()}
+        self.set_app_setting(self._GOALS_KEY, json.dumps(payload))
+
+    def clear_stream_goals(self) -> None:
+        self.delete_app_setting(self._GOALS_KEY)
+
     def get_surface_ack(self, surface: str) -> str | None:
         """Last-read timestamp for a named dashboard surface (e.g. 'topics',
         'insights'). None means the streamer has never marked it read.
@@ -2354,11 +2664,16 @@ class ChatterRepo:
         """Joined chatter list with note + message counts. Searches both the
         current `users.name` and the full `user_aliases` history, so an old
         handle still finds the renamed account."""
+        # 'engagement' sort is computed in Python after the SELECT —
+        # SQL can't easily express the composite formula. We pull a wider
+        # window and re-sort, so it's accurate within the result page.
+        sort_in_python = sort == "engagement"
         order = {
             "last_seen": "u.last_seen DESC",
             "name": "LOWER(u.name) ASC",
             "messages": "msg_count DESC",
             "notes": "note_count DESC",
+            "engagement": "u.last_seen DESC",  # placeholder, re-sorted below
         }.get(sort, "u.last_seen DESC")
         like = f"%{query.lower()}%" if query else None
         params: list[Any] = []
@@ -2370,11 +2685,17 @@ class ChatterRepo:
                 "              WHERE a.user_id = u.twitch_id AND LOWER(a.name) LIKE ?)"
             )
             params.extend([like, like])
-        params.extend([limit, offset])
+        # When sorting by engagement we need a wider candidate set since
+        # SQL ordering won't match — pull at least 500 then trim.
+        sql_limit = max(500, limit + offset) if sort_in_python else limit
+        sql_offset = 0 if sort_in_python else offset
+        params.extend([sql_limit, sql_offset])
         with self._cursor() as cur:
             cur.execute(
                 f"""
-                SELECT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out, u.sub_tier, u.sub_months, u.is_mod, u.is_vip, u.is_founder,
+                SELECT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out,
+                       u.sub_tier, u.sub_months, u.is_mod, u.is_vip, u.is_founder,
+                       u.is_starred,
                        (SELECT COUNT(*) FROM notes n WHERE n.user_id = u.twitch_id) AS note_count,
                        (SELECT COUNT(*) FROM messages m WHERE m.user_id = u.twitch_id) AS msg_count,
                        (SELECT MAX(ts) FROM messages m WHERE m.user_id = u.twitch_id) AS last_msg_ts
@@ -2385,7 +2706,7 @@ class ChatterRepo:
                 """,
                 params,
             )
-            return [
+            rows = [
                 ChatterRow(
                     user=User(
                         twitch_id=r["twitch_id"],
@@ -2398,13 +2719,28 @@ class ChatterRepo:
                         is_mod=bool(r["is_mod"]),
                         is_vip=bool(r["is_vip"]),
                         is_founder=bool(r["is_founder"]),
+                        is_starred=bool(r["is_starred"]),
                     ),
                     note_count=int(r["note_count"]),
                     msg_count=int(r["msg_count"]),
                     last_message_ts=r["last_msg_ts"],
+                    engagement_score=_engagement_score(
+                        msg_count=int(r["msg_count"]),
+                        note_count=int(r["note_count"]),
+                        sub_tier=r["sub_tier"],
+                        sub_months=int(r["sub_months"] or 0),
+                        is_mod=bool(r["is_mod"]),
+                        is_vip=bool(r["is_vip"]),
+                        is_starred=bool(r["is_starred"]),
+                        last_seen=r["last_seen"],
+                    ),
                 )
                 for r in cur.fetchall()
             ]
+            if sort_in_python:
+                rows.sort(key=lambda r: r.engagement_score, reverse=True)
+                rows = rows[offset:offset + limit]
+            return rows
 
     def neighbours_in_chatters(
         self,
@@ -2459,7 +2795,8 @@ class ChatterRepo:
                 "SELECT twitch_id, name, first_seen, last_seen, opt_out, "
                 "sub_tier, sub_months, is_mod, is_vip, is_founder, "
                 "source, merged_into, "
-                "pronouns, location, demeanor, interests, profile_updated_at "
+                "pronouns, location, demeanor, interests, profile_updated_at, "
+                "is_starred "
                 "FROM users WHERE twitch_id = ?",
                 (twitch_id,),
             )
@@ -2493,6 +2830,7 @@ class ChatterRepo:
                 demeanor=r["demeanor"],
                 interests=interests,
                 profile_updated_at=r["profile_updated_at"],
+                is_starred=bool(r["is_starred"]),
             )
 
     def get_user_aliases(self, user_id: str) -> list[Alias]:

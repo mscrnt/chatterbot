@@ -1,0 +1,13 @@
+{# Star toggle button — streamer-personal favorite. Filled gold when on,
+   outlined muted when off. POSTs to /users/{id}/star, replacing itself. #}
+<button type="button"
+        id="star-button"
+        hx-post="/users/{{ user.twitch_id }}/star"
+        hx-target="#star-button"
+        hx-swap="outerHTML"
+        class="tap inline-flex items-center gap-2 px-3 rounded text-sm transition-all duration-150 ease-out
+               {% if user.is_starred %}bg-warning/15 hover:bg-warning/25 text-warning{% else %}bg-surface-raised hover:bg-subtle text-muted hover:text-primary{% endif %}"
+        title="{% if user.is_starred %}Unstar — remove from favorites{% else %}Star — keep eyes on this chatter{% endif %}">
+  <i class="fa-{% if user.is_starred %}solid{% else %}regular{% endif %} fa-star"></i>
+  {{ 'starred' if user.is_starred else 'star' }}
+</button>

@@ -24,8 +24,14 @@
             {% with name=r.user.name, size='md' %}{% include "components/_avatar.html" %}{% endwith %}
             <div class="min-w-0 flex-1">
               <div class="flex items-center justify-between gap-2">
-                <span class="font-medium truncate text-primary">{{ r.user.name }}</span>
+                <span class="font-medium truncate text-primary inline-flex items-center gap-1">
+                  {% if r.user.is_starred %}<i class="fa-solid fa-star text-warning text-xs" title="starred"></i>{% endif %}
+                  {{ r.user.name }}
+                </span>
                 <span class="inline-flex items-center gap-1 shrink-0">
+                  <span class="text-[10px] text-muted" title="engagement {{ r.engagement_score }}/100">
+                    {{ r.engagement_score }}
+                  </span>
                   {% with user=r.user, msg_count=r.msg_count %}
                     {% include "components/_activity_badge.html" %}
                   {% endwith %}
@@ -55,6 +61,7 @@
           <tr>
             <th class="text-left px-3 py-2">Name</th>
             <th class="text-left px-3 py-2">Last seen</th>
+            <th class="text-right px-3 py-2" title="0-100 composite of messages, notes, sub state, recency, mod/vip/star">Engage</th>
             <th class="text-right px-3 py-2">Msgs</th>
             <th class="text-right px-3 py-2">Notes</th>
             <th class="text-left px-3 py-2"></th>
@@ -67,10 +74,20 @@
               <a href="/users/{{ r.user.twitch_id }}{{ _ctx }}" data-row-link tabindex="0"
                  class="inline-flex items-center gap-2 text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent rounded">
                 {% with name=r.user.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+                {% if r.user.is_starred %}<i class="fa-solid fa-star text-warning text-xs" title="starred"></i>{% endif %}
                 <span>{{ r.user.name }}</span>
               </a>
             </td>
             <td class="px-3 py-2 text-muted">{{ r.user.last_seen | short_ts }}</td>
+            <td class="px-3 py-2 text-right">
+              {% set _bar_w = r.engagement_score %}
+              <span class="inline-flex items-center gap-2">
+                <span class="text-primary text-xs w-7 text-right">{{ r.engagement_score }}</span>
+                <span class="block w-12 h-1.5 rounded-full bg-surface-raised overflow-hidden">
+                  <span class="block h-full bg-accent" style="width: {{ _bar_w }}%"></span>
+                </span>
+              </span>
+            </td>
             <td class="px-3 py-2 text-right text-primary">{{ r.msg_count }}</td>
             <td class="px-3 py-2 text-right text-primary">{{ r.note_count }}</td>
             <td class="px-3 py-2">

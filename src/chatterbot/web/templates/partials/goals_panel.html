@@ -1,0 +1,69 @@
+{# Stream goals — set, track, clear. Self-contained: every form posts
+   to /insights/goals and the panel re-renders. Goals reset when the
+   streamer hits the explicit clear button (and ideally on stream-end
+   transition, future). #}
+<div id="goals-panel" class="rounded-xl border border-subtle bg-surface p-3">
+  <header class="flex items-baseline justify-between gap-2 mb-2">
+    <h3 class="text-sm font-semibold text-primary inline-flex items-center gap-2">
+      <i class="fa-solid fa-bullseye text-accent"></i> Stream goals
+    </h3>
+    {% if goals.targets %}
+      <form hx-post="/insights/goals" hx-target="#goals-panel" hx-swap="outerHTML"
+            class="inline-flex">
+        <input type="hidden" name="kind" value="clear">
+        <button class="text-[11px] text-muted hover:text-danger" title="reset all goals">
+          clear
+        </button>
+      </form>
+    {% endif %}
+  </header>
+
+  {% if goals.targets %}
+    <ul class="space-y-1.5">
+      {% for g in goals.targets %}
+        {% set _label = {
+          'address_first_timers': 'address first-timers',
+          'clear_due_snoozes': 'clear due snoozes',
+          'address_returning_regulars': 'address returning regulars',
+        }.get(g.kind, g.kind) %}
+        <li class="flex items-center gap-3 text-xs">
+          <span class="text-muted shrink-0 w-44 truncate">{{ _label }}</span>
+          <span class="text-primary tabular-nums shrink-0">{{ g.done }}/{{ g.target }}</span>
+          <span class="flex-1 h-1.5 rounded-full bg-surface-raised overflow-hidden">
+            <span class="block h-full {% if g.pct >= 100 %}bg-success{% else %}bg-accent{% endif %}"
+                  style="width: {{ g.pct }}%"></span>
+          </span>
+          {% if g.pct >= 100 %}
+            <i class="fa-solid fa-check text-success text-[10px]"></i>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="text-[11px] text-muted italic">No goals set. Stay loose, or pick one below to track.</p>
+  {% endif %}
+
+  <div class="mt-2 pt-2 border-t border-subtle flex flex-wrap gap-1.5 text-[11px]">
+    <form hx-post="/insights/goals" hx-target="#goals-panel" hx-swap="outerHTML" class="inline-flex">
+      <input type="hidden" name="kind" value="address_first_timers">
+      <input type="hidden" name="count" value="3">
+      <button class="px-2 py-0.5 rounded-full bg-surface-raised hover:bg-accent hover:text-white">
+        + 3 first-timers
+      </button>
+    </form>
+    <form hx-post="/insights/goals" hx-target="#goals-panel" hx-swap="outerHTML" class="inline-flex">
+      <input type="hidden" name="kind" value="clear_due_snoozes">
+      <input type="hidden" name="count" value="1">
+      <button class="px-2 py-0.5 rounded-full bg-surface-raised hover:bg-accent hover:text-white">
+        + clear all due
+      </button>
+    </form>
+    <form hx-post="/insights/goals" hx-target="#goals-panel" hx-swap="outerHTML" class="inline-flex">
+      <input type="hidden" name="kind" value="address_returning_regulars">
+      <input type="hidden" name="count" value="2">
+      <button class="px-2 py-0.5 rounded-full bg-surface-raised hover:bg-accent hover:text-white">
+        + 2 returning regulars
+      </button>
+    </form>
+  </div>
+</div>

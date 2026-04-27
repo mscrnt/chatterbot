@@ -48,6 +48,16 @@ _OUTPUT_RULES = """OUTPUT RULES:
 
 
 _KIND_PROMPTS: dict[str, str] = {
+    "adhoc": (
+        _AUDIENCE_BLOCK + "\n"
+        "INPUT: a viewer's recent messages (`[id]`) interleaved with chat-wide "
+        "context lines (`[ctx id] otherUser:`). The streamer just noticed "
+        "this person and wants a 1-line angle to engage them right now.\n\n"
+        "TASK: 1 sentence on what they're currently engaged with (specific "
+        "moment, joke, ongoing thread). Then 1 short sentence: a concrete "
+        "thing the streamer could say that connects to it. Keep it casual.\n\n"
+        + _OUTPUT_RULES
+    ),
     "talking_point": (
         _AUDIENCE_BLOCK + "\n"
         "INPUT: a viewer's recent messages (`[id]`) interleaved with chat-wide "
@@ -110,6 +120,8 @@ _KIND_PROMPTS: dict[str, str] = {
 # Display config consumed by the modal template + nav title. Keep here so
 # adding a new kind only touches this file + the route enum.
 KIND_DISPLAY: dict[str, dict[str, str]] = {
+    "adhoc":         {"title": "What to say right now", "icon": "fa-comment-dots",
+                      "meta_label": "context"},
     "talking_point": {"title": "Active right now", "icon": "fa-fire",
                       "meta_label": "talking point"},
     "anniversary":   {"title": "Anniversary today", "icon": "fa-cake-candles",

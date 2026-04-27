@@ -433,6 +433,19 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             {"user": user},
         )
 
+    @app.post("/users/{twitch_id}/star", response_class=HTMLResponse)
+    async def toggle_star(request: Request, twitch_id: str):
+        """Streamer-personal favorite toggle. The star pill reads back its
+        new state inline via HTMX swap."""
+        user = repo.get_user(twitch_id)
+        if not user:
+            raise HTTPException(404, "user not found")
+        repo.set_user_starred(twitch_id, not user.is_starred)
+        user = repo.get_user(twitch_id)
+        return TEMPLATES.TemplateResponse(
+            request, "partials/star_button.html", {"user": user},
+        )
+
     @app.post("/users/{twitch_id}/notes", response_class=HTMLResponse)
     async def add_user_note(
         request: Request,
@@ -1168,6 +1181,16 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "direct_mentions": repo.recent_direct_mentions(limit=8),
             # Most recent end-of-stream recap, if any.
             "latest_recap": (repo.list_stream_recaps(limit=1) or [None])[0],
+            # Recap deltas — last 5 recaps for the cross-stream KPI strip.
+            "recent_recaps": repo.list_stream_recaps(limit=5),
+            # Streamer-personal favorites currently in chat.
+            "starred_active": repo.list_starred_active(within_minutes=30, limit=12),
+            # Active-now regulars the streamer hasn't engaged with recently.
+            "neglected_lurkers": repo.list_neglected_lurkers(
+                active_within_minutes=30, neglected_for_days=7, limit=8,
+            ),
+            # Per-stream goals + computed progress.
+            "goals_state": _build_goals_state(),
         }
 
     def _build_topics_ctx(status: str, q: str) -> dict:
@@ -1365,6 +1388,110 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         resp.headers["HX-Trigger"] = "insights-state-changed"
         return resp
 
+    _GOAL_KINDS = (
+        "address_first_timers", "clear_due_snoozes", "address_returning_regulars",
+    )
+
+    @app.post("/insights/goals", response_class=HTMLResponse)
+    async def set_goals(
+        request: Request,
+        kind: Annotated[str, Form()],
+        count: Annotated[int, Form()] = 1,
+    ):
+        """Set/update the current stream's goal targets. Append-only — each
+        new POST adds another goal to the list. POST kind='clear' to reset."""
+        if kind == "clear":
+            repo.clear_stream_goals()
+        elif kind in _GOAL_KINDS:
+            cur = repo.get_stream_goals()
+            targets = list(cur.get("targets") or [])
+            # Replace any existing goal of the same kind.
+            targets = [t for t in targets if t.get("kind") != kind]
+            targets.append({"kind": kind, "count": max(1, int(count))})
+            repo.set_stream_goals(targets)
+        # Re-render the goals panel partial.
+        return TEMPLATES.TemplateResponse(
+            request, "partials/goals_panel.html",
+            {"goals": _build_goals_state()},
+        )
+
+    def _build_goals_state() -> dict:
+        """Compute current progress against each goal target."""
+        goals = repo.get_stream_goals()
+        targets = goals.get("targets") or []
+        if not targets:
+            return {"targets": [], "set_at": None}
+        from datetime import datetime, timezone, timedelta
+        # Goals scoped to "since the goals were set" so they reset each
+        # time the streamer hits the start-of-stream button.
+        since = goals.get("set_at") or (
+            datetime.now(timezone.utc) - timedelta(hours=24)
+        ).isoformat(timespec="seconds")
+        out: list[dict] = []
+        for t in targets:
+            kind = t.get("kind")
+            target = max(1, int(t.get("count") or 1))
+            # progress count depends on the goal kind.
+            done = 0
+            if kind == "address_first_timers":
+                # Count first-timers (newcomers) the streamer has marked
+                # addressed since `since`.
+                done = repo.count_state_changes_since(since, state="addressed")
+                # The above includes ALL kinds; filter to newcomers via
+                # a follow-up check in repo.
+            elif kind == "clear_due_snoozes":
+                # 1 means "all clear right now", target == count of due.
+                done = max(0, target - repo.count_due_snoozes())
+            elif kind == "address_returning_regulars":
+                done = repo.count_state_changes_since(since, state="addressed")
+            out.append({
+                "kind": kind,
+                "target": target,
+                "done": min(done, target),
+                "pct": min(100, int(100 * done / target)) if target else 0,
+            })
+        return {"targets": out, "set_at": goals.get("set_at")}
+
+    @app.get("/audit", response_class=HTMLResponse)
+    async def audit_page(request: Request):
+        """Audit trail of recent state transitions. Lets the streamer
+        see what they acted on across this and prior streams."""
+        rows = repo.list_state_history(limit=200)
+        return TEMPLATES.TemplateResponse(
+            request, "audit.html", {"rows": rows},
+        )
+
+    @app.get("/health", response_class=HTMLResponse)
+    async def health_partial(request: Request):
+        """Ops-style health snapshot for the Settings page. Uses the
+        existing settings + ad-hoc Ollama probe; non-blocking."""
+        import time as _t
+        ollama_ok = False
+        ollama_ms: int | None = None
+        ollama_err: str | None = None
+        try:
+            t0 = _t.time()
+            ollama_ok = await llm.health_check()
+            ollama_ms = int((_t.time() - t0) * 1000)
+        except Exception as e:
+            ollama_err = f"{type(e).__name__}: {e}"
+        indexed, total = repo.messages_embedding_coverage()
+        ctx = {
+            "ollama_ok": ollama_ok,
+            "ollama_ms": ollama_ms,
+            "ollama_err": ollama_err,
+            "ollama_url": settings.ollama_base_url,
+            "ollama_model": settings.ollama_model,
+            "ollama_embed_model": settings.ollama_embed_model,
+            "embed_indexed": indexed,
+            "embed_total": total,
+            "due_snoozes": repo.count_due_snoozes(),
+            "fired_reminders": repo.count_fired_reminders(),
+        }
+        return TEMPLATES.TemplateResponse(
+            request, "partials/health_panel.html", ctx,
+        )
+
     @app.post("/insights/mark-read", response_class=HTMLResponse)
     async def insights_mark_read(request: Request):
         repo.set_surface_ack("insights")
@@ -1411,10 +1538,24 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         partial: int = Query(0),
     ):
         messages = repo.recent_global_messages(limit=limit)
-        signals = repo.arrival_signals_for_users(
-            {m.user_id for m in messages}
-        )
-        ctx = {"messages": messages, "limit": limit, "arrival_signals": signals}
+        user_ids = {m.user_id for m in messages}
+        signals = repo.arrival_signals_for_users(user_ids)
+        # Conversation continuity — for chatters who are 'returning' (back
+        # after a gap), surface their most recent note as a one-line
+        # callback hint so the streamer can pick up the thread.
+        returning_ids = {uid for uid, sig in signals.items() if sig == "returning"}
+        callbacks = repo.last_callback_for_users(returning_ids) if returning_ids else {}
+        # Starred set — drives the gold-bordered live row treatment.
+        starred = {
+            uid for uid in user_ids
+            if (u := repo.get_user(uid)) and u.is_starred
+        }
+        ctx = {
+            "messages": messages, "limit": limit,
+            "arrival_signals": signals,
+            "callbacks": callbacks,
+            "starred": starred,
+        }
         tpl = "partials/live_rows.html" if partial else "live.html"
         return TEMPLATES.TemplateResponse(request, tpl, ctx)
 

@@ -7,7 +7,12 @@
      hx-trigger="every 60s, insights-state-changed from:body"
      hx-swap="outerHTML">
 
-  {# ---------------- Last stream recap (collapsible) ---------------- #}
+  {# ---------------- Stream goals panel ---------------- #}
+  {% if goals_state %}
+    {% with goals=goals_state %}{% include "partials/goals_panel.html" %}{% endwith %}
+  {% endif %}
+
+  {# ---------------- Last stream recap (collapsible) + KPI deltas ---------------- #}
   {% if latest_recap %}
   <details class="rounded-xl border border-accent/30 bg-accent/5 p-3">
     <summary class="cursor-pointer inline-flex items-center gap-2 text-sm font-medium text-primary">
@@ -15,6 +20,28 @@
       Last stream recap
       <span class="text-[11px] text-muted ml-1">{{ latest_recap.ended_at | short_ts }}</span>
     </summary>
+    {% if recent_recaps and recent_recaps|length > 1 %}
+      {# Cross-stream KPI strip: latest values + tiny vs-prior deltas. #}
+      {% set _prior = recent_recaps[1] %}
+      {% set _stats = [
+        ('msgs',     latest_recap.msg_count,      _prior.msg_count),
+        ('chatters', latest_recap.unique_chatters, _prior.unique_chatters),
+        ('new',      latest_recap.new_chatters,    _prior.new_chatters),
+        ('addr',     latest_recap.addressed_count, _prior.addressed_count),
+      ] %}
+      <div class="grid grid-cols-4 gap-2 mt-2 mb-2">
+        {% for label, cur, prev in _stats %}
+          {% set delta = cur - prev %}
+          <div class="rounded border border-subtle bg-surface px-2 py-1">
+            <p class="text-[9px] uppercase tracking-wider text-muted">{{ label }}</p>
+            <p class="text-primary text-base font-semibold leading-none tabular-nums">{{ cur }}</p>
+            <p class="text-[10px] {% if delta > 0 %}text-success{% elif delta < 0 %}text-danger{% else %}text-muted{% endif %}">
+              {% if delta > 0 %}+{% endif %}{{ delta }} vs last
+            </p>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
     <pre class="whitespace-pre-wrap text-sm text-primary leading-relaxed mt-2 font-sans">{{ latest_recap.summary }}</pre>
   </details>
   {% endif %}
@@ -68,6 +95,60 @@
       affects Regulars + Lapsed regulars · "Active" and "New today" stay live
     </span>
   </div>
+
+  {# ---------------- Starred chatters present ---------------- #}
+  {% if starred_active %}
+  <section class="space-y-2">
+    <header>
+      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+        <i class="fa-solid fa-star text-warning"></i> Your favorites are here
+        <span class="text-[11px] text-muted">({{ starred_active | length }})</span>
+      </h2>
+    </header>
+    <div class="flex flex-wrap gap-2">
+      {% for u in starred_active %}
+        <button type="button"
+                class="inline-flex items-center gap-2 px-2 py-1 rounded-full border border-warning/40 bg-warning/10 hover:bg-warning/20 text-sm"
+                hx-get="/modals/insight/adhoc/{{ u.twitch_id }}"
+                hx-target="#modal-root"
+                hx-swap="innerHTML"
+                title="What should I say to {{ u.name }} right now?">
+          {% with name=u.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+          <span class="text-warning font-medium">{{ u.name }}</span>
+        </button>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  {# ---------------- Neglected lurkers ---------------- #}
+  {% if neglected_lurkers %}
+  <section class="space-y-2">
+    <header>
+      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+        <i class="fa-solid fa-user-clock text-warning"></i> Active but not engaged
+        <span class="text-[11px] text-muted">({{ neglected_lurkers | length }}) · here now, not addressed lately</span>
+      </h2>
+    </header>
+    <ul class="divide-y divide-subtle rounded-xl border border-warning/30 bg-warning/5 overflow-hidden">
+      {% for u in neglected_lurkers %}
+        <li class="px-3 py-2 text-sm flex items-center gap-3 hover:bg-warning/10">
+          {% with name=u.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+          <span class="text-primary font-medium">{{ u.name }}</span>
+          <span class="text-[11px] text-muted">last spoke {{ u.last_seen | short_ts }}</span>
+          <button type="button"
+                  class="ml-auto tap inline-flex items-center justify-center gap-1 px-2 rounded bg-warning/15 hover:bg-warning/25 text-warning text-xs"
+                  hx-get="/modals/insight/adhoc/{{ u.twitch_id }}"
+                  hx-target="#modal-root"
+                  hx-swap="innerHTML"
+                  title="Ad-hoc engagement angle">
+            <i class="fa-solid fa-comment-dots text-[10px]"></i> what to say
+          </button>
+        </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
 
   {# ---------------- Talking to you (direct mentions) ---------------- #}
   {% if direct_mentions %}

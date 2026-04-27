@@ -481,13 +481,62 @@ RULES:
         if not text:
             logger.info("recap_loop: LLM returned empty recap, skipping save")
             return
-        await asyncio.to_thread(
-            self.repo.add_stream_recap,
-            started_at=started_at, ended_at=ended_at,
-            message_id_lo=message_id_lo, message_id_hi=message_id_hi,
-            summary=text,
+
+        # Compute KPI columns for the cross-stream delta strip.
+        msg_count = unique_chatters = new_chatters = 0
+        addressed_count = snoozed_count = 0
+        try:
+            with self.repo._cursor() as cur:  # noqa: SLF001
+                if message_id_lo is not None and message_id_hi is not None:
+                    cur.execute(
+                        "SELECT COUNT(*), COUNT(DISTINCT user_id) "
+                        "FROM messages WHERE id BETWEEN ? AND ? "
+                        "AND is_emote_only = 0",
+                        (message_id_lo, message_id_hi),
+                    )
+                    row = cur.fetchone()
+                    msg_count = int(row[0] or 0)
+                    unique_chatters = int(row[1] or 0)
+                    cur.execute(
+                        "SELECT COUNT(DISTINCT u.twitch_id) "
+                        "FROM users u WHERE u.first_seen >= ? AND u.first_seen <= ?",
+                        (started_at, ended_at),
+                    )
+                    new_chatters = int(cur.fetchone()[0] or 0)
+            addressed_count = await asyncio.to_thread(
+                self.repo.count_state_changes_since, started_at, state="addressed"
+            )
+            snoozed_count = await asyncio.to_thread(
+                self.repo.count_state_changes_since, started_at, state="snoozed"
+            )
+        except Exception:
+            logger.exception("recap_loop: stat collection failed")
+
+        # Persist with stats, then clear ephemeral stream goals — they
+        # were scoped to the just-ended session.
+        with self.repo._cursor() as cur:  # noqa: SLF001
+            cur.execute(
+                """
+                INSERT INTO stream_recaps(
+                    started_at, ended_at, message_id_lo, message_id_hi, summary,
+                    msg_count, unique_chatters, new_chatters,
+                    addressed_count, snoozed_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    started_at, ended_at, message_id_lo, message_id_hi, text,
+                    msg_count, unique_chatters, new_chatters,
+                    addressed_count, snoozed_count,
+                ),
+            )
+        try:
+            await asyncio.to_thread(self.repo.clear_stream_goals)
+        except Exception:
+            logger.exception("recap_loop: clear_stream_goals failed")
+        logger.info(
+            "recap_loop: saved stream recap (%d chars, msgs=%d, addr=%d, snz=%d)",
+            len(text), msg_count, addressed_count, snoozed_count,
         )
-        logger.info("recap_loop: saved stream recap (%d chars)", len(text))
 
     # ---------------- background message-embedding indexer ----------------
     # Keeps vec_messages current as new chat arrives so /search has fresh

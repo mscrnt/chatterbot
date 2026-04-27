@@ -1,0 +1,48 @@
+{# Health snapshot for the Settings → Diagnostics tab. Lazy-loaded via
+   HTMX so opening Settings doesn't block on the Ollama probe. #}
+<div id="health-panel" class="space-y-3 text-sm"
+     hx-get="/health" hx-trigger="every 30s" hx-target="#health-panel" hx-swap="outerHTML">
+
+  <div class="rounded-xl border {% if ollama_ok %}border-success/30{% else %}border-danger/40 bg-danger/5{% endif %} p-3">
+    <header class="flex items-baseline justify-between gap-2">
+      <h3 class="font-semibold text-primary inline-flex items-center gap-2">
+        <i class="fa-solid {{ 'fa-circle-check text-success' if ollama_ok else 'fa-circle-xmark text-danger' }}"></i>
+        Ollama
+      </h3>
+      <span class="text-[11px] text-muted">{{ ollama_url }}</span>
+    </header>
+    <dl class="grid grid-cols-2 gap-x-3 gap-y-1 mt-2 text-xs">
+      <dt class="text-muted">probe latency</dt>
+      <dd class="text-primary text-right tabular-nums">
+        {% if ollama_ms is not none %}{{ ollama_ms }} ms{% else %}—{% endif %}
+      </dd>
+      <dt class="text-muted">chat model</dt>
+      <dd class="text-primary text-right truncate">{{ ollama_model }}</dd>
+      <dt class="text-muted">embed model</dt>
+      <dd class="text-primary text-right truncate">{{ ollama_embed_model }}</dd>
+      {% if ollama_err %}
+      <dt class="text-muted col-span-2 mt-1 text-danger">last error</dt>
+      <dd class="text-danger text-xs col-span-2 break-words">{{ ollama_err }}</dd>
+      {% endif %}
+    </dl>
+  </div>
+
+  <div class="rounded-xl border border-subtle p-3">
+    <h3 class="font-semibold text-primary inline-flex items-center gap-2">
+      <i class="fa-solid fa-database text-accent"></i> Indexes + queues
+    </h3>
+    <dl class="grid grid-cols-2 gap-x-3 gap-y-1 mt-2 text-xs">
+      <dt class="text-muted">message embeddings</dt>
+      <dd class="text-primary text-right tabular-nums">
+        {{ embed_indexed }} / {{ embed_total }}
+        {% if embed_total %}
+          ({{ "%.0f"|format(100 * embed_indexed / embed_total) }}%)
+        {% endif %}
+      </dd>
+      <dt class="text-muted">due snoozes</dt>
+      <dd class="text-primary text-right tabular-nums">{{ due_snoozes }}</dd>
+      <dt class="text-muted">fired reminders</dt>
+      <dd class="text-primary text-right tabular-nums">{{ fired_reminders }}</dd>
+    </dl>
+  </div>
+</div>

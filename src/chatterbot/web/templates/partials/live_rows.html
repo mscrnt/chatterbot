@@ -3,6 +3,8 @@
 {% else %}
   {% for m in messages %}
     {% set _signal = (arrival_signals or {}).get(m.user_id) %}
+    {% set _starred = starred is defined and starred and m.user_id in starred %}
+    {% set _callback = (callbacks or {}).get(m.user_id) %}
     {% set _src = m.source or 'twitch' %}
     {% set _stripe = {
       'twitch':  'border-l-2 border-accent/40',
@@ -10,13 +12,16 @@
       'discord': 'border-l-2 border-indigo-500/60',
     }.get(_src, 'border-l-2 border-subtle') %}
     <a href="/users/{{ m.user_id }}?focus={{ m.id }}"
-       class="leading-snug py-1 pl-2 border-b border-subtle/60 last:border-0 {{ _stripe }} flex items-start gap-2 hover:bg-surface-raised
-              {% if _signal == 'first_timer' %}bg-success/5{% elif _signal == 'returning' %}bg-accent/5{% endif %}"
+       class="leading-snug py-1 pl-2 border-b border-subtle/60 last:border-0 flex items-start gap-2 hover:bg-surface-raised
+              {% if _starred %}border-l-4 border-warning bg-warning/5
+              {% else %}{{ _stripe }}{% endif %}
+              {% if _signal == 'first_timer' %}bg-success/5{% elif _signal == 'returning' and not _starred %}bg-accent/5{% endif %}"
        title="Open {{ m.name }} with this message in context">
       {% with name=m.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
       <div class="min-w-0 flex-1">
         <div class="flex items-baseline gap-1 flex-wrap">
           {% with source=_src %}{% include "components/_source_mark.html" %}{% endwith %}
+          {% if _starred %}<i class="fa-solid fa-star text-warning text-[10px]" title="starred"></i>{% endif %}
           <span class="text-accent font-medium text-sm">{{ m.name }}</span>
           {% if _signal == 'first_timer' %}
             <span class="inline-flex items-center gap-1 px-1.5 text-[9px] uppercase tracking-wide rounded-full bg-success/15 text-success border border-success/30">
@@ -29,6 +34,12 @@
           {% endif %}
           <span class="text-[10px] text-muted whitespace-nowrap">{{ m.ts | short_ts }}</span>
         </div>
+        {% if _callback and _signal == 'returning' %}
+          <div class="text-[10px] text-muted italic mb-0.5 inline-flex items-center gap-1">
+            <i class="fa-solid fa-bookmark text-[9px] text-accent"></i>
+            last time: {{ _callback | truncate(120) }}
+          </div>
+        {% endif %}
         <div class="text-primary break-words text-sm">{{ m.content }}</div>
       </div>
     </a>

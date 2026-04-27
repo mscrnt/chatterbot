@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Audit · chatterbot{% endblock %}
+{% block content %}
+<div class="space-y-3">
+  <header class="flex items-baseline justify-between gap-2 flex-wrap">
+    <h1 class="text-xl sm:text-2xl font-semibold inline-flex items-center gap-2">
+      <i class="fa-solid fa-clipboard-check text-accent"></i> Audit trail
+    </h1>
+    <p class="text-xs text-muted">
+      Every state change you've made on Insights cards. Most recent first.
+    </p>
+  </header>
+
+  {% if not rows %}
+    {% with icon='fa-clipboard-list',
+            heading='No state changes yet',
+            body='As you mark insight cards addressed, snoozed, or pinned, every transition lands here.' %}
+      {% include "components/_empty_state.html" %}
+    {% endwith %}
+  {% else %}
+    <ul class="divide-y divide-subtle rounded-xl border border-subtle bg-surface overflow-hidden">
+      {% for r in rows %}
+        {% set _state_tone = {
+          'addressed': 'text-success',
+          'snoozed':   'text-warning',
+          'pinned':    'text-accent',
+          'skipped':   'text-muted',
+          'open':      'text-muted',
+        }.get(r.state, 'text-muted') %}
+        {% set _state_icon = {
+          'addressed': 'fa-check',
+          'snoozed':   'fa-clock',
+          'pinned':    'fa-thumbtack',
+          'skipped':   'fa-eye-slash',
+          'open':      'fa-rotate-left',
+        }.get(r.state, 'fa-circle') %}
+        <li class="px-3 py-2 text-sm flex items-baseline gap-3 hover:bg-surface-raised">
+          <span class="text-[11px] text-muted whitespace-nowrap shrink-0">{{ r.ts | short_ts }}</span>
+          <span class="inline-flex items-center gap-1 {{ _state_tone }} shrink-0">
+            <i class="fa-solid {{ _state_icon }} text-[10px]"></i>{{ r.state }}
+          </span>
+          <span class="text-muted text-[11px] shrink-0">{{ r.kind }}</span>
+          <span class="text-primary truncate flex-1">{{ r.item_key }}</span>
+          {% if r.note %}
+            <span class="text-muted text-[11px] italic truncate max-w-[20rem]">"{{ r.note }}"</span>
+          {% endif %}
+          {% if r.due_ts %}
+            <span class="text-warning text-[11px] shrink-0">due {{ r.due_ts | short_ts }}</span>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</div>
+{% endblock %}

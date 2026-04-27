@@ -29,10 +29,11 @@
               hx-swap="outerHTML"
               hx-push-url="true"
               hx-include="[name='q']">
-        <option value="last_seen" {% if sort=='last_seen' %}selected{% endif %}>Last seen</option>
-        <option value="name"      {% if sort=='name' %}selected{% endif %}>Name (A–Z)</option>
-        <option value="messages"  {% if sort=='messages' %}selected{% endif %}>Most messages</option>
-        <option value="notes"     {% if sort=='notes' %}selected{% endif %}>Most notes</option>
+        <option value="last_seen"  {% if sort=='last_seen' %}selected{% endif %}>Last seen</option>
+        <option value="engagement" {% if sort=='engagement' %}selected{% endif %}>Most engaged</option>
+        <option value="name"       {% if sort=='name' %}selected{% endif %}>Name (A–Z)</option>
+        <option value="messages"   {% if sort=='messages' %}selected{% endif %}>Most messages</option>
+        <option value="notes"      {% if sort=='notes' %}selected{% endif %}>Most notes</option>
       </select>
     </div>
   </div>
