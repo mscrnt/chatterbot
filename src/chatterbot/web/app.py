@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -73,9 +74,22 @@ MESSAGE_PAGE_SIZE = 50
 
 
 def _short_ts(ts: str | None) -> str:
+    """Render a stored UTC ISO timestamp in the host's local timezone.
+
+    All writes go through `_now_iso()` which stamps UTC, so we have to
+    convert at display time. `astimezone()` with no argument coerces to
+    the system local zone — same one OBS, the bot, and the streamer's
+    OS all already agree on. Falls back to the raw string slice if the
+    value isn't a parseable ISO timestamp."""
     if not ts:
         return ""
-    return ts.replace("T", " ")[:16]
+    try:
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return ts.replace("T", " ")[:16]
 
 
 TEMPLATES.env.filters["short_ts"] = _short_ts
