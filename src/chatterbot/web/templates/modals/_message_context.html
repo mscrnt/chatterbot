@@ -4,6 +4,41 @@
 {% set modal_size = 'lg' %}
 {% extends "components/_modal.html" %}
 {% block modal_body %}
+{# When a row used Twitch's native Reply, the IRC tag carried the parent's
+   login + body but not its message_id. We resolve the actual id at fetch
+   time (parent_ids[message_id] = parent_message_id) so the reply box
+   becomes a clickable link that re-anchors this modal on the parent —
+   letting the streamer walk up the thread. #}
+{% macro reply_chip(m) -%}
+  {% if m.reply_parent_body %}
+    {% set _pid = parent_ids.get(m.id) %}
+    {% if _pid %}
+      <button type="button"
+              class="text-[11px] text-muted mb-1 inline-flex items-center gap-1 hover:text-primary hover:bg-surface-raised rounded px-1 -mx-1 transition-all duration-150 ease-out"
+              hx-get="/modals/message/{{ _pid }}"
+              hx-target="#modal-root"
+              hx-swap="innerHTML"
+              title="Jump to the message they're replying to">
+        <i class="fa-solid fa-reply text-[10px]"></i>
+        <span>replying to</span>
+        <span class="text-accent">{{ m.reply_parent_login or '?' }}</span>
+        <span>:</span>
+        <span class="italic truncate max-w-[24rem]">"{{ m.reply_parent_body }}"</span>
+        <i class="fa-solid fa-arrow-up-right-from-square text-[9px] ml-0.5 text-accent"></i>
+      </button>
+    {% else %}
+      <div class="text-[11px] text-muted mb-1 inline-flex items-center gap-1"
+           title="Parent message wasn't logged (chatter may have been opted-out at the time)">
+        <i class="fa-solid fa-reply text-[10px]"></i>
+        <span>replying to</span>
+        <span class="text-accent">{{ m.reply_parent_login or '?' }}</span>
+        <span>:</span>
+        <span class="italic truncate max-w-[24rem]">"{{ m.reply_parent_body }}"</span>
+      </div>
+    {% endif %}
+  {% endif %}
+{%- endmacro %}
+
 <div class="space-y-1 text-sm">
   <p class="text-[11px] text-muted px-1 pb-2">
     showing {{ before|length }} before · the message · {{ after|length }} after
@@ -15,30 +50,26 @@
   <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
     {% for m in before %}
       <li class="px-3 py-2 hover:bg-surface-raised/60 transition-all duration-150 ease-out">
-        {% if m.reply_parent_body %}
-          <div class="text-[11px] text-muted mb-1 inline-flex items-center gap-1">
-            <i class="fa-solid fa-reply text-[10px]"></i>
-            replying to <span class="text-accent">{{ m.reply_parent_login or '?' }}</span>:
-            <span class="italic truncate max-w-[28rem]">"{{ m.reply_parent_body }}"</span>
-          </div>
-        {% endif %}
+        {{ reply_chip(m) }}
         <div class="flex items-baseline gap-2">
           <span class="text-[11px] text-muted whitespace-nowrap w-32 shrink-0">{{ m.ts | short_ts }}</span>
           {% with source=m.source %}{% include "components/_source_mark.html" %}{% endwith %}
           <a href="/users/{{ m.user_id }}" class="text-accent hover:underline font-medium shrink-0">{{ m.name }}</a>
           <span class="text-primary break-words">{{ m.content }}</span>
+          <button type="button"
+                  class="ml-auto text-muted hover:text-accent text-[10px] shrink-0"
+                  hx-get="/modals/message/{{ m.id }}"
+                  hx-target="#modal-root"
+                  hx-swap="innerHTML"
+                  title="Center the context window on this message">
+            <i class="fa-solid fa-crosshairs"></i>
+          </button>
         </div>
       </li>
     {% endfor %}
 
     <li class="px-3 py-3 bg-accent/10 border-l-4 border-accent">
-      {% if focal.reply_parent_body %}
-        <div class="text-[11px] text-muted mb-1 inline-flex items-center gap-1">
-          <i class="fa-solid fa-reply text-[10px]"></i>
-          replying to <span class="text-accent">{{ focal.reply_parent_login or '?' }}</span>:
-          <span class="italic truncate max-w-[28rem]">"{{ focal.reply_parent_body }}"</span>
-        </div>
-      {% endif %}
+      {{ reply_chip(focal) }}
       <div class="flex items-baseline gap-2">
         <span class="text-[11px] text-muted whitespace-nowrap w-32 shrink-0">{{ focal.ts | short_ts }}</span>
         {% with source=focal.source %}{% include "components/_source_mark.html" %}{% endwith %}
@@ -49,18 +80,20 @@
 
     {% for m in after %}
       <li class="px-3 py-2 hover:bg-surface-raised/60 transition-all duration-150 ease-out">
-        {% if m.reply_parent_body %}
-          <div class="text-[11px] text-muted mb-1 inline-flex items-center gap-1">
-            <i class="fa-solid fa-reply text-[10px]"></i>
-            replying to <span class="text-accent">{{ m.reply_parent_login or '?' }}</span>:
-            <span class="italic truncate max-w-[28rem]">"{{ m.reply_parent_body }}"</span>
-          </div>
-        {% endif %}
+        {{ reply_chip(m) }}
         <div class="flex items-baseline gap-2">
           <span class="text-[11px] text-muted whitespace-nowrap w-32 shrink-0">{{ m.ts | short_ts }}</span>
           {% with source=m.source %}{% include "components/_source_mark.html" %}{% endwith %}
           <a href="/users/{{ m.user_id }}" class="text-accent hover:underline font-medium shrink-0">{{ m.name }}</a>
           <span class="text-primary break-words">{{ m.content }}</span>
+          <button type="button"
+                  class="ml-auto text-muted hover:text-accent text-[10px] shrink-0"
+                  hx-get="/modals/message/{{ m.id }}"
+                  hx-target="#modal-root"
+                  hx-swap="innerHTML"
+                  title="Center the context window on this message">
+            <i class="fa-solid fa-crosshairs"></i>
+          </button>
         </div>
       </li>
     {% endfor %}

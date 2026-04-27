@@ -887,6 +887,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "focal": ctx["focal"],
                 "before": ctx["before"],
                 "after": ctx["after"],
+                "parent_ids": ctx.get("parent_ids", {}),
             },
         )
 

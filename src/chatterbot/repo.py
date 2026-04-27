@@ -2629,6 +2629,64 @@ class ChatterRepo:
                 for r in cur.fetchall()
             ]
 
+    def find_reply_parent_id(
+        self, login: str, body: str, *, before_id: int | None = None,
+    ) -> int | None:
+        """Resolve the actual `messages.id` of a stored reply-parent so the
+        UI can hop up the thread. We don't store parent ids — Twitch's
+        IRCv3 reply tag only carries login + body — so we approximate by
+        finding the most recent matching message from that user prior to
+        the reply itself.
+
+        `before_id`, when supplied, caps the lookup to messages older than
+        the reply (the parent has to come BEFORE the reply that quotes it).
+        Match is on user_login + content prefix (200-char body limit) with
+        an exact equality first, falling back to a prefix match for cases
+        where the body got truncated by the IRC tag encoding.
+        """
+        if not login or not body:
+            return None
+        body = body.strip()
+        with self._cursor() as cur:
+            params: list[Any] = [login.lower(), body]
+            id_clause = ""
+            if before_id is not None:
+                id_clause = " AND m.id < ?"
+                params.append(int(before_id))
+            cur.execute(
+                f"""
+                SELECT m.id FROM messages m
+                JOIN users u ON u.twitch_id = m.user_id
+                WHERE LOWER(u.name) = ?
+                  AND m.content = ?
+                  {id_clause}
+                ORDER BY m.id DESC LIMIT 1
+                """,
+                params,
+            )
+            r = cur.fetchone()
+            if r:
+                return int(r["id"])
+            # Fallback: prefix match (handles truncation in the IRC tag).
+            params2: list[Any] = [login.lower(), body[:60] + "%"]
+            id_clause2 = ""
+            if before_id is not None:
+                id_clause2 = " AND m.id < ?"
+                params2.append(int(before_id))
+            cur.execute(
+                f"""
+                SELECT m.id FROM messages m
+                JOIN users u ON u.twitch_id = m.user_id
+                WHERE LOWER(u.name) = ?
+                  AND m.content LIKE ?
+                  {id_clause2}
+                ORDER BY m.id DESC LIMIT 1
+                """,
+                params2,
+            )
+            r = cur.fetchone()
+            return int(r["id"]) if r else None
+
     def get_message_context(
         self, message_id: int, *, before: int = 3, after: int = 3
     ) -> dict[str, Any]:
@@ -2636,7 +2694,10 @@ class ChatterRepo:
         for conversational context. Result:
             {"focal": Message|None,
              "before": list[Message],   # oldest first
-             "after":  list[Message]}   # oldest first
+             "after":  list[Message],   # oldest first
+             "parent_ids": dict[int, int]}  # message_id → parent_message_id
+              (only for rows whose reply-parent we could resolve, so the
+              modal can render a "↑ jump to parent" link).
         Cross-user — the surrounding rows show who else was talking around
         that moment."""
         with self._cursor() as cur:
@@ -2710,7 +2771,24 @@ class ChatterRepo:
                 )
                 for r in cur.fetchall()
             ]
-        return {"focal": focal, "before": before_rows, "after": after_rows}
+
+        # Resolve the actual message id of each reply-parent so the modal
+        # can render a "↑ jump to parent" link that re-anchors on it.
+        # Skipped for rows without a reply tag.
+        parent_ids: dict[int, int] = {}
+        for m in (focal, *before_rows, *after_rows):
+            if m and m.reply_parent_login and m.reply_parent_body:
+                pid = self.find_reply_parent_id(
+                    m.reply_parent_login, m.reply_parent_body,
+                    before_id=m.id,
+                )
+                if pid is not None:
+                    parent_ids[m.id] = pid
+
+        return {
+            "focal": focal, "before": before_rows, "after": after_rows,
+            "parent_ids": parent_ids,
+        }
 
     def count_messages(self, user_id: str, query: str = "") -> int:
         params: list[Any] = [user_id]
