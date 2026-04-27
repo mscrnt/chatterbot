@@ -158,12 +158,26 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             return 0
     TEMPLATES.env.globals["fired_reminders_count"] = _fired_reminders_count
 
+    # Snoozed insight cards whose due_ts has passed — shown as a separate
+    # nav pill so the streamer sees follow-ups they asked to come back to.
+    def _due_snoozes_count() -> int:
+        try:
+            return repo.count_due_snoozes()
+        except Exception:
+            return 0
+    TEMPLATES.env.globals["due_snoozes_count"] = _due_snoozes_count
+
     # Cutoff used by the activity-badge component to label first-timers
     # (first_seen >= now - 24h). Recomputed per render so it stays accurate.
     from datetime import datetime, timedelta, timezone
     def _day_floor_iso() -> str:
         return (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(timespec="seconds")
     TEMPLATES.env.globals["day_floor_iso"] = _day_floor_iso
+    # Now ISO — used by Insights to compare each card's due_ts against
+    # "now" so snoozed items can resurface as soon as they're due.
+    def _now_iso_str() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    TEMPLATES.env.globals["now_iso"] = _now_iso_str
 
     auth_dep = make_auth_dependency(settings)
     deps = [Depends(auth_dep)] if settings.dashboard_basic_auth_enabled else []
@@ -219,7 +233,13 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         sort: str = Query("last_seen"),
         page: int = Query(1, ge=1),
     ):
-        return _render_chatters(request, q, sort, page, partial=False)
+        # When HTMX requests this URL (search keystrokes, sort change,
+        # pagination), return only the table partial — but the URL still
+        # gets pushed via hx-push-url so the back button restores
+        # whatever filter state the streamer was in. A direct browser
+        # load (no HX-Request header) renders the full page.
+        partial = request.headers.get("hx-request", "").lower() == "true"
+        return _render_chatters(request, q, sort, page, partial=partial)
 
     @app.get("/chatters", response_class=HTMLResponse)
     async def chatters_partial(
@@ -228,6 +248,8 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         sort: str = Query("last_seen"),
         page: int = Query(1, ge=1),
     ):
+        # Kept for the auto-refresh tick (which deliberately doesn't
+        # push URL). New code should hit `/` with HX-Request set.
         return _render_chatters(request, q, sort, page, partial=True)
 
     def _render_chatters(
@@ -254,6 +276,9 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     async def user_detail(
         request: Request,
         twitch_id: str = PathParam(..., min_length=1),
+        q: str = Query(""),
+        sort: str = Query("last_seen"),
+        page: int = Query(1, ge=1),
     ):
         user = repo.get_user(twitch_id)
         if not user:
@@ -276,6 +301,16 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         merged_parent = (
             repo.get_user(user.merged_into) if user.merged_into else None
         )
+        # Prev/next navigation within the streamer's current
+        # filter+sort context. None when the chatter falls outside
+        # the scan cap or no neighbour exists at the boundary.
+        prev_id, next_id = repo.neighbours_in_chatters(
+            twitch_id, query=q, sort=sort,
+        )
+        # Preserved query string for the "back to list" link and for
+        # forwarding context to the next/prev user pages.
+        from urllib.parse import urlencode as _ue
+        ctx_qs = _ue({"q": q, "sort": sort, "page": page})
         return TEMPLATES.TemplateResponse(
             request,
             "user.html",
@@ -295,6 +330,9 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "merged_children": merged_children,
                 "merged_parent": merged_parent,
                 "mod_mode_enabled": settings.mod_mode_enabled,
+                "prev_id": prev_id,
+                "next_id": next_id,
+                "ctx_qs": ctx_qs,
             },
         )
 
@@ -1062,26 +1100,24 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     ]
     _INSIGHT_WINDOW_LOOKUP = {key: (modifier, label) for key, modifier, label in _INSIGHT_WINDOWS}
 
-    @app.get("/insights", response_class=HTMLResponse)
-    async def insights_page(
-        request: Request,
-        partial: int = Query(0),
-        window: str = Query("7d"),
-    ):
+    _INSIGHTS_VIEWS = ("engagement", "topics")
+    _THREAD_STATUSES = ("active", "dormant", "archived", "all")
+
+    def _talking_point_key(tp) -> str:
+        """Stable identity for a talking point so its addressed/snoozed
+        state survives across cache refreshes. Hash is deterministic but
+        short — fine for an index key."""
+        import hashlib
+        h = hashlib.sha1(
+            (tp.user_id + "|" + (tp.point or "")).encode("utf-8")
+        ).hexdigest()[:16]
+        return f"{tp.user_id}:{h}"
+
+    def _build_engagement_ctx(window: str) -> dict:
         import time as _t
         if window not in _INSIGHT_WINDOW_LOOKUP:
             window = "7d"
         modifier, label = _INSIGHT_WINDOW_LOOKUP[window]
-
-        # Visiting /insights = "I've reviewed the newcomers." Acks the pill.
-        # Skip on the HTMX-poll partial path so an auto-refresh in the
-        # background doesn't silently swallow new arrivals.
-        if not partial:
-            try:
-                repo.set_newcomers_ack()
-            except Exception:
-                logger.exception("failed to ack newcomers")
-
         cache = insights.cache
         regulars = repo.list_regulars(since=modifier, limit=10)
         lapsed = repo.list_lapsed_regulars(
@@ -1098,18 +1134,16 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             if cache.refreshed_at is not None
             else None
         )
-        # Drop "Skip:" rows from talking points — the LLM emits them when it
-        # has nothing useful to say about a chatter; they're not for display.
         tps = [
             tp for tp in cache.talking_points
             if not (tp.point or "").lstrip().lower().startswith("skip:")
         ]
-        # Per-surface "last read" — items with a ts newer than this get a
-        # NEW badge in the templates. Distinct from newcomers ack so the
-        # streamer can scan-and-dismiss without losing context for items
-        # they just want to monitor.
-        insights_acked_at = repo.get_surface_ack("insights")
-        ctx = {
+        # Stamp each talking point with its insight_state key so the
+        # template can apply addressed/snoozed/pinned styling.
+        for tp in tps:
+            tp.item_key = _talking_point_key(tp)
+
+        return {
             "talking_points": tps,
             "talking_points_age_seconds": age,
             "talking_points_error": cache.error,
@@ -1120,10 +1154,96 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "window": window,
             "window_label": label,
             "window_options": _INSIGHT_WINDOWS,
-            "acked_at": insights_acked_at,
+            "acked_at": repo.get_surface_ack("insights"),
+            # Per-card state, keyed for each section.
+            "tp_states": repo.get_insight_states("talking_point"),
+            "anniv_states": repo.get_insight_states("anniversary"),
+            "newc_states": repo.get_insight_states("newcomer"),
+            "reg_states": repo.get_insight_states("regular"),
+            "lapsed_states": repo.get_insight_states("lapsed"),
+            # Activity pulse for the sparkline at the top.
+            "pulse": repo.messages_per_minute(60),
+            # Direct mentions (recent questions / @-style addresses).
+            "direct_mentions": repo.recent_direct_mentions(limit=8),
+            # Most recent end-of-stream recap, if any.
+            "latest_recap": (repo.list_stream_recaps(limit=1) or [None])[0],
         }
-        tpl = "partials/insights_body.html" if partial else "insights.html"
-        return TEMPLATES.TemplateResponse(request, tpl, ctx)
+
+    def _build_topics_ctx(status: str, q: str) -> dict:
+        if status not in _THREAD_STATUSES:
+            status = "all"
+        status_filter = None if status == "all" else status
+        threads = repo.list_threads(
+            status_filter=status_filter, query=q, limit=100
+        )
+        buckets = {"active": [], "dormant": [], "archived": []}
+        for t in threads:
+            buckets.setdefault(t.status, []).append(t)
+        snapshots = repo.list_topic_snapshots(limit=10)
+        latest = snapshots[0] if snapshots else None
+        latest_topics: list[dict] = []
+        if latest and latest.topics_json:
+            try:
+                from ..llm.schemas import TopicsResponse
+                parsed = TopicsResponse.model_validate_json(latest.topics_json)
+                latest_topics = [
+                    {
+                        "index": i, "topic": t.topic,
+                        "drivers": t.drivers, "category": t.category,
+                    }
+                    for i, t in enumerate(parsed.topics)
+                ]
+            except Exception:
+                logger.exception("topics: failed to parse latest topics_json")
+        legacy = [s for s in snapshots if not s.topics_json][:5]
+        return {
+            "active":   buckets["active"],
+            "dormant":  buckets["dormant"],
+            "archived": buckets["archived"],
+            "status": status,
+            "q": q,
+            "latest": latest,
+            "latest_topics": latest_topics,
+            "legacy": legacy,
+            "settings": settings,
+            "total": len(threads),
+            "acked_at": repo.get_surface_ack("topics"),
+            "thread_states": repo.get_insight_states("thread"),
+            "thread_velocity": repo.thread_velocity(),
+        }
+
+    @app.get("/insights", response_class=HTMLResponse)
+    async def insights_page(
+        request: Request,
+        view: str = Query("engagement"),
+        partial: int = Query(0),
+        window: str = Query("7d"),
+        status: str = Query("all"),
+        q: str = Query(""),
+    ):
+        if view not in _INSIGHTS_VIEWS:
+            view = "engagement"
+
+        # Visiting /insights = "I've reviewed the newcomers." Acks the pill.
+        # Skip on HTMX-partial path so background polls don't silently
+        # swallow new arrivals.
+        if not partial:
+            try:
+                repo.set_newcomers_ack()
+            except Exception:
+                logger.exception("failed to ack newcomers")
+
+        ctx: dict = {"view": view}
+        if view == "engagement":
+            ctx.update(_build_engagement_ctx(window))
+            tpl_partial = "partials/insights_body.html"
+        else:  # topics
+            ctx.update(_build_topics_ctx(status, q))
+            tpl_partial = "partials/topics_body.html"
+
+        if partial:
+            return TEMPLATES.TemplateResponse(request, tpl_partial, ctx)
+        return TEMPLATES.TemplateResponse(request, "insights.html", ctx)
 
     @app.get("/modals/insight/{kind}/{twitch_id}", response_class=HTMLResponse)
     async def modal_insight(
@@ -1190,11 +1310,67 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    _SNOOZE_MINUTES = {"10m": 10, "30m": 30, "1h": 60, "24h": 60 * 24}
+
+    @app.post("/insights/state", response_class=HTMLResponse)
+    async def insights_state(
+        request: Request,
+        kind: Annotated[str, Form()],
+        item_key: Annotated[str, Form()],
+        action: Annotated[str, Form()],
+        snooze: Annotated[str, Form()] = "",
+        note: Annotated[str, Form()] = "",
+    ):
+        """Single endpoint for all per-card actions: addressed / snooze /
+        pin / skip / open. Returns 204 with HX-Trigger so the page can
+        refresh the affected section in place.
+
+        - action='addressed': mark as handled-on-stream; sinks card.
+        - action='snooze' + snooze='10m|30m|1h|24h': come back later.
+        - action='pin': hold at top of section.
+        - action='skip': hide entirely.
+        - action='open': clear any state (the undo path).
+        """
+        from datetime import datetime, timedelta, timezone
+        action = action.strip().lower()
+        if action not in ("addressed", "snooze", "pin", "skip", "open"):
+            raise HTTPException(400, f"unknown action: {action}")
+
+        state = action
+        due_ts: str | None = None
+        if action == "snooze":
+            mins = _SNOOZE_MINUTES.get(snooze)
+            if mins is None:
+                raise HTTPException(400, "snooze must be 10m|30m|1h|24h")
+            due_ts = (
+                datetime.now(timezone.utc) + timedelta(minutes=mins)
+            ).isoformat(timespec="seconds")
+            state = "snoozed"
+        elif action == "pin":
+            state = "pinned"
+        elif action == "skip":
+            state = "skipped"
+        elif action == "addressed":
+            state = "addressed"
+
+        repo.set_insight_state(
+            kind, item_key, state,
+            due_ts=due_ts, note=(note.strip() or None),
+        )
+        # 204 + HX-Trigger lets the caller drop the card without a full
+        # body re-render. The Insights page re-fetches its body partial
+        # via auto-refresh anyway.
+        resp = Response(status_code=204)
+        resp.headers["HX-Trigger"] = "insights-state-changed"
+        return resp
+
     @app.post("/insights/mark-read", response_class=HTMLResponse)
     async def insights_mark_read(request: Request):
         repo.set_surface_ack("insights")
-        # Re-render the body partial so HTMX can swap it in place.
-        return await insights_page(request, partial=1, window="7d")
+        # Re-render the engagement body partial so HTMX can swap it in place.
+        return await insights_page(
+            request, view="engagement", partial=1, window="7d",
+        )
 
     # ---------------- live chat (widget + full page) ----------------
 
@@ -1241,79 +1417,27 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         tpl = "partials/live_rows.html" if partial else "live.html"
         return TEMPLATES.TemplateResponse(request, tpl, ctx)
 
-    # ---------------- topics (now thread-grouped) ----------------
-
-    _THREAD_STATUSES = ("active", "dormant", "archived", "all")
+    # ---------------- topics (merged into /insights as a sub-view) ----------------
 
     @app.get("/topics", response_class=HTMLResponse)
-    async def topics(
+    async def topics_redirect(
         request: Request,
         partial: int = Query(0),
         status: str = Query("all"),
         q: str = Query(""),
     ):
-        if status not in _THREAD_STATUSES:
-            status = "all"
-        status_filter = None if status == "all" else status
-
-        threads = repo.list_threads(
-            status_filter=status_filter, query=q, limit=100
+        # Topics now lives as a sub-view of /insights. Forward HTMX
+        # auto-refresh polls + bookmark visits through the merged route.
+        return await insights_page(
+            request, view="topics", partial=partial, status=status, q=q,
         )
-        # Bucket the resulting threads for the UI sections. When the user
-        # explicitly filters, only the requested bucket is non-empty.
-        buckets = {"active": [], "dormant": [], "archived": []}
-        for t in threads:
-            buckets.setdefault(t.status, []).append(t)
-
-        # Latest snapshot pinned at the top — the "what's chat doing right
-        # now" anchor independent of the threading view.
-        snapshots = repo.list_topic_snapshots(limit=10)
-        latest = snapshots[0] if snapshots else None
-
-        # Parse the structured topics on the latest snapshot so each bullet
-        # becomes a clickable row that opens the per-topic detail modal.
-        latest_topics: list[dict] = []
-        if latest and latest.topics_json:
-            try:
-                from ..llm.schemas import TopicsResponse
-                parsed = TopicsResponse.model_validate_json(latest.topics_json)
-                latest_topics = [
-                    {
-                        "index": i,
-                        "topic": t.topic,
-                        "drivers": t.drivers,
-                        "category": t.category,
-                    }
-                    for i, t in enumerate(parsed.topics)
-                ]
-            except Exception:
-                logger.exception("topics: failed to parse latest topics_json")
-
-        # Legacy text-only snapshots (no topics_json => never threaded).
-        # Tucked at the bottom so the new view dominates.
-        legacy = [s for s in snapshots if not s.topics_json][:5]
-
-        topics_acked_at = repo.get_surface_ack("topics")
-        ctx = {
-            "active":   buckets["active"],
-            "dormant":  buckets["dormant"],
-            "archived": buckets["archived"],
-            "status": status,
-            "q": q,
-            "latest": latest,
-            "latest_topics": latest_topics,
-            "legacy": legacy,
-            "settings": settings,
-            "total": len(threads),
-            "acked_at": topics_acked_at,
-        }
-        tpl = "partials/topics_body.html" if partial else "topics.html"
-        return TEMPLATES.TemplateResponse(request, tpl, ctx)
 
     @app.post("/topics/mark-read", response_class=HTMLResponse)
     async def topics_mark_read(request: Request):
         repo.set_surface_ack("topics")
-        return await topics(request, partial=1, status="all", q="")
+        return await insights_page(
+            request, view="topics", partial=1, status="all", q="",
+        )
 
     @app.get("/modals/thread/{thread_id}", response_class=HTMLResponse)
     async def modal_thread(request: Request, thread_id: int):

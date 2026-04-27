@@ -1,26 +1,23 @@
-{# Primary nav links. Reads `current_path` and `mod_mode_enabled` from base
-   context. Settings is rendered separately by base.html (right-aligned icon). #}
+{# Primary nav links (left side). Reads `current_path` and `mod_mode_enabled`
+   from base context. Labels show always — Live + Settings are rendered
+   separately in base.html as right-aligned icon-only utility buttons. #}
+{% set is_insights = current_path == '/insights' or current_path == '/topics' %}
 {% set links = [
   ('/',         'Chatters', 'fa-users',          is_chatters),
-  ('/insights', 'Insights', 'fa-lightbulb',      current_path == '/insights'),
+  ('/insights', 'Insights', 'fa-lightbulb',      is_insights),
   ('/stats',    'Stats',    'fa-chart-pie',      current_path == '/stats'),
-  ('/topics',   'Topics',   'fa-comments',       current_path == '/topics'),
   ('/events',   'Events',   'fa-coins',          current_path == '/events'),
-  ('/live',     'Live',     'fa-tower-broadcast', current_path == '/live'),
   ('/search',   'Search',   'fa-wand-magic-sparkles', current_path == '/search'),
 ] %}
 {% if mod_mode_enabled %}
   {% set _ = links.append(('/moderation', 'Moderation', 'fa-shield-halved', current_path == '/moderation')) %}
 {% endif %}
 {% for href, label, icon, active in links %}
-{# Icon-only at rest; hovering expands the link inline with the label.
-   The active link always shows its label so the streamer can see where
-   they are at a glance. `aria-label` keeps screen-reader output stable. #}
 <a href="{{ href }}"
    aria-label="{{ label }}"
-   class="group tap inline-flex items-center gap-2 px-3 rounded text-sm transition-all duration-150 ease-out
+   class="tap inline-flex items-center gap-2 px-3 rounded text-sm transition-all duration-150 ease-out
           {% if active %}bg-surface-raised text-primary{% else %}text-muted hover:text-primary hover:bg-surface-raised{% endif %}">
   <i class="fa-solid {{ icon }} text-base"></i>
-  <span class="whitespace-nowrap {% if not active %}hidden group-hover:inline group-focus:inline{% endif %}">{{ label }}</span>
+  <span class="whitespace-nowrap">{{ label }}</span>
 </a>
 {% endfor %}

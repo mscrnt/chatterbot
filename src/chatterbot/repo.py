@@ -86,6 +86,40 @@ class Reminder:
 
 
 @dataclass
+class InsightState:
+    """Per-card state on the Insights page. Lets the streamer mark an
+    item as addressed-on-stream, snooze it, pin it, or skip it. Items
+    not in the table render as 'open' (default).
+
+    `kind` ∈ {talking_point, thread, anniversary, newcomer, regular, lapsed}
+    `item_key` is whatever uniquely identifies that card within its kind
+    (thread_id for threads, hash of user_id+point for talking points, etc.)
+    `state` ∈ {addressed, snoozed, pinned, skipped}
+    `due_ts` is set only when state == 'snoozed' — the moment the card
+    should resurface.
+    `note` is the optional 'what I said on stream' memory aid the streamer
+    can capture when dismissing — they speak on stream, never type to chat.
+    """
+
+    kind: str
+    item_key: str
+    state: str
+    due_ts: str | None
+    note: str | None
+    updated_at: str
+
+
+@dataclass
+class StreamRecap:
+    id: int
+    started_at: str
+    ended_at: str
+    message_id_lo: int | None
+    message_id_hi: int | None
+    summary: str
+
+
+@dataclass
 class StreamSession:
     """Computed session — a contiguous chunk of chat with no >GAP-min silence."""
 
@@ -446,11 +480,17 @@ class ChatterRepo:
                 "CREATE INDEX IF NOT EXISTS idx_thread_members_snap "
                 "ON topic_thread_members(snapshot_id)"
             )
+            # vec_threads uses cosine distance — the threader's similarity
+            # threshold is expressed in cosine-distance terms (1 - cosine_sim).
+            # vec0 defaults to L2 if the metric isn't specified, which made
+            # the 0.30 threshold unreachable in practice. The matching
+            # one-shot L2 → cosine migration runs after app_settings is
+            # created (sentinel: vec_threads_metric_version = cosine_v1).
             cur.execute(
                 f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS vec_threads USING vec0(
                     thread_id INTEGER PRIMARY KEY,
-                    embedding FLOAT[{self.embed_dim}]
+                    embedding FLOAT[{self.embed_dim}] distance_metric=cosine
                 )
                 """
             )
@@ -526,6 +566,43 @@ class ChatterRepo:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_incidents_user ON incidents(user_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_incidents_ts ON incidents(ts)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status)")
+            # Per-item state for Insights cards. Lets the streamer mark a
+            # talking point / thread / anniversary as addressed-on-stream,
+            # snooze it for 10m / 30m / 1h / 24h, pin it to the top of its
+            # section, or skip it. `note` is the optional "what I said on
+            # stream" memory aid the streamer captures when dismissing.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS insight_states (
+                    kind        TEXT NOT NULL,
+                    item_key    TEXT NOT NULL,
+                    state       TEXT NOT NULL,
+                    due_ts      TEXT,
+                    note        TEXT,
+                    updated_at  TEXT NOT NULL,
+                    PRIMARY KEY (kind, item_key)
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_insight_states_due "
+                "ON insight_states(due_ts) WHERE due_ts IS NOT NULL"
+            )
+            # End-of-stream LLM-generated recaps. Triggered when OBS
+            # transitions from streaming → not-streaming. One row per
+            # detected stream session.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS stream_recaps (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    started_at      TEXT NOT NULL,
+                    ended_at        TEXT NOT NULL,
+                    message_id_lo   INTEGER,
+                    message_id_hi   INTEGER,
+                    summary         TEXT NOT NULL
+                )
+                """
+            )
             # One-time backfill so existing users get their current name as an alias
             # without needing a fresh observation. Idempotent.
             cur.execute(
@@ -534,6 +611,39 @@ class ChatterRepo:
                 SELECT twitch_id, name, first_seen, last_seen FROM users
                 """
             )
+            # vec_threads cosine-metric migration. Older DBs created the
+            # virtual table under the default L2 metric, which made the
+            # threader's 0.30 distance threshold unreachable — every
+            # snapshot's topics created brand-new threads instead of
+            # joining recurring ones. Sentinel-gated so this runs once
+            # per DB. The bot's threader.backfill() then re-clusters
+            # all snapshots into a fresh thread index against cosine.
+            cur.execute(
+                "SELECT value FROM app_settings WHERE key = 'vec_threads_metric_version'"
+            )
+            sentinel = cur.fetchone()
+            if not sentinel or sentinel["value"] != "cosine_v1":
+                cur.execute("DROP TABLE IF EXISTS vec_threads")
+                cur.execute(
+                    f"""
+                    CREATE VIRTUAL TABLE vec_threads USING vec0(
+                        thread_id INTEGER PRIMARY KEY,
+                        embedding FLOAT[{self.embed_dim}] distance_metric=cosine
+                    )
+                    """
+                )
+                cur.execute("DELETE FROM topic_thread_members")
+                cur.execute("DELETE FROM topic_threads")
+                cur.execute(
+                    """
+                    INSERT INTO app_settings(key, value, updated_at)
+                    VALUES ('vec_threads_metric_version', 'cosine_v1', ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (_now_iso(),),
+                )
             cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_notes_user ON notes(user_id)")
@@ -1297,6 +1407,263 @@ class ChatterRepo:
             )
             return int(cur.fetchone()["c"])
 
+    # ============================ Insights state machine ===================
+    # Per-card state for the Insights page. The streamer's primary surface
+    # for managing what they've addressed on stream vs what to come back to.
+
+    _INSIGHT_STATES = frozenset({"addressed", "snoozed", "pinned", "skipped"})
+
+    def set_insight_state(
+        self,
+        kind: str,
+        item_key: str,
+        state: str,
+        *,
+        due_ts: str | None = None,
+        note: str | None = None,
+    ) -> None:
+        """Upsert insight card state. Pass state='open' (or any value not
+        in _INSIGHT_STATES) to clear the row entirely."""
+        if state not in self._INSIGHT_STATES:
+            with self._cursor() as cur:
+                cur.execute(
+                    "DELETE FROM insight_states WHERE kind = ? AND item_key = ?",
+                    (kind, item_key),
+                )
+            return
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO insight_states(kind, item_key, state, due_ts, note, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(kind, item_key) DO UPDATE SET
+                    state = excluded.state,
+                    due_ts = excluded.due_ts,
+                    note = COALESCE(excluded.note, insight_states.note),
+                    updated_at = excluded.updated_at
+                """,
+                (kind, item_key, state, due_ts, note, _now_iso()),
+            )
+
+    def get_insight_states(self, kind: str) -> dict[str, InsightState]:
+        """All current states for a given kind, keyed by item_key. The
+        Insights renderer fetches once per kind and applies the state to
+        each card via dict lookup."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT kind, item_key, state, due_ts, note, updated_at "
+                "FROM insight_states WHERE kind = ?",
+                (kind,),
+            )
+            return {
+                r["item_key"]: InsightState(
+                    kind=r["kind"], item_key=r["item_key"], state=r["state"],
+                    due_ts=r["due_ts"], note=r["note"],
+                    updated_at=r["updated_at"],
+                )
+                for r in cur.fetchall()
+            }
+
+    def count_due_snoozes(self) -> int:
+        """Snoozed cards whose due_ts has passed — drives the nav pill so
+        the streamer sees pending follow-ups at a glance."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM insight_states "
+                "WHERE state = 'snoozed' AND due_ts IS NOT NULL AND due_ts <= ?",
+                (_now_iso(),),
+            )
+            return int(cur.fetchone()["c"])
+
+    def list_due_snoozes(self) -> list[InsightState]:
+        """Detailed list of cards whose snooze has fired — used by the
+        browser-notification opt-in to know what to show."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT kind, item_key, state, due_ts, note, updated_at "
+                "FROM insight_states "
+                "WHERE state = 'snoozed' AND due_ts IS NOT NULL AND due_ts <= ? "
+                "ORDER BY due_ts ASC",
+                (_now_iso(),),
+            )
+            return [
+                InsightState(
+                    kind=r["kind"], item_key=r["item_key"], state=r["state"],
+                    due_ts=r["due_ts"], note=r["note"],
+                    updated_at=r["updated_at"],
+                )
+                for r in cur.fetchall()
+            ]
+
+    # ============================ Stream recap ============================
+
+    def add_stream_recap(
+        self, *, started_at: str, ended_at: str,
+        message_id_lo: int | None, message_id_hi: int | None,
+        summary: str,
+    ) -> int:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO stream_recaps(
+                    started_at, ended_at, message_id_lo, message_id_hi, summary
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (started_at, ended_at, message_id_lo, message_id_hi, summary),
+            )
+            return int(cur.lastrowid)
+
+    def list_stream_recaps(self, limit: int = 10) -> list[StreamRecap]:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, started_at, ended_at,
+                       message_id_lo, message_id_hi, summary
+                FROM stream_recaps
+                ORDER BY ended_at DESC LIMIT ?
+                """,
+                (int(limit),),
+            )
+            return [
+                StreamRecap(
+                    id=int(r["id"]), started_at=r["started_at"],
+                    ended_at=r["ended_at"],
+                    message_id_lo=int(r["message_id_lo"]) if r["message_id_lo"] is not None else None,
+                    message_id_hi=int(r["message_id_hi"]) if r["message_id_hi"] is not None else None,
+                    summary=r["summary"],
+                )
+                for r in cur.fetchall()
+            ]
+
+    # ============================ Thread velocity =========================
+
+    def thread_velocity(self, *, window_minutes: int = 5) -> dict[int, str]:
+        """Per-thread message-rate trend over the last 2*window minutes.
+        Returns {thread_id: arrow} where arrow ∈ {↑↑, ↑, →, ↓}.
+
+        Compares the count of thread_member messages in the most recent
+        window to the prior window. A thread with no recent activity gets
+        no entry (display falls back to no arrow).
+
+        We approximate "thread message rate" via topic_thread_members.ts
+        — each member is a snapshot occurrence of that thread, which is
+        a useful proxy. (True per-message attribution would require
+        clustering every chat line, which is too costly.)
+        """
+        bucket = max(60, int(window_minutes) * 60)
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT thread_id,
+                       SUM(CASE WHEN ts >= datetime('now', '-{bucket} seconds')
+                                THEN 1 ELSE 0 END) AS recent,
+                       SUM(CASE WHEN ts <  datetime('now', '-{bucket} seconds')
+                                AND  ts >= datetime('now', '-{2*bucket} seconds')
+                                THEN 1 ELSE 0 END) AS prior
+                FROM topic_thread_members
+                GROUP BY thread_id
+                """
+            )
+            out: dict[int, str] = {}
+            for r in cur.fetchall():
+                recent = int(r["recent"] or 0)
+                prior = int(r["prior"] or 0)
+                if recent == 0 and prior == 0:
+                    continue
+                if prior == 0:
+                    out[int(r["thread_id"])] = "↑↑"
+                elif recent >= prior * 2:
+                    out[int(r["thread_id"])] = "↑↑"
+                elif recent > prior:
+                    out[int(r["thread_id"])] = "↑"
+                elif recent == prior:
+                    out[int(r["thread_id"])] = "→"
+                else:
+                    out[int(r["thread_id"])] = "↓"
+            return out
+
+    # ============================ Activity pulse ==========================
+
+    def messages_per_minute(self, minutes: int = 60) -> list[tuple[str, int]]:
+        """One row per minute over the last N minutes (oldest first), with
+        the count of non-emote messages in that minute. Drives the
+        sparkline at the top of /insights — instant 'is the room alive?'
+        signal."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                WITH RECURSIVE minutes(slot) AS (
+                    SELECT strftime('%Y-%m-%dT%H:%M:00', datetime('now', ?))
+                    UNION ALL
+                    SELECT strftime('%Y-%m-%dT%H:%M:00', datetime(slot, '+1 minute'))
+                    FROM minutes
+                    WHERE slot < strftime('%Y-%m-%dT%H:%M:00', datetime('now'))
+                )
+                SELECT m.slot,
+                       COALESCE((
+                         SELECT COUNT(*) FROM messages
+                         WHERE is_emote_only = 0
+                           AND ts >= m.slot
+                           AND ts <  strftime('%Y-%m-%dT%H:%M:00', datetime(m.slot, '+1 minute'))
+                       ), 0) AS c
+                FROM minutes m
+                ORDER BY m.slot ASC
+                """,
+                (f"-{int(minutes)} minutes",),
+            )
+            return [(r["slot"], int(r["c"])) for r in cur.fetchall()]
+
+    # ============================ Direct mentions =========================
+
+    def recent_direct_mentions(
+        self, *, limit: int = 8, lookback_minutes: int = 30,
+    ) -> list[Message]:
+        """Recent messages that look like the chatter is addressing the
+        streamer directly — a question, an @-mention of the channel name,
+        or a 'streamer-name' keyword. Used by the Engagement page to
+        surface 'people are talking to YOU' above general talking points.
+
+        Heuristic, not LLM — the streamer's own login is in settings, so
+        we look for: '?' anywhere, '@<channel>' anywhere, or messages
+        that start with the channel handle. Skips emote-only.
+        """
+        twitch_channel = (self.get_app_setting("twitch_channel") or "").strip().lower()
+        with self._cursor() as cur:
+            params: list[Any] = []
+            channel_clause = ""
+            if twitch_channel:
+                # `@channelname` or `channelname,` or just the bare token.
+                channel_clause = (
+                    " OR LOWER(m.content) LIKE ?"
+                    " OR LOWER(m.content) LIKE ?"
+                )
+                params.extend([f"%@{twitch_channel}%", f"%{twitch_channel}%"])
+            cur.execute(
+                f"""
+                SELECT m.id, m.user_id, u.name, u.source, m.ts, m.content,
+                       m.reply_parent_login, m.reply_parent_body
+                FROM messages m
+                JOIN users u ON u.twitch_id = m.user_id
+                WHERE m.is_emote_only = 0
+                  AND u.opt_out = 0
+                  AND m.ts >= datetime('now', ?)
+                  AND (m.content LIKE '%?%'{channel_clause})
+                ORDER BY m.id DESC
+                LIMIT ?
+                """,
+                (f"-{int(lookback_minutes)} minutes", *params, int(limit)),
+            )
+            return [
+                Message(
+                    id=int(r["id"]), user_id=r["user_id"], name=r["name"],
+                    ts=r["ts"], content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
+                    source=r["source"] or "twitch",
+                )
+                for r in cur.fetchall()
+            ]
+
     # ============================ Activity / arrival signals ===============
 
     def user_message_stats(self, user_id: str) -> dict[str, Any]:
@@ -2038,6 +2405,35 @@ class ChatterRepo:
                 )
                 for r in cur.fetchall()
             ]
+
+    def neighbours_in_chatters(
+        self,
+        twitch_id: str,
+        *,
+        query: str = "",
+        sort: str = "last_seen",
+        scan_cap: int = 5000,
+    ) -> tuple[str | None, str | None]:
+        """Find the previous and next chatter relative to `twitch_id` in the
+        same filtered + sorted list the dashboard shows. Used by the
+        user-detail page to render ← prev / next → buttons that stay in
+        the streamer's context.
+
+        Walks `list_chatters` once up to `scan_cap` and returns the
+        neighbours' twitch_ids by index. Cap exists so a 50k-user channel
+        doesn't load everything for one navigation; if the user is beyond
+        the cap, prev/next collapse to None and the streamer just lands
+        on the chatters page.
+        """
+        rows = self.list_chatters(
+            query=query, sort=sort, limit=scan_cap, offset=0,
+        )
+        for i, row in enumerate(rows):
+            if row.user.twitch_id == twitch_id:
+                prev_id = rows[i - 1].user.twitch_id if i > 0 else None
+                next_id = rows[i + 1].user.twitch_id if i + 1 < len(rows) else None
+                return prev_id, next_id
+        return None, None
 
     def count_chatters(self, query: str = "") -> int:
         if query:

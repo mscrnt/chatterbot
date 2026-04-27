@@ -331,6 +331,164 @@ class Summarizer:
                 last_id,
             )
 
+    # ---------------- end-of-stream recap ----------------
+    # When OBS transitions from streaming → not-streaming, run a one-shot
+    # LLM summary of the just-ended session: top topics, top engaged
+    # chatters, things addressed, things still snoozed/missed. Saves to
+    # `stream_recaps` for browsing on /insights.
+    #
+    # Lives behind an optional OBS handle — when None, the loop no-ops.
+
+    RECAP_SYSTEM = """You write a short post-stream debrief for the streamer.
+
+You are given the rough boundaries of a stream session and a list of the
+most active topic threads + most active chatters during it. Produce a
+recap they can scan in 30 seconds the next morning.
+
+RULES:
+- 5-8 short bullet points, plain text. No markdown headers.
+- Lead with what was actually discussed (top topics).
+- Mention 2-4 chatters who really engaged, by name.
+- Flag anything the streamer asked to come back to that they didn't
+  address (snoozed items still due) — only if the input includes them.
+- No personality essays, no LLM-cheerleading. Just the debrief.
+- This output renders to the streamer's private dashboard. Never to chat.
+"""
+
+    async def recap_loop(self, obs) -> None:  # noqa: ANN001 — OBSStatusService
+        """Watch OBS state. On streaming → not-streaming transition, run
+        a recap LLM call and persist the result. obs.status.streaming is
+        the source of truth; we only fire when it goes True → False AND
+        the OBS service is connected (so a disconnect doesn't fake an
+        end-of-stream)."""
+        if obs is None:
+            return
+        was_streaming = False
+        stream_started_at: str | None = None
+        first_msg_id: int | None = None
+        from datetime import datetime, timezone
+        while True:
+            try:
+                await asyncio.sleep(15)
+                streaming = bool(obs.status.connected and obs.status.streaming)
+                # Detect rising edge — stream went online.
+                if streaming and not was_streaming:
+                    stream_started_at = datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    )
+                    first_msg_id = await asyncio.to_thread(
+                        self.repo.latest_message_id
+                    )
+                    logger.info("recap_loop: stream started — anchor msg_id=%s", first_msg_id)
+                # Falling edge — stream went offline.
+                if not streaming and was_streaming:
+                    ended_at = datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    )
+                    last_msg_id = await asyncio.to_thread(
+                        self.repo.latest_message_id
+                    )
+                    logger.info(
+                        "recap_loop: stream ended — generating recap for msgs %s-%s",
+                        first_msg_id, last_msg_id,
+                    )
+                    try:
+                        await self._generate_recap(
+                            stream_started_at or ended_at,
+                            ended_at,
+                            first_msg_id,
+                            last_msg_id,
+                        )
+                    except Exception:
+                        logger.exception("recap_loop: recap generation failed")
+                    stream_started_at = None
+                    first_msg_id = None
+                was_streaming = streaming
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("recap_loop iteration failed")
+
+    async def _generate_recap(
+        self,
+        started_at: str,
+        ended_at: str,
+        message_id_lo: int | None,
+        message_id_hi: int | None,
+    ) -> None:
+        """Build a prompt from session boundaries + recent threads + top
+        chatters and call the LLM for the prose recap. Saves to
+        stream_recaps."""
+        # Top threads active during the session window.
+        threads = await asyncio.to_thread(
+            self.repo.list_threads, status_filter=None, query="", limit=10
+        )
+        # Top chatters during the session — reuse list_regulars over a
+        # tight window. If start is unknown, fall back to last-2-hours.
+        from datetime import datetime, timezone
+        window = "-2 hours"
+        try:
+            if started_at:
+                # Use the actual start as the boundary.
+                window = started_at
+        except Exception:
+            pass
+        try:
+            top = await asyncio.to_thread(
+                self.repo.list_regulars, since=window, limit=8,
+            )
+        except Exception:
+            top = []
+        # Snoozed-but-due items at end-of-stream — flag for the streamer.
+        try:
+            due = await asyncio.to_thread(self.repo.list_due_snoozes)
+        except Exception:
+            due = []
+
+        thread_lines = [
+            f"- {t.title} ({t.member_count}× seen, last {t.last_ts})"
+            for t in threads[:8]
+        ] or ["- (no threads tracked)"]
+        chatter_lines = [
+            f"- {r.user.name}: {r.msg_count} msgs"
+            for r in top
+        ] or ["- (no top chatters tracked)"]
+        due_lines = [
+            f"- snoozed ({d.kind} #{d.item_key}) — was due {d.due_ts}"
+            for d in due[:5]
+        ]
+
+        prompt = (
+            f"Stream session ended at {ended_at} (started ~{started_at}).\n\n"
+            f"Top topic threads during the session:\n"
+            + "\n".join(thread_lines)
+            + "\n\nMost active chatters in that window:\n"
+            + "\n".join(chatter_lines)
+            + ("\n\nSnoozed items still due at session end:\n"
+               + "\n".join(due_lines) if due_lines else "")
+            + "\n\nWrite the streamer's debrief now."
+        )
+        text = ""
+        try:
+            async for chunk in self.llm.stream_generate(
+                prompt=prompt, system_prompt=self.RECAP_SYSTEM
+            ):
+                text += chunk
+        except Exception:
+            logger.exception("recap_loop: LLM stream failed")
+            return
+        text = (text or "").strip()
+        if not text:
+            logger.info("recap_loop: LLM returned empty recap, skipping save")
+            return
+        await asyncio.to_thread(
+            self.repo.add_stream_recap,
+            started_at=started_at, ended_at=ended_at,
+            message_id_lo=message_id_lo, message_id_hi=message_id_hi,
+            summary=text,
+        )
+        logger.info("recap_loop: saved stream recap (%d chars)", len(text))
+
     # ---------------- background message-embedding indexer ----------------
     # Keeps vec_messages current as new chat arrives so /search has fresh
     # coverage. Pure local Ollama work — no external API quota at risk —

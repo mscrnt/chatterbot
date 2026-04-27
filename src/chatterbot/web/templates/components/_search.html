@@ -19,6 +19,7 @@
          hx-trigger="keyup changed delay:200ms, search"
          hx-target="{{ target }}"
          hx-swap="outerHTML"
+         {% if push_url %}hx-push-url="true"{% endif %}
          {% if include_selector %}hx-include="{{ include_selector }}"{% endif %}>
   <span class="absolute inset-y-0 right-2 flex items-center gap-1">
     <kbd class="kb hidden sm:inline">/</kbd>

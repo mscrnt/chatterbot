@@ -101,6 +101,11 @@ async def run_bot(settings: Settings) -> None:
         )
     if settings.obs_enabled:
         tasks.append(asyncio.create_task(obs.poll_loop(), name="obs_poll"))
+        # End-of-stream recap: watch OBS state, fire LLM debrief on
+        # streaming → not-streaming transition. No-op if OBS is disabled.
+        tasks.append(asyncio.create_task(
+            summarizer.recap_loop(obs), name="recap_loop"
+        ))
     if settings.streamelements_enabled:
         tasks.append(asyncio.create_task(se.run(), name="streamelements"))
     if settings.mod_mode_enabled:

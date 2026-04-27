@@ -11,11 +11,12 @@
   {% else %}
     <p class="text-xs text-muted">{{ total }} chatter{{ '' if total == 1 else 's' }}</p>
 
+    {% set _ctx = '?q=' ~ (q | urlencode) ~ '&sort=' ~ sort ~ '&page=' ~ page %}
     {# Card list on mobile. #}
     <ul class="md:hidden space-y-2">
       {% for r in rows %}
       <li>
-        <a href="/users/{{ r.user.twitch_id }}" data-row-link tabindex="0"
+        <a href="/users/{{ r.user.twitch_id }}{{ _ctx }}" data-row-link tabindex="0"
            class="block tap p-3 rounded-xl border border-subtle bg-surface
                   active:bg-surface-raised hover:bg-surface-raised
                   transition-all duration-150 ease-out">
@@ -63,7 +64,7 @@
           {% for r in rows %}
           <tr class="even:bg-surface-raised/40 hover:bg-surface-raised transition-all duration-150 ease-out">
             <td class="px-3 py-2">
-              <a href="/users/{{ r.user.twitch_id }}" data-row-link tabindex="0"
+              <a href="/users/{{ r.user.twitch_id }}{{ _ctx }}" data-row-link tabindex="0"
                  class="inline-flex items-center gap-2 text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent rounded">
                 {% with name=r.user.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
                 <span>{{ r.user.name }}</span>
@@ -94,16 +95,18 @@
     <div class="flex items-center justify-between pt-2 text-sm">
       {% if page > 1 %}
         <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary"
-                hx-get="/chatters?q={{ q }}&sort={{ sort }}&page={{ page-1 }}"
-                hx-target="#chatters-table" hx-swap="outerHTML">
+                hx-get="/?q={{ q | urlencode }}&sort={{ sort }}&page={{ page-1 }}"
+                hx-target="#chatters-table" hx-swap="outerHTML"
+                hx-push-url="true">
           <i class="fa-solid fa-chevron-left text-xs"></i> prev
         </button>
       {% else %}<span></span>{% endif %}
       <span class="text-muted">page {{ page }} / {{ pages }}</span>
       {% if page < pages %}
         <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary"
-                hx-get="/chatters?q={{ q }}&sort={{ sort }}&page={{ page+1 }}"
-                hx-target="#chatters-table" hx-swap="outerHTML">
+                hx-get="/?q={{ q | urlencode }}&sort={{ sort }}&page={{ page+1 }}"
+                hx-target="#chatters-table" hx-swap="outerHTML"
+                hx-push-url="true">
           next <i class="fa-solid fa-chevron-right text-xs"></i>
         </button>
       {% else %}<span></span>{% endif %}

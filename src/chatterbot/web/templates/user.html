@@ -8,9 +8,36 @@
     <div class="min-w-0 flex items-center gap-3">
       {% with name=user.name, size='lg' %}{% include "components/_avatar.html" %}{% endwith %}
       <div class="min-w-0">
-        <a href="/" class="text-xs text-muted hover:underline inline-flex items-center gap-1">
-          <i class="fa-solid fa-arrow-left text-[10px]"></i> all chatters
-        </a>
+        <div class="flex items-center gap-2 text-xs text-muted">
+          <a href="/{% if ctx_qs %}?{{ ctx_qs }}{% endif %}"
+             class="hover:underline inline-flex items-center gap-1"
+             title="Back to chatters list">
+            <i class="fa-solid fa-arrow-left text-[10px]"></i> all chatters
+          </a>
+          {% if prev_id or next_id %}
+            <span class="text-subtle">·</span>
+            {% if prev_id %}
+              <a href="/users/{{ prev_id }}{% if ctx_qs %}?{{ ctx_qs }}{% endif %}"
+                 data-nav-prev
+                 class="tap inline-flex items-center justify-center px-1 rounded hover:bg-surface-raised hover:text-primary"
+                 title="Previous chatter in this list (←)">
+                <i class="fa-solid fa-chevron-left text-[10px]"></i>
+              </a>
+            {% else %}
+              <span class="px-1 text-subtle"><i class="fa-solid fa-chevron-left text-[10px]"></i></span>
+            {% endif %}
+            {% if next_id %}
+              <a href="/users/{{ next_id }}{% if ctx_qs %}?{{ ctx_qs }}{% endif %}"
+                 data-nav-next
+                 class="tap inline-flex items-center justify-center px-1 rounded hover:bg-surface-raised hover:text-primary"
+                 title="Next chatter in this list (→)">
+                <i class="fa-solid fa-chevron-right text-[10px]"></i>
+              </a>
+            {% else %}
+              <span class="px-1 text-subtle"><i class="fa-solid fa-chevron-right text-[10px]"></i></span>
+            {% endif %}
+          {% endif %}
+        </div>
         <h1 class="text-2xl sm:text-3xl font-semibold truncate text-primary">{{ user.name }}</h1>
         <p class="text-xs text-muted">
           id {{ user.twitch_id }} · first seen {{ user.first_seen | short_ts }}

@@ -7,19 +7,85 @@
       <i class="fa-solid fa-lightbulb text-accent"></i> Insights
     </h1>
     <div class="flex items-center gap-3">
-      <span class="text-xs text-muted hidden sm:inline">
-        talking points refresh every ~3 min · the rest live every poll
-      </span>
-      <button type="button"
-              class="tap inline-flex items-center justify-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary text-sm"
-              hx-post="/insights/mark-read"
-              hx-target="#insights-body"
-              hx-swap="outerHTML"
-              title="Clear NEW badges across this page">
-        <i class="fa-solid fa-check-double text-xs"></i> Mark all read
-      </button>
+      {% if view == 'engagement' %}
+        <span class="text-xs text-muted hidden sm:inline">
+          talking points refresh every ~3 min · the rest live every poll
+        </span>
+        <button type="button"
+                class="tap inline-flex items-center justify-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary text-sm"
+                hx-post="/insights/mark-read"
+                hx-target="#insights-body"
+                hx-swap="outerHTML"
+                title="Clear NEW badges across this page">
+          <i class="fa-solid fa-check-double text-xs"></i> Mark all read
+        </button>
+      {% else %}
+        <span class="text-xs text-muted hidden sm:inline">
+          recurring conversations clustered across snapshots
+        </span>
+        <button type="button"
+                class="tap inline-flex items-center justify-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary text-sm"
+                hx-post="/topics/mark-read"
+                hx-target="#topics-body"
+                hx-swap="outerHTML"
+                title="Clear NEW badges on every thread">
+          <i class="fa-solid fa-check-double text-xs"></i> Mark all read
+        </button>
+      {% endif %}
     </div>
   </header>
-  {% include "partials/insights_body.html" %}
+
+  {# ---------------- sub-tab strip ---------------- #}
+  <nav class="flex gap-1 border-b border-subtle" role="tablist" aria-label="Insights sub-views">
+    {% set _tabs = [
+      ('engagement', 'Engagement', 'fa-users-line'),
+      ('topics',     'Topics',     'fa-comments'),
+    ] %}
+    {% for vid, vlabel, vicon in _tabs %}
+      <a href="/insights?view={{ vid }}"
+         role="tab"
+         aria-selected="{{ 'true' if view == vid else 'false' }}"
+         class="tap inline-flex items-center gap-2 px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-all duration-150 ease-out
+                {% if view == vid %}border-accent text-accent{% else %}border-transparent text-muted hover:text-primary hover:bg-surface-raised{% endif %}">
+        <i class="fa-solid {{ vicon }} text-xs"></i> {{ vlabel }}
+      </a>
+    {% endfor %}
+  </nav>
+
+  {# ---------------- topics-only filter row ---------------- #}
+  {% if view == 'topics' %}
+  <div class="flex flex-col sm:flex-row gap-2 sm:items-end">
+    <div>
+      <label class="block text-xs uppercase tracking-wider text-muted mb-1">Status</label>
+      <select name="status"
+              class="tap bg-surface border border-subtle rounded px-3 text-base text-primary focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out"
+              hx-get="/insights?view=topics&partial=1"
+              hx-target="#topics-body" hx-swap="outerHTML"
+              hx-include="[name='q']"
+              hx-trigger="change">
+        <option value="all"      {% if status=='all' %}selected{% endif %}>all</option>
+        <option value="active"   {% if status=='active' %}selected{% endif %}>active (last hr)</option>
+        <option value="dormant"  {% if status=='dormant' %}selected{% endif %}>dormant (last 24h)</option>
+        <option value="archived" {% if status=='archived' %}selected{% endif %}>archived</option>
+      </select>
+    </div>
+    <div class="flex-1">
+      <label class="block text-xs uppercase tracking-wider text-muted mb-1">Search</label>
+      <input type="search" name="q" value="{{ q }}" placeholder="title or driver…"
+             class="w-full tap bg-surface border border-subtle rounded px-3 text-base text-primary placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent"
+             hx-get="/insights?view=topics&partial=1"
+             hx-trigger="keyup changed delay:200ms, search"
+             hx-target="#topics-body" hx-swap="outerHTML"
+             hx-include="[name='status']">
+    </div>
+  </div>
+  {% endif %}
+
+  {# ---------------- view body ---------------- #}
+  {% if view == 'engagement' %}
+    {% include "partials/insights_body.html" %}
+  {% else %}
+    {% include "partials/topics_body.html" %}
+  {% endif %}
 </div>
 {% endblock %}

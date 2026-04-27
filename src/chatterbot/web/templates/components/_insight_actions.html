@@ -1,0 +1,109 @@
+{# Per-card action row for Insights items.
+
+   Caller passes:
+     kind     — 'talking_point' | 'thread' | 'anniversary' | 'newcomer'
+                | 'regular' | 'lapsed'
+     item_key — unique within kind (thread_id for threads, hash-of-payload
+                for talking points, twitch_id for chatter-keyed cards)
+     state    — current InsightState.state (or None / '')
+     compact  — True to render a tighter version (used inside dense lists)
+
+   The streamer never types in chat — copy reflects that. "Addressed" =
+   "I spoke to this on stream." Snooze = "remind me to circle back."
+
+   Each button POSTs to /insights/state. After the response, HTMX fires
+   `insights-state-changed` on body so the surrounding section can fade
+   the card out. Auto-refresh picks up the change on the next tick.
+#}
+{% set _state = state or '' %}
+<div class="insight-actions flex items-center gap-1 text-[11px] text-muted"
+     onclick="event.stopPropagation()"
+     data-insight-kind="{{ kind }}"
+     data-insight-key="{{ item_key }}">
+  {% if _state in ('addressed', 'skipped') %}
+    {# Already handled — show undo only. #}
+    <span class="italic">{{ 'addressed on stream' if _state == 'addressed' else 'skipped' }}</span>
+    <form hx-post="/insights/state"
+          hx-swap="none"
+          class="inline-flex"
+          hx-on::after-request="this.closest('.insight-card-root')?.classList.remove('opacity-50','grayscale')">
+      <input type="hidden" name="kind" value="{{ kind }}">
+      <input type="hidden" name="item_key" value="{{ item_key }}">
+      <input type="hidden" name="action" value="open">
+      <button type="submit"
+              class="ml-1 px-1.5 py-0.5 rounded hover:bg-surface-raised hover:text-primary"
+              title="undo — restore to open">
+        <i class="fa-solid fa-rotate-left text-[10px]"></i> undo
+      </button>
+    </form>
+  {% elif _state == 'snoozed' %}
+    <i class="fa-solid fa-clock text-warning text-[10px]"></i>
+    <span>snoozed</span>
+    <form hx-post="/insights/state" hx-swap="none" class="inline-flex">
+      <input type="hidden" name="kind" value="{{ kind }}">
+      <input type="hidden" name="item_key" value="{{ item_key }}">
+      <input type="hidden" name="action" value="open">
+      <button type="submit"
+              class="ml-1 px-1.5 py-0.5 rounded hover:bg-surface-raised hover:text-primary"
+              title="cancel snooze">
+        <i class="fa-solid fa-rotate-left text-[10px]"></i>
+      </button>
+    </form>
+  {% else %}
+    {# Open card — full action row. #}
+    <form hx-post="/insights/state" hx-swap="none" class="inline-flex">
+      <input type="hidden" name="kind" value="{{ kind }}">
+      <input type="hidden" name="item_key" value="{{ item_key }}">
+      <input type="hidden" name="action" value="addressed">
+      <button type="submit"
+              class="px-1.5 py-0.5 rounded hover:bg-success/15 hover:text-success"
+              title="I spoke to this on stream">
+        <i class="fa-solid fa-check text-[10px]"></i> addressed
+      </button>
+    </form>
+    <span class="text-subtle">·</span>
+    <span class="inline-flex items-center gap-0.5"
+          x-data="{ open: false }">
+      <button type="button"
+              @click="open = !open"
+              class="px-1.5 py-0.5 rounded hover:bg-surface-raised hover:text-primary"
+              title="snooze — come back later">
+        <i class="fa-regular fa-clock text-[10px]"></i> snooze
+      </button>
+      <span x-show="open" x-cloak class="inline-flex gap-0.5 ml-1">
+        {% for label, val in [('10m','10m'),('30m','30m'),('1h','1h'),('24h','24h')] %}
+          <form hx-post="/insights/state" hx-swap="none" class="inline-flex">
+            <input type="hidden" name="kind" value="{{ kind }}">
+            <input type="hidden" name="item_key" value="{{ item_key }}">
+            <input type="hidden" name="action" value="snooze">
+            <input type="hidden" name="snooze" value="{{ val }}">
+            <button type="submit"
+                    class="px-1.5 py-0.5 rounded bg-surface-raised hover:bg-accent hover:text-white text-[10px]"
+                    title="snooze {{ label }}">{{ label }}</button>
+          </form>
+        {% endfor %}
+      </span>
+    </span>
+    <span class="text-subtle">·</span>
+    <form hx-post="/insights/state" hx-swap="none" class="inline-flex">
+      <input type="hidden" name="kind" value="{{ kind }}">
+      <input type="hidden" name="item_key" value="{{ item_key }}">
+      <input type="hidden" name="action" value="pin">
+      <button type="submit"
+              class="px-1.5 py-0.5 rounded hover:bg-accent/15 hover:text-accent {% if _state == 'pinned' %}text-accent{% endif %}"
+              title="{% if _state == 'pinned' %}pinned to top of section{% else %}pin to top{% endif %}">
+        <i class="fa-solid fa-thumbtack text-[10px]"></i>
+      </button>
+    </form>
+    <form hx-post="/insights/state" hx-swap="none" class="inline-flex">
+      <input type="hidden" name="kind" value="{{ kind }}">
+      <input type="hidden" name="item_key" value="{{ item_key }}">
+      <input type="hidden" name="action" value="skip">
+      <button type="submit"
+              class="px-1.5 py-0.5 rounded hover:bg-danger/15 hover:text-danger"
+              title="skip — won't show again">
+        <i class="fa-solid fa-eye-slash text-[10px]"></i>
+      </button>
+    </form>
+  {% endif %}
+</div>

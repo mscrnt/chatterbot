@@ -146,7 +146,14 @@
         {% set is_chatters = current_path == "/" or current_path.startswith("/users") %}
         {% include "components/_nav_link.html" with context %}
       </div>
-      {# Settings — icon-only, right-aligned in the utility cluster. #}
+      {# Live + Settings — icon-only, right-aligned in the utility cluster. #}
+      <a href="/live"
+         aria-label="Live"
+         title="Live"
+         class="tap inline-flex items-center justify-center px-3 rounded transition-all duration-150 ease-out
+                {% if current_path == '/live' %}bg-surface-raised text-primary{% else %}text-muted hover:text-primary hover:bg-surface-raised{% endif %}">
+        <i class="fa-solid fa-tower-broadcast"></i>
+      </a>
       <a href="/settings"
          aria-label="settings"
          title="Settings"
@@ -191,6 +198,17 @@
            title="{{ _fr }} reminder{{ '' if _fr == 1 else 's' }} fired — chatter spoke">
           <i class="fa-solid fa-bell text-[10px] animate-pulse"></i>
           {{ _fr }}
+        </a>
+      {% endif %}
+      {% set _ds = due_snoozes_count() %}
+      {% if _ds > 0 %}
+        <a href="/insights"
+           id="due-snoozes-pill"
+           data-count="{{ _ds }}"
+           class="hidden sm:inline-flex items-center gap-1 px-2 py-1 rounded-full border border-warning/40 bg-warning/10 text-warning text-xs hover:bg-warning/20 transition-all duration-150 ease-out"
+           title="{{ _ds }} snoozed item{{ '' if _ds == 1 else 's' }} now due — follow up">
+          <i class="fa-regular fa-clock text-[10px] animate-pulse"></i>
+          {{ _ds }} due
         </a>
       {% endif %}
       <button type="button"
@@ -345,7 +363,14 @@
           rows[idx].focus();
         },
         navTo(slug) {
-          const map = { c: '/', t: '/topics', e: '/events', l: '/live', s: '/settings' };
+          const map = {
+            c: '/',
+            i: '/insights',
+            t: '/insights?view=topics',
+            e: '/events',
+            l: '/live',
+            s: '/settings',
+          };
           if (map[slug]) window.location.href = map[slug];
         },
         onGlobalKey(e) {
@@ -372,6 +397,18 @@
           if (e.key === 'j') { this.moveRow(+1); e.preventDefault(); return; }
           if (e.key === 'k') { this.moveRow(-1); e.preventDefault(); return; }
 
+          // ←/→ navigate to previous/next chatter on the user-detail page,
+          // staying within the streamer's current sort+filter context.
+          if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+            const sel = e.key === 'ArrowLeft' ? '[data-nav-prev]' : '[data-nav-next]';
+            const link = document.querySelector(sel);
+            if (link && link.href) {
+              window.location.href = link.href;
+              e.preventDefault();
+              return;
+            }
+          }
+
           // g <letter> chord
           if (e.key === 'g' && !this.gPrefix) {
             this.gPrefix = true;
@@ -379,7 +416,7 @@
             this.gPrefixTimer = setTimeout(() => { this.gPrefix = false; }, 800);
             return;
           }
-          if (this.gPrefix && /^[ctels]$/.test(e.key)) {
+          if (this.gPrefix && /^[citels]$/.test(e.key)) {
             this.gPrefix = false;
             this.navTo(e.key);
             e.preventDefault();
@@ -413,5 +450,41 @@
   </script>
 
   {% block scripts %}{% endblock %}
+
+  {# ---------------- snoozed-insight notification opt-in ---------------- #}
+  <script>
+    (function () {
+      // Detect when the nav pill's due-snooze count goes UP from a prior
+      // value and fire a desktop notification (after the streamer opts in
+      // via the first notification request). No-op if the API is missing.
+      if (!('Notification' in window)) return;
+      let lastCount = parseInt(
+        sessionStorage.getItem('chatterbot.lastDueCount') || '0', 10
+      );
+      function check() {
+        const pill = document.getElementById('due-snoozes-pill');
+        const c = pill ? parseInt(pill.dataset.count || '0', 10) : 0;
+        if (c > lastCount && Notification.permission === 'granted') {
+          new Notification('Snoozed insight is due', {
+            body: c + ' follow-up' + (c === 1 ? '' : 's') + ' ready on the Insights page.',
+            tag: 'chatterbot-due',
+            silent: false,
+          });
+        }
+        // Auto-prompt once if the count just appeared and the streamer
+        // never decided. They can deny — we won't ask again.
+        if (c > 0 && Notification.permission === 'default') {
+          Notification.requestPermission();
+        }
+        lastCount = c;
+        sessionStorage.setItem('chatterbot.lastDueCount', String(c));
+      }
+      check();
+      // Re-check on every HTMX swap (nav pill is server-rendered each
+      // navigation, but we run our own poll for live state changes).
+      document.body.addEventListener('htmx:afterSwap', check);
+      setInterval(check, 30000);
+    })();
+  </script>
 </body>
 </html>

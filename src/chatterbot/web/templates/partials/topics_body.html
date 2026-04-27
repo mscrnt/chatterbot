@@ -1,4 +1,4 @@
-{% macro thread_card(t, hot=False, acked_at=None) -%}
+{% macro thread_card(t, hot=False, acked_at=None, states=None, velocity=None) -%}
 {% set tone = {
   'gaming':    'accent',
   'personal':  'success',
@@ -9,56 +9,79 @@
 }.get(t.category or 'other', 'neutral') %}
 {% set status_tone = {'active': 'success', 'dormant': 'warning', 'archived': 'neutral'}[t.status] %}
 {% set status_icon = {'active': 'fa-circle-dot', 'dormant': 'fa-moon', 'archived': 'fa-box-archive'}[t.status] %}
-<button type="button"
-        class="text-left w-full rounded-xl border bg-surface p-3 sm:p-4 shadow-sm transition-all duration-150 ease-out
-               {% if hot %}border-accent/50{% else %}border-subtle{% endif %}
-               hover:bg-surface-raised hover:border-accent/40"
-        hx-get="/modals/thread/{{ t.id }}"
-        hx-target="#modal-root"
-        hx-swap="innerHTML">
-  <header class="flex items-baseline justify-between gap-2 flex-wrap">
-    <h3 class="font-semibold text-primary text-sm sm:text-base">
-      {% with item_ts=t.last_ts, acked_at=acked_at %}{% include "components/_new_badge.html" %}{% endwith %}
-      {{ t.title }}
-    </h3>
-    <span class="text-[10px] text-muted">last {{ t.last_ts | short_ts }}</span>
-  </header>
+{% set _s = (states.get(t.id|string) if states else None) %}
+{% set _is_pinned = _s and _s.state == 'pinned' %}
+{% set _is_due    = _s and _s.state == 'snoozed' and _s.due_ts and _s.due_ts <= now_iso() %}
+{% set _is_addr   = _s and _s.state == 'addressed' %}
+{% set _arrow = velocity.get(t.id) if velocity else None %}
+<div class="insight-card-root rounded-xl border bg-surface p-3 sm:p-4 shadow-sm transition-all duration-150 ease-out
+            {% if _is_pinned %}border-accent ring-1 ring-accent/40
+            {% elif _is_due %}border-warning ring-1 ring-warning/40
+            {% elif _is_addr %}border-subtle opacity-50
+            {% elif hot %}border-accent/50
+            {% else %}border-subtle{% endif %}
+            hover:bg-surface-raised">
+  <button type="button"
+          class="text-left block w-full"
+          hx-get="/modals/thread/{{ t.id }}"
+          hx-target="#modal-root"
+          hx-swap="innerHTML">
+    <header class="flex items-baseline justify-between gap-2 flex-wrap">
+      <h3 class="font-semibold text-primary text-sm sm:text-base">
+        {% with item_ts=t.last_ts, acked_at=acked_at %}{% include "components/_new_badge.html" %}{% endwith %}
+        {% if _is_pinned %}<i class="fa-solid fa-thumbtack text-accent text-[10px] mr-1"></i>{% endif %}
+        {% if _is_due %}<i class="fa-solid fa-bell text-warning text-[10px] mr-1 animate-pulse"></i>{% endif %}
+        {{ t.title }}
+        {% if _arrow %}
+          {% set _vt = {'↑↑': 'text-danger', '↑': 'text-warning', '→': 'text-muted', '↓': 'text-muted'}[_arrow] %}
+          <span class="ml-1 {{ _vt }} text-xs"
+                title="message-rate trend over the last 5 min vs prior 5 min">{{ _arrow }}</span>
+        {% endif %}
+      </h3>
+      <span class="text-[10px] text-muted">last {{ t.last_ts | short_ts }}</span>
+    </header>
 
-  <div class="flex items-center gap-1 flex-wrap mt-1.5">
-    {% with label=t.status, tone=status_tone, icon=status_icon %}{% include "components/_pill.html" %}{% endwith %}
-    {% if t.category and t.category != 'other' %}
-      {% with label=t.category, tone=tone %}{% include "components/_pill.html" %}{% endwith %}
-    {% endif %}
-    {% if t.member_count > 1 %}
-      {% with label=('↻ ' ~ t.member_count ~ ' times'), tone='accent', icon='fa-rotate' %}
-        {% include "components/_pill.html" %}{% endwith %}
-    {% endif %}
-  </div>
-
-  {% if t.drivers %}
-  <p class="text-xs text-muted mt-2">
-    <i class="fa-solid fa-users text-[10px] mr-1"></i>
-    {{ t.drivers | join(', ') }}
-  </p>
-  {% endif %}
-
-  {# Phase-4 timeline strip: a dot per member snapshot, evenly spaced. #}
-  {% if t.member_count > 1 %}
-    <div class="flex items-center gap-1 mt-2 h-2">
-      {% for _ in range(t.member_count) %}
-        <span class="block w-1.5 h-1.5 rounded-full bg-accent/70"></span>
-      {% endfor %}
-      <span class="text-[10px] text-muted ml-2">
-        first {{ t.first_ts | short_ts }}
-      </span>
+    <div class="flex items-center gap-1 flex-wrap mt-1.5">
+      {% with label=t.status, tone=status_tone, icon=status_icon %}{% include "components/_pill.html" %}{% endwith %}
+      {% if t.category and t.category != 'other' %}
+        {% with label=t.category, tone=tone %}{% include "components/_pill.html" %}{% endwith %}
+      {% endif %}
+      {% if t.member_count > 1 %}
+        {% with label=('↻ ' ~ t.member_count ~ ' times'), tone='accent', icon='fa-rotate' %}
+          {% include "components/_pill.html" %}{% endwith %}
+      {% endif %}
     </div>
-  {% endif %}
-</button>
+
+    {% if t.drivers %}
+    <p class="text-xs text-muted mt-2">
+      <i class="fa-solid fa-users text-[10px] mr-1"></i>
+      {{ t.drivers | join(', ') }}
+    </p>
+    {% endif %}
+
+    {% if t.member_count > 1 %}
+      <div class="flex items-center gap-1 mt-2 h-2">
+        {% for _ in range(t.member_count) %}
+          <span class="block w-1.5 h-1.5 rounded-full bg-accent/70"></span>
+        {% endfor %}
+        <span class="text-[10px] text-muted ml-2">
+          first {{ t.first_ts | short_ts }}
+        </span>
+      </div>
+    {% endif %}
+  </button>
+  <div class="mt-2 pt-2 border-t border-subtle">
+    {% with kind='thread', item_key=t.id|string,
+            state=(_s.state if _s else None) %}
+      {% include "components/_insight_actions.html" %}
+    {% endwith %}
+  </div>
+</div>
 {%- endmacro %}
 
 <div id="topics-body" class="space-y-5"
-     hx-get="/topics?partial=1&status={{ status }}&q={{ q | urlencode }}"
-     hx-trigger="every 30s"
+     hx-get="/insights?view=topics&partial=1&status={{ status }}&q={{ q | urlencode }}"
+     hx-trigger="every 30s, insights-state-changed from:body"
      hx-swap="outerHTML">
 
   {# Latest snapshot pinned at the top — anchor for "right now" #}
@@ -130,7 +153,7 @@
       {% else %}
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         {% for t in active %}
-          {{ thread_card(t, hot=True, acked_at=acked_at) }}
+          {{ thread_card(t, hot=True, acked_at=acked_at, states=thread_states, velocity=thread_velocity) }}
         {% endfor %}
       </div>
       {% endif %}
@@ -149,7 +172,7 @@
       {% else %}
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         {% for t in dormant %}
-          {{ thread_card(t, acked_at=acked_at) }}
+          {{ thread_card(t, acked_at=acked_at, states=thread_states, velocity=thread_velocity) }}
         {% endfor %}
       </div>
       {% endif %}
@@ -168,7 +191,7 @@
       {% else %}
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         {% for t in archived %}
-          {{ thread_card(t, acked_at=acked_at) }}
+          {{ thread_card(t, acked_at=acked_at, states=thread_states, velocity=thread_velocity) }}
         {% endfor %}
       </div>
       {% endif %}
