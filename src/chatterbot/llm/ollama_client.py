@@ -47,11 +47,17 @@ class OllamaClient:
         system_prompt: str | None = None,
         format_schema: dict[str, Any] | None = None,
         model_override: str | None = None,
+        num_ctx: int | None = None,
     ) -> str:
         """Low-level generate. Returns raw response string.
 
         For structured output, prefer `generate_structured()` — it ensures the
         same schema is enforced at generation time and validated on receipt.
+
+        `num_ctx` overrides Ollama's per-call context window. Ollama defaults
+        to 2048 tokens which is fine for short prompts; bump for long bundles
+        (transcript windows, large summaries). Qwen 2.5 family supports up
+        to 131072 at the model level.
         """
         payload: dict[str, Any] = {
             "model": model_override or self.model,
@@ -64,6 +70,8 @@ class OllamaClient:
         if format_schema is not None:
             # Ollama 0.5+ accepts a JSON Schema here and constrains decoding.
             payload["format"] = format_schema
+        if num_ctx is not None:
+            payload["options"] = {"num_ctx": int(num_ctx)}
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(f"{self.base_url}/api/generate", json=payload)
@@ -77,6 +85,7 @@ class OllamaClient:
         response_model: type[T],
         system_prompt: str | None = None,
         model_override: str | None = None,
+        num_ctx: int | None = None,
     ) -> T:
         """Run a generation that returns a validated `response_model` instance.
 
@@ -91,6 +100,7 @@ class OllamaClient:
             system_prompt=system_prompt,
             format_schema=schema,
             model_override=model_override,
+            num_ctx=num_ctx,
         )
         return response_model.model_validate_json(raw)
 

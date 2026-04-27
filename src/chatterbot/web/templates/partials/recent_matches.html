@@ -1,0 +1,56 @@
+{# Feed of recent LLM-transcript matches. Each row is one moment-of-match
+   from `insight_state_history` (state='auto_pending'); the badge shows
+   the card's CURRENT state so you can see whether it's still pending,
+   already addressed, snoozed, or skipped. Persists past the auto-confirm
+   timeout so you can review what flipped while you weren't looking. #}
+{% set _state_classes = {
+    'auto_pending': ('bg-warning/15 text-warning border-warning/40', 'fa-microphone-lines'),
+    'addressed':    ('bg-success/15 text-success border-success/40', 'fa-circle-check'),
+    'snoozed':      ('bg-accent/15 text-accent border-accent/40', 'fa-bell-slash'),
+    'skipped':      ('bg-muted/15 text-muted border-subtle', 'fa-xmark'),
+    'pinned':       ('bg-accent/15 text-accent border-accent/40', 'fa-thumbtack'),
+} %}
+<section class="rounded-xl border border-accent/30 bg-accent/5 p-3">
+  <header class="flex items-baseline justify-between gap-2 mb-2">
+    <h3 class="text-sm font-semibold text-primary inline-flex items-center gap-2">
+      <i class="fa-solid fa-wand-magic-sparkles text-accent"></i>
+      Recent transcript matches
+    </h3>
+    <span class="text-[11px] text-muted">
+      {{ recent_matches | length }} in last hour · LLM-driven
+    </span>
+  </header>
+  <ul class="space-y-2 max-h-[280px] overflow-y-auto pr-1">
+    {% for m in recent_matches %}
+      {% set _bc = _state_classes.get(m.state, ('bg-surface text-muted border-subtle', 'fa-circle')) %}
+      <li class="rounded-lg border border-subtle bg-surface p-2 text-sm">
+        <div class="flex items-baseline gap-2 flex-wrap">
+          <span class="text-[10px] text-muted whitespace-nowrap">{{ m.ts | short_ts }}</span>
+          <span class="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded border {{ _bc[0] }}">
+            <i class="fa-solid {{ _bc[1] }} text-[9px]"></i>{{ m.state }}
+          </span>
+          <span class="text-[10px] text-muted">
+            {% if m.kind == 'thread' %}topic-thread{% else %}{{ m.kind | replace('_', ' ') }}{% endif %}
+          </span>
+          {% if m.href %}
+            <a href="{% if m.href.startswith('/modals/') %}#{% else %}{{ m.href }}{% endif %}"
+               class="text-primary font-medium hover:underline truncate"
+               {% if m.href.startswith('/modals/') %}
+                 hx-get="{{ m.href }}"
+                 hx-target="#modal-root"
+                 hx-swap="innerHTML"
+               {% endif %}>
+              {{ m.title }}
+            </a>
+          {% else %}
+            <span class="text-primary font-medium">{{ m.title }}</span>
+          {% endif %}
+        </div>
+        <p class="text-xs text-muted italic mt-1 leading-snug break-words">
+          <i class="fa-solid fa-quote-left text-[9px] mr-1 text-accent/60"></i>
+          {{ m.evidence }}
+        </p>
+      </li>
+    {% endfor %}
+  </ul>
+</section>

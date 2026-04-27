@@ -283,6 +283,25 @@ class TranscriptService:
                 matched_kind=best_kind, matched_item_key=best_key,
                 similarity=best_sim, embedding=qv,
             )
+            # When the batched LLM matcher is active, it owns auto-pending
+            # writes — per-utterance cosine still runs to populate
+            # transcript_chunks.matched_* (drives the strip icons + the
+            # chat→transcript reverse lookup) but we don't write
+            # auto_pending here. The LLM pass periodically reviews the
+            # window with full streamer-aware context and flips cards
+            # then. Two writers to the same insight_state would race.
+            llm_match_enabled = bool(getattr(
+                self.settings, "whisper_llm_match_enabled", True,
+            ))
+            if llm_match_enabled:
+                # Per-utterance cosine still ran (it annotated the chunk
+                # row + the strip icons), but the LLM batch is the
+                # auto-pending writer. Skip the per-utterance branches
+                # below — and don't log a line per crossed utterance,
+                # because at ~1 line/sec while talking it's pure noise.
+                # The per-pass summary line already tells you what
+                # mattered.
+                continue
             if crossed:
                 # Don't auto-flip to 'addressed' immediately — flip to
                 # 'auto_pending' so the streamer can confirm/reject in
@@ -491,21 +510,232 @@ class TranscriptService:
         target_text = self._card_embed_texts.get((best_kind, best_key))
         return best_kind, best_key, best_sim, target_text, qv
 
-    AUTO_CONFIRM_SECONDS = 60
+    LLM_MATCH_WATERMARK_KEY = "transcript_llm_watermark"
+    # When the bundled LLM matcher runs, give it 16k context — comfortably
+    # holds 30+ minutes of speech transcripts plus a healthy candidate list.
+    # Qwen 3 supports 256K natively; we just need enough headroom that we
+    # never silently truncate a long stream window.
+    LLM_MATCH_NUM_CTX = 16384
+    LLM_MATCH_FETCH_LIMIT = 400
+
+    LLM_MATCH_SYSTEM = """You are watching the live voice transcript of a Twitch streamer.
+
+The streamer is most likely:
+  - playing a game and reacting to gameplay
+  - reacting to media (videos, articles, news)
+  - thinking aloud / monologuing about whatever's on their mind
+
+Most utterances are NOT directed at chat. They're game callouts, swearing at a boss, narrating a video, or stream-of-consciousness. Your job is NOT to find loose thematic overlap with the listed cards — that produces false positives every few seconds.
+
+You are looking for the rare, clear cases where the streamer has actually engaged with one of the listed insight cards. Two patterns count:
+
+  1. The streamer addresses a chatter directly by name. Example utterances: "thanks aquanote1", "good point bon3sy3", "yeah you're right kid_dingo, that did happen". The chatter's name (or a clear phonetic spelling — Whisper transcribes phonetically and may insert spaces or substitute digits with words) must appear in the utterance for a chatter card to match.
+
+  2. The streamer has a substantive on-topic discussion that clearly aligns with one of the listed topic threads — multiple sentences engaging with that exact theme. A passing word that happens to share vocabulary is NOT a match.
+
+When in doubt, return NO match. Empty `matches` list is the expected, common output. Each `evidence` field must quote the exact utterance fragment that justifies the match (verbatim, ≤ 200 chars). `confidence` ∈ [0, 1] — only emit ≥ 0.6 for cases you're genuinely sure of."""
+
+    def _bundle_card_lines(self) -> tuple[list[str], dict[int, tuple[str, str]]]:
+        """Build the numbered candidate-cards block for the matcher prompt
+        and a `card_id -> (kind, item_key)` lookup so we can resolve the
+        LLM's chosen ids back to insight states.
+
+        Reuses the same `_card_embed_texts` / `_card_chatter_names` caches
+        the per-utterance matcher uses, so we don't double-fetch from the
+        repo. The cosine refresh runs every 60s already.
+        """
+        lines: list[str] = []
+        lookup: dict[int, tuple[str, str]] = {}
+        next_id = 1
+        # Talking-point cards first — they're per-chatter and get the
+        # name-based matching pattern.
+        for (kind, key), text in self._card_embed_texts.items():
+            if kind != "talking_point":
+                continue
+            names = self._card_chatter_names.get((kind, key)) or []
+            primary = names[0] if names else ""
+            tail = (
+                f" (also known as: {', '.join(names[1:])})"
+                if len(names) > 1 else ""
+            )
+            lines.append(
+                f"  TP-{next_id}  chatter='{primary}'{tail}  point: {text}"
+            )
+            lookup[next_id] = (kind, key)
+            next_id += 1
+        # Topic threads — broader-topic cards.
+        for (kind, key), text in self._card_embed_texts.items():
+            if kind != "thread":
+                continue
+            lines.append(f"  TP-{next_id}  topic-thread: {text}")
+            lookup[next_id] = (kind, key)
+            next_id += 1
+        return lines, lookup
+
+    async def _run_llm_match(self) -> int:
+        """One pass of the batched LLM matcher. Returns the number of
+        cards flipped to `auto_pending` (0 in the common case where the
+        streamer was just gaming / monologuing)."""
+        # Make sure the cosine target pool is fresh — we share its cache
+        # for the candidate-cards prompt block.
+        await self._refresh_card_embeds_if_stale()
+        if not self._card_embed_texts:
+            return 0
+
+        watermark_str = await asyncio.to_thread(
+            self.repo.get_app_setting, self.LLM_MATCH_WATERMARK_KEY,
+        )
+        try:
+            watermark = int(watermark_str) if watermark_str else 0
+        except ValueError:
+            watermark = 0
+
+        chunks = await asyncio.to_thread(
+            self.repo.list_transcripts_after_id,
+            watermark, limit=self.LLM_MATCH_FETCH_LIMIT,
+        )
+        min_chunks = int(getattr(self.settings, "whisper_llm_match_min_chunks", 3))
+        if len(chunks) < min_chunks:
+            return 0
+
+        card_lines, card_lookup = self._bundle_card_lines()
+        if not card_lines:
+            # Nothing to match against — still advance the watermark so we
+            # don't re-process this window when cards eventually appear.
+            await asyncio.to_thread(
+                self.repo.set_app_setting,
+                self.LLM_MATCH_WATERMARK_KEY, str(chunks[-1].id),
+            )
+            return 0
+
+        # Number utterances; keep the ids out of the LLM's response space
+        # (it returns card_id, not utterance index — we extract evidence
+        # quotes verbatim).
+        utterance_lines = [f"  - {c.text}" for c in chunks]
+        prompt = (
+            "CANDIDATE CARDS:\n"
+            + "\n".join(card_lines)
+            + "\n\nSTREAMER UTTERANCES (oldest first, "
+            + f"{len(chunks)} chunks over the last window):\n"
+            + "\n".join(utterance_lines)
+            + "\n\nReturn the cards (by card_id) that the streamer demonstrably "
+            "engaged with. Empty list if none — that's the expected common case. "
+            "For each match include a verbatim `evidence` quote from the utterances "
+            "above and a `confidence` in [0,1]."
+        )
+
+        try:
+            from .llm.schemas import TranscriptMatchResponse
+            response = await self.llm.generate_structured(
+                prompt=prompt,
+                system_prompt=self.LLM_MATCH_SYSTEM,
+                response_model=TranscriptMatchResponse,
+                num_ctx=self.LLM_MATCH_NUM_CTX,
+            )
+        except Exception:
+            logger.exception("transcript: llm match call failed")
+            return 0
+
+        confidence_floor = float(
+            getattr(self.settings, "whisper_llm_match_confidence", 0.65)
+        )
+        flipped = 0
+        for m in response.matches:
+            pair = card_lookup.get(m.card_id)
+            if pair is None:
+                logger.info(
+                    "transcript: llm-match dropped — bad card_id %s "
+                    "(evidence=%r conf=%.2f)",
+                    m.card_id, m.evidence[:80], m.confidence,
+                )
+                continue
+            if m.confidence < confidence_floor:
+                logger.info(
+                    "transcript: llm-match below floor — %s/%s conf=%.2f "
+                    "(floor=%.2f) evidence=%r",
+                    pair[0], pair[1], m.confidence, confidence_floor,
+                    m.evidence[:80],
+                )
+                continue
+            kind, key = pair
+            try:
+                await asyncio.to_thread(
+                    self.repo.set_insight_state,
+                    kind, key, "auto_pending",
+                    note=f"(auto) {m.evidence}",
+                )
+                self._pending_count += 1
+                # Same eviction trick as the per-utterance path — drop
+                # the card from the in-memory pool so it doesn't keep
+                # surfacing in the strip's near-miss icons.
+                self._card_embeds.pop((kind, key), None)
+                self._card_embed_texts.pop((kind, key), None)
+                flipped += 1
+                logger.info(
+                    "transcript: llm AUTO-PENDING %s/%s conf=%.2f "
+                    "evidence=%r",
+                    kind, key, m.confidence, m.evidence[:120],
+                )
+            except Exception:
+                logger.exception(
+                    "transcript: llm auto-pending write failed for %s/%s",
+                    kind, key,
+                )
+
+        # Advance the watermark unconditionally — if we re-processed the
+        # same window we'd get the same answer.
+        await asyncio.to_thread(
+            self.repo.set_app_setting,
+            self.LLM_MATCH_WATERMARK_KEY, str(chunks[-1].id),
+        )
+        logger.info(
+            "transcript: llm match pass — %d chunks (id %d → %d), "
+            "%d cards flipped, %d candidates",
+            len(chunks), chunks[0].id, chunks[-1].id, flipped, len(card_lines),
+        )
+        return flipped
+
+    async def llm_match_loop(self) -> None:
+        """Background task: run the batched LLM matcher every
+        `whisper_llm_match_interval_seconds`. No-op when whisper is
+        disabled or the LLM matcher itself is disabled in settings."""
+        # Small startup delay so the dashboard finishes booting and we
+        # don't compete with the talking-points cache's first refresh.
+        await asyncio.sleep(20)
+        while True:
+            try:
+                interval = max(15, int(getattr(
+                    self.settings, "whisper_llm_match_interval_seconds", 90,
+                )))
+                await asyncio.sleep(interval)
+                if not self.enabled:
+                    continue
+                if not bool(getattr(self.settings, "whisper_llm_match_enabled", True)):
+                    continue
+                await self._run_llm_match()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("transcript: llm_match_loop iteration failed")
+
     AUTO_CONFIRM_INTERVAL = 15
 
     async def auto_confirm_loop(self) -> None:
         """Promote auto_pending insight states to 'addressed' after
-        AUTO_CONFIRM_SECONDS without explicit confirm/reject. Runs
-        forever; no-op when whisper is disabled."""
+        `whisper_auto_confirm_seconds` without explicit confirm/reject.
+        Runs forever; no-op when whisper is disabled."""
         while True:
             try:
                 await asyncio.sleep(self.AUTO_CONFIRM_INTERVAL)
                 if not self.enabled:
                     continue
+                window = max(
+                    self.AUTO_CONFIRM_INTERVAL,
+                    int(getattr(self.settings, "whisper_auto_confirm_seconds", 300)),
+                )
                 pendings = await asyncio.to_thread(
                     self.repo.list_pending_auto_addresses,
-                    older_than_seconds=self.AUTO_CONFIRM_SECONDS,
+                    older_than_seconds=window,
                 )
                 for p in pendings:
                     await asyncio.to_thread(

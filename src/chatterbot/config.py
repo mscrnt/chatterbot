@@ -49,6 +49,11 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "whisper_match_threshold",
     "whisper_min_silence_ms",
     "whisper_unnamed_match_threshold",
+    "whisper_llm_match_enabled",
+    "whisper_llm_match_interval_seconds",
+    "whisper_llm_match_min_chunks",
+    "whisper_llm_match_confidence",
+    "whisper_auto_confirm_seconds",
 )
 
 # Subset that should be rendered as password inputs. Blank submissions for
@@ -161,6 +166,31 @@ class Settings(BaseSettings):
     # to require name mention always; set equal to whisper_match_threshold
     # to restore old uniform behavior.
     whisper_unnamed_match_threshold: float = 0.80
+    # Batched LLM matcher. Aggregates whisper transcripts over a window
+    # and asks the LLM "did the streamer actually engage with any of
+    # these cards?" using a streamer-aware prompt that knows most
+    # utterances are game reactions / thinking aloud, not chat-directed.
+    # When enabled, this is the *primary* auto-pending mechanism;
+    # per-utterance cosine still runs for the live transcript strip
+    # icons + chat-↔-transcript reverse lookup but doesn't write
+    # auto_pending itself.
+    whisper_llm_match_enabled: bool = True
+    # Window between LLM passes (seconds). Each pass processes every
+    # transcript chunk added since the last pass — set higher to save
+    # Ollama throughput, lower for tighter feedback.
+    whisper_llm_match_interval_seconds: int = 90
+    # Minimum chunks accumulated before a pass runs. Avoids wasting LLM
+    # calls on tiny windows (one stray utterance every 90s).
+    whisper_llm_match_min_chunks: int = 3
+    # Confidence floor for auto-pending. The LLM emits a 0..1 confidence
+    # per match; below this we log but don't write auto_pending.
+    whisper_llm_match_confidence: float = 0.65
+    # Auto-pending cards self-promote to 'addressed' after this many
+    # seconds without explicit confirm/reject. The original 60 s was too
+    # tight — by the time you opened the dashboard the card was already
+    # gone. 300 s (5 min) is the new default; raise if you want more
+    # review time, lower if you want auto-pendings to disappear faster.
+    whisper_auto_confirm_seconds: int = 300
 
     # Moderation mode — opt-in. When enabled, the bot batches recent
     # messages through a strict-rubric LLM classifier and persists
@@ -201,11 +231,28 @@ def _coerce(key: str, value: str) -> Any:
             return float(value)
         except (TypeError, ValueError):
             return 0.80
+    if key == "whisper_llm_match_confidence":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.65
+    if key in (
+        "whisper_llm_match_interval_seconds", "whisper_llm_match_min_chunks",
+        "whisper_auto_confirm_seconds",
+    ):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return {
+                "whisper_llm_match_interval_seconds": 90,
+                "whisper_llm_match_min_chunks": 3,
+                "whisper_auto_confirm_seconds": 300,
+            }[key]
     if key in (
         "streamelements_enabled", "mod_mode_enabled",
         "obs_enabled", "live_widget_enabled",
         "youtube_enabled", "discord_enabled",
-        "whisper_enabled",
+        "whisper_enabled", "whisper_llm_match_enabled",
     ):
         return value.strip().lower() in ("true", "1", "yes", "on")
     if key == "obs_port":

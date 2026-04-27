@@ -225,6 +225,18 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 name="transcript_auto_confirm",
             )
         )
+        # Batched LLM transcript matcher. Periodically reviews the window
+        # of utterances since the last watermark and flips cards the
+        # streamer demonstrably engaged with. Streamer-aware prompt
+        # (knows most utterances are game reactions) keeps false
+        # positives down. No-op when whisper or the matcher is disabled
+        # in settings.
+        _bg_tasks.add(
+            asyncio.create_task(
+                transcript_service.llm_match_loop(),
+                name="transcript_llm_match",
+            )
+        )
         try:
             yield
         finally:
@@ -616,6 +628,11 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "whisper_buffer_seconds", "whisper_match_threshold",
                 "whisper_unnamed_match_threshold",
                 "whisper_min_silence_ms",
+                "whisper_llm_match_enabled",
+                "whisper_llm_match_interval_seconds",
+                "whisper_llm_match_min_chunks",
+                "whisper_llm_match_confidence",
+                "whisper_auto_confirm_seconds",
             ),
         ),
     )
@@ -1369,6 +1386,13 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             # Live transcript strip — what whisper just heard.
             "transcript_chunks": repo.list_transcript_chunks(limit=15),
             "transcript_status": transcript_service.status(),
+            # Recent LLM-transcript matches — feed of cards the matcher
+            # has flipped to auto_pending in the last hour, regardless of
+            # current state. Auto_pendings auto-confirm (default 5 min)
+            # so without this surface they vanish before you notice.
+            "recent_matches": repo.list_recent_transcript_matches(
+                limit=15, window_minutes=60,
+            ),
         }
 
     def _build_topics_ctx(status: str, q: str) -> dict:

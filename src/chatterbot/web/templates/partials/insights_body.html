@@ -14,6 +14,11 @@
     {% endwith %}
   {% endif %}
 
+  {# ---------------- Recent LLM transcript matches ---------------- #}
+  {% if recent_matches %}
+    {% include "partials/recent_matches.html" %}
+  {% endif %}
+
   {# ---------------- Stream goals panel ---------------- #}
   {% if goals_state %}
     {% with goals=goals_state %}{% include "partials/goals_panel.html" %}{% endwith %}

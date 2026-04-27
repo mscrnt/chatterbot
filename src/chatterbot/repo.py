@@ -352,25 +352,56 @@ class ChatterRepo:
         self.db_path = db_path
         self.embed_dim = embed_dim
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.enable_load_extension(True)
-        sqlite_vec.load(self._conn)
-        self._conn.enable_load_extension(False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
+        # Thread-local connections so each `asyncio.to_thread` worker (and
+        # the bot, summarizer, transcript service) get their own SQLite
+        # handle. The previous single-connection-with-Lock design serialised
+        # ALL queries — readers blocked on writers, even though WAL would
+        # allow them to run concurrently — and made /insights take 10-20 s
+        # under load. Now the lock is gone; SQLite's WAL-level concurrency
+        # does the right thing.
+        self._tl = threading.local()
+        # Initialise the schema on a primary connection. Subsequent
+        # connections (lazy-created per thread) reuse the existing tables.
+        self._init_conn()  # populates self._tl.conn for *this* thread
         self._init_schema()
+
+    def _init_conn(self) -> sqlite3.Connection:
+        """Create + configure a SQLite connection for the current thread.
+        Loaded once per thread; subsequent _cursor() calls reuse it."""
+        conn = sqlite3.connect(self.db_path, check_same_thread=True)
+        conn.row_factory = sqlite3.Row
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        # Wait up to 5 s before raising SQLITE_BUSY when another writer
+        # holds the lock. Hot streams have continuous writes (chat +
+        # transcripts + insight states); without this, dashboard reads
+        # would occasionally fail rather than queue briefly.
+        conn.execute("PRAGMA busy_timeout=5000")
+        # Reduced fsync — WAL still durable across crashes; this just
+        # avoids fsync on every COMMIT, which is costly on bind-mounted
+        # volumes.
+        conn.execute("PRAGMA synchronous=NORMAL")
+        self._tl.conn = conn
+        return conn
+
+    def _get_conn(self) -> sqlite3.Connection:
+        conn = getattr(self._tl, "conn", None)
+        if conn is None:
+            conn = self._init_conn()
+        return conn
 
     @contextmanager
     def _cursor(self):
-        with self._lock:
-            cur = self._conn.cursor()
-            try:
-                yield cur
-                self._conn.commit()
-            finally:
-                cur.close()
+        conn = self._get_conn()
+        cur = conn.cursor()
+        try:
+            yield cur
+            conn.commit()
+        finally:
+            cur.close()
 
     def _init_schema(self) -> None:
         with self._cursor() as cur:
@@ -1683,6 +1714,102 @@ class ChatterRepo:
                 for r in cur.fetchall()
             }
 
+    def list_recent_transcript_matches(
+        self, *, limit: int = 20, window_minutes: int = 60,
+    ) -> list[dict]:
+        """Recent LLM-transcript matches for the Insights "Recent matches"
+        panel. Reads `insight_state_history` for state='auto_pending' rows
+        within the window — each is one moment-of-match — then joins the
+        current state from `insight_states` so the row badge can show
+        whether the card is still pending or has since been addressed /
+        skipped / etc.
+
+        Returns dicts with: ts, kind, item_key, evidence, title, href,
+        state. `evidence` is the note with the leading "(auto) " stripped.
+        Title + href resolution differs by kind:
+
+          - thread       → topic_threads.title, /modals/thread/{id}
+          - talking_point → users.name (parsed from item_key prefix),
+                            /users/{user_id}
+        """
+        out: list[dict] = []
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT h.ts, h.kind, h.item_key, h.note,
+                       s.state AS current_state
+                FROM insight_state_history h
+                LEFT JOIN insight_states s
+                  ON s.kind = h.kind AND s.item_key = h.item_key
+                WHERE h.state = 'auto_pending'
+                  AND h.ts >= datetime('now', ?)
+                  AND h.note IS NOT NULL
+                ORDER BY h.ts DESC
+                LIMIT ?
+                """,
+                (f"-{int(window_minutes)} minutes", int(limit)),
+            )
+            rows = cur.fetchall()
+            # Pre-resolve the threads + users we need so we don't run
+            # a sub-query per row.
+            thread_ids: set[int] = set()
+            user_ids: set[str] = set()
+            for r in rows:
+                if r["kind"] == "thread":
+                    try:
+                        thread_ids.add(int(r["item_key"]))
+                    except ValueError:
+                        pass
+                elif r["kind"] == "talking_point":
+                    uid = (r["item_key"] or "").split(":", 1)[0]
+                    if uid:
+                        user_ids.add(uid)
+            thread_titles: dict[int, str] = {}
+            if thread_ids:
+                placeholders = ",".join("?" for _ in thread_ids)
+                cur.execute(
+                    f"SELECT id, title FROM topic_threads WHERE id IN ({placeholders})",
+                    list(thread_ids),
+                )
+                thread_titles = {int(r["id"]): r["title"] for r in cur.fetchall()}
+            user_names: dict[str, str] = {}
+            if user_ids:
+                placeholders = ",".join("?" for _ in user_ids)
+                cur.execute(
+                    f"SELECT twitch_id, name FROM users WHERE twitch_id IN ({placeholders})",
+                    list(user_ids),
+                )
+                user_names = {r["twitch_id"]: r["name"] for r in cur.fetchall()}
+            for r in rows:
+                note = r["note"] or ""
+                evidence = note[7:].strip() if note.startswith("(auto) ") else note.strip()
+                title: str
+                href: str | None
+                if r["kind"] == "thread":
+                    try:
+                        tid = int(r["item_key"])
+                    except ValueError:
+                        tid = -1
+                    title = thread_titles.get(tid, f"thread #{r['item_key']}")
+                    href = f"/modals/thread/{tid}" if tid >= 0 else None
+                elif r["kind"] == "talking_point":
+                    uid = (r["item_key"] or "").split(":", 1)[0]
+                    title = user_names.get(uid, uid or "(unknown chatter)")
+                    href = f"/users/{uid}" if uid else None
+                else:
+                    title = f"{r['kind']} card"
+                    href = None
+                out.append({
+                    "ts": r["ts"],
+                    "kind": r["kind"],
+                    "item_key": r["item_key"],
+                    "evidence": evidence,
+                    "title": title,
+                    "href": href,
+                    "state": r["current_state"] or "auto_pending",
+                })
+        return out
+
     def count_due_snoozes(self) -> int:
         """Snoozed cards whose due_ts has passed — drives the nav pill so
         the streamer sees pending follow-ups at a glance."""
@@ -1867,6 +1994,34 @@ class ChatterRepo:
         )
         return chunk, cosine_sim
 
+    def list_transcripts_after_id(
+        self, after_id: int, *, limit: int = 200,
+    ) -> list[TranscriptChunk]:
+        """Chunks with id > after_id, oldest first. Drives the batched
+        LLM matching loop, which advances a watermark via app_settings
+        each time it processes a window."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, ts, duration_ms, text,
+                       matched_kind, matched_item_key, similarity
+                FROM transcript_chunks WHERE id > ?
+                ORDER BY id ASC LIMIT ?
+                """,
+                (int(after_id), int(limit)),
+            )
+            return [
+                TranscriptChunk(
+                    id=int(r["id"]), ts=r["ts"],
+                    duration_ms=int(r["duration_ms"] or 0),
+                    text=r["text"],
+                    matched_kind=r["matched_kind"],
+                    matched_item_key=r["matched_item_key"],
+                    similarity=float(r["similarity"]) if r["similarity"] is not None else None,
+                )
+                for r in cur.fetchall()
+            ]
+
     def list_transcript_chunks(self, *, limit: int = 30) -> list[TranscriptChunk]:
         """Recent utterances, newest first. Drives the live transcript
         strip on Insights."""
@@ -1985,30 +2140,41 @@ class ChatterRepo:
         """One row per minute over the last N minutes (oldest first), with
         the count of non-emote messages in that minute. Drives the
         sparkline at the top of /insights — instant 'is the room alive?'
-        signal."""
+        signal.
+
+        Single index range scan: reads only messages within the window,
+        groups by minute in SQL, then densifies in Python so the chart's
+        x-axis stays continuous. The earlier RECURSIVE-CTE-with-correlated-
+        subqueries approach was running 60 separate scans per call (~10 s
+        on this DB), which made /insights feel broken.
+        """
         with self._cursor() as cur:
             cur.execute(
                 """
-                WITH RECURSIVE minutes(slot) AS (
-                    SELECT strftime('%Y-%m-%dT%H:%M:00', datetime('now', ?))
-                    UNION ALL
-                    SELECT strftime('%Y-%m-%dT%H:%M:00', datetime(slot, '+1 minute'))
-                    FROM minutes
-                    WHERE slot < strftime('%Y-%m-%dT%H:%M:00', datetime('now'))
-                )
-                SELECT m.slot,
-                       COALESCE((
-                         SELECT COUNT(*) FROM messages
-                         WHERE is_emote_only = 0
-                           AND ts >= m.slot
-                           AND ts <  strftime('%Y-%m-%dT%H:%M:00', datetime(m.slot, '+1 minute'))
-                       ), 0) AS c
-                FROM minutes m
-                ORDER BY m.slot ASC
+                SELECT strftime('%Y-%m-%dT%H:%M:00', ts) AS slot, COUNT(*) AS c
+                FROM messages
+                WHERE is_emote_only = 0
+                  AND ts >= datetime('now', ?)
+                GROUP BY slot
                 """,
                 (f"-{int(minutes)} minutes",),
             )
-            return [(r["slot"], int(r["c"])) for r in cur.fetchall()]
+            counts = {r["slot"]: int(r["c"]) for r in cur.fetchall()}
+            # Anchor the densification on the same `now` SQLite saw so we
+            # don't drift off-minute due to wall-clock skew.
+            now_iso = cur.execute(
+                "SELECT strftime('%Y-%m-%dT%H:%M:00', datetime('now'))"
+            ).fetchone()[0]
+        # Build the contiguous 60-slot list ourselves. Cheaper and clearer
+        # than a RECURSIVE CTE.
+        from datetime import datetime as _dt, timedelta as _td
+        end = _dt.fromisoformat(now_iso)
+        out: list[tuple[str, int]] = []
+        for i in range(int(minutes), -1, -1):
+            slot_dt = end - _td(minutes=i)
+            slot = slot_dt.strftime("%Y-%m-%dT%H:%M:00")
+            out.append((slot, counts.get(slot, 0)))
+        return out
 
     # ============================ Direct mentions =========================
 

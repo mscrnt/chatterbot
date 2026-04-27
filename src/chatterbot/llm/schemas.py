@@ -182,3 +182,36 @@ class TalkingPointsResponse(BaseModel):
     returns one short conversation-hook per chatter for the streamer to use."""
 
     points: list[TalkingPoint] = Field(default_factory=list, max_length=20)
+
+
+# ---- batched whisper transcript matching ----
+
+EvidenceText = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=400, strip_whitespace=True),
+]
+
+
+class TranscriptMatch(BaseModel):
+    """One matched insight card from the batched transcript-LLM matcher.
+
+    `card_id` references the integer key we numbered the candidate cards
+    with in the prompt (talking_points and threads share one numbering
+    space, prefixed in the prompt as TP- and T-). `evidence` is the
+    streamer-spoken phrase that justifies the match — surfaced in the
+    Insight card's auto-pending note so the streamer can verify before
+    confirming."""
+
+    card_id: int
+    evidence: EvidenceText
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class TranscriptMatchResponse(BaseModel):
+    """Reply for `transcript.TranscriptService._run_llm_match`. The model
+    reads a window of streamer utterances and a list of open insight
+    cards, and returns ONLY the cards the streamer demonstrably engaged
+    with. Empty list is the expected, common case (most utterances are
+    game commentary or thinking aloud, not chat-directed)."""
+
+    matches: list[TranscriptMatch] = Field(default_factory=list, max_length=10)
