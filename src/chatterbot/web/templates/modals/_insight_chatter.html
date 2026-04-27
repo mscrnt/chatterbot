@@ -1,0 +1,106 @@
+{% set modal_title = display.title ~ ' · ' ~ user.name %}
+{% set modal_icon = display.icon %}
+{% set modal_tone = 'accent' %}
+{% set modal_size = 'lg' %}
+{% extends "components/_modal.html" %}
+{% block modal_body %}
+<div class="space-y-4 text-sm">
+  {# 1. Kind-specific framing — talking point text, anniversary milestone,
+       newcomer first-seen, regular window, lapsed last-seen, etc.
+       Hidden if the caller didn't pass any meta. #}
+  {% if meta %}
+  <section class="rounded-lg border border-accent/40 bg-accent/5 p-3">
+    <div class="flex items-baseline gap-2 mb-1">
+      <span class="text-[11px] uppercase tracking-wider text-muted">{{ display.meta_label }}</span>
+      <a href="/users/{{ user.twitch_id }}"
+         class="ml-auto text-[11px] text-accent hover:underline inline-flex items-center gap-1">
+        <i class="fa-solid fa-up-right-from-square text-[10px]"></i> open profile
+      </a>
+    </div>
+    <p class="text-primary leading-snug">{{ meta }}</p>
+  </section>
+  {% else %}
+  <div class="flex items-baseline gap-2">
+    <span class="text-[11px] uppercase tracking-wider text-muted">{{ display.title }}</span>
+    <a href="/users/{{ user.twitch_id }}"
+       class="ml-auto text-[11px] text-accent hover:underline inline-flex items-center gap-1">
+      <i class="fa-solid fa-up-right-from-square text-[10px]"></i> open profile
+    </a>
+  </div>
+  {% endif %}
+
+  {# 2. Recent transcript with channel context, focal lines highlighted #}
+  <section>
+    <div class="flex items-baseline justify-between gap-2 mb-1">
+      <p class="text-[11px] uppercase tracking-wider text-muted">recent transcript</p>
+      <span class="text-[10px] text-muted">{{ user.name }}'s lines highlighted</span>
+    </div>
+    {% if not rows %}
+      <p class="text-muted italic text-xs">No recent messages.</p>
+    {% else %}
+    <ul class="divide-y divide-subtle rounded-xl border border-subtle bg-surface max-h-72 overflow-y-auto">
+      {% for m in rows %}
+        {% set _focal = m.id in focal_ids %}
+        <li class="px-3 py-2 text-sm flex items-baseline gap-2
+                   {% if _focal %}bg-accent/10 border-l-2 border-accent{% endif %}">
+          <span class="text-[11px] text-muted whitespace-nowrap shrink-0">{{ m.ts | short_ts }}</span>
+          {% if _focal %}
+            <span class="text-accent font-semibold shrink-0">{{ m.name }}</span>
+          {% else %}
+            <span class="text-muted shrink-0">{{ m.name }}</span>
+          {% endif %}
+          <span class="break-words {% if _focal %}text-primary{% else %}text-muted{% endif %}">
+            {{ m.content }}
+          </span>
+        </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </section>
+
+  {# 3. LLM analysis — streamed on demand, kind-specific prompt #}
+  <section class="border-t border-subtle pt-3">
+    <button type="button" id="insight-explain-btn"
+            class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-accent hover:bg-accent-600 text-white font-medium text-sm transition-all duration-150 ease-out">
+      <i class="fa-solid fa-robot"></i> Analyze + suggest an angle
+    </button>
+    <p id="insight-explain-status" class="text-xs text-muted mt-2 hidden"></p>
+    <div id="insight-explain-answer"
+         class="whitespace-pre-wrap text-primary leading-relaxed text-sm mt-2"></div>
+  </section>
+</div>
+
+<script>
+  (function () {
+    const btn    = document.getElementById('insight-explain-btn');
+    const status = document.getElementById('insight-explain-status');
+    const answer = document.getElementById('insight-explain-answer');
+    let es = null;
+    btn.addEventListener('click', function () {
+      if (es) es.close();
+      answer.textContent = '';
+      status.textContent = 'thinking…';
+      status.classList.remove('hidden');
+      btn.disabled = true;
+      const url = `/insights/insight/{{ kind }}/{{ user.twitch_id }}/explain?meta=${encodeURIComponent({{ meta | tojson }})}`;
+      es = new EventSource(url);
+      es.addEventListener('chunk', e => {
+        answer.textContent += e.data.replace(/\\n/g, '\n');
+      });
+      es.addEventListener('done', () => {
+        status.classList.add('hidden');
+        btn.disabled = false;
+        es.close();
+      });
+      es.addEventListener('error', e => {
+        if (e.data) answer.textContent += `\n[error: ${e.data}]`;
+      });
+      es.onerror = () => {
+        status.textContent = 'connection lost';
+        btn.disabled = false;
+        if (es) es.close();
+      };
+    });
+  })();
+</script>
+{% endblock %}

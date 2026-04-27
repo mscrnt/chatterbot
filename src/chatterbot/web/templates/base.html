@@ -253,6 +253,23 @@
   {# ---------------- modal root (HTMX target) ---------------- #}
   <div id="modal-root"></div>
 
+  {# ---------------- back-to-top button ----------------
+     Appears once you've scrolled past 400px on any page. Tucked into
+     the bottom-left on sm+ where the live widget + toasts dominate the
+     bottom-right; on mobile, sits above the toast region. #}
+  <button type="button"
+          x-data="{ shown: false, onScroll() { this.shown = window.scrollY > 400 } }"
+          x-init="onScroll(); window.addEventListener('scroll', onScroll, { passive: true })"
+          x-show="shown"
+          x-cloak
+          x-transition.opacity.duration.150ms
+          @click="window.scrollTo({ top: 0, behavior: 'smooth' })"
+          aria-label="back to top"
+          title="Back to top"
+          class="fixed bottom-20 left-3 sm:bottom-3 z-40 w-11 h-11 rounded-full bg-accent hover:bg-accent-600 text-white shadow-lg flex items-center justify-center transition-all duration-150 ease-out">
+    <i class="fa-solid fa-arrow-up"></i>
+  </button>
+
   {# ---------------- toast region (Alpine queue, HX-Trigger driven) ---------------- #}
   <div class="fixed bottom-3 left-3 sm:bottom-3 sm:right-3 sm:left-auto z-50 flex flex-col gap-2 pointer-events-none w-[min(360px,calc(100vw-1.5rem))]"
        x-data="toastQueue()"

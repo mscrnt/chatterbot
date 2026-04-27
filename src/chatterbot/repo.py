@@ -3130,6 +3130,38 @@ class ChatterRepo:
                 for r in cur.fetchall()
             ]
 
+    def recent_user_messages_with_context(
+        self,
+        user_id: str,
+        *,
+        user_limit: int = 10,
+        ctx_before: int = 2,
+        ctx_after: int = 2,
+    ) -> tuple[list[Message], set[int]]:
+        """Pull the user's most recent N messages plus surrounding chat
+        context for each. Returns `(rows, focal_id_set)` where rows are
+        oldest-first deduped across all sources, and focal_id_set marks
+        which rows are the user's own (vs context lines from others).
+
+        Used by the talking-point modal to show what the chatter is
+        saying right now in the actual flow of chat."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT id FROM messages
+                WHERE user_id = ? AND is_emote_only = 0
+                ORDER BY id DESC LIMIT ?
+                """,
+                (user_id, int(user_limit)),
+            )
+            focal_ids = [int(r["id"]) for r in cur.fetchall()]
+        if not focal_ids:
+            return [], set()
+        rows = self.channel_context_around_ids(
+            focal_ids, before=ctx_before, after=ctx_after
+        )
+        return rows, set(focal_ids)
+
     def channel_context_around_ids(
         self,
         message_ids: list[int],

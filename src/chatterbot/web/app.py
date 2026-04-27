@@ -1111,6 +1111,71 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         tpl = "partials/insights_body.html" if partial else "insights.html"
         return TEMPLATES.TemplateResponse(request, tpl, ctx)
 
+    @app.get("/modals/insight/{kind}/{twitch_id}", response_class=HTMLResponse)
+    async def modal_insight(
+        request: Request,
+        kind: str,
+        twitch_id: str,
+        meta: str = Query("", max_length=2000),
+    ):
+        from .insight_rag import KIND_DISPLAY, VALID_KINDS
+
+        if kind not in VALID_KINDS:
+            raise HTTPException(404, f"unknown insight kind: {kind}")
+        user = repo.get_user(twitch_id)
+        if not user:
+            raise HTTPException(404, "user not found")
+        rows, focal_ids = repo.recent_user_messages_with_context(twitch_id)
+        return TEMPLATES.TemplateResponse(
+            request,
+            "modals/_insight_chatter.html",
+            {
+                "kind": kind,
+                "display": KIND_DISPLAY[kind],
+                "user": user,
+                "meta": meta,
+                "rows": rows,
+                "focal_ids": focal_ids,
+            },
+        )
+
+    @app.get("/insights/insight/{kind}/{twitch_id}/explain")
+    async def insight_explain(
+        kind: str,
+        twitch_id: str,
+        meta: str = Query("", max_length=2000),
+    ):
+        from .insight_rag import explain_insight, VALID_KINDS
+
+        if kind not in VALID_KINDS:
+            raise HTTPException(404, f"unknown insight kind: {kind}")
+
+        async def stream():
+            try:
+                ctx = await explain_insight(repo, llm, kind, twitch_id, meta)
+            except Exception:
+                logger.exception("insight explain setup failed")
+                yield _sse("error", "internal error during retrieval")
+                yield _sse("done", "")
+                return
+            if ctx is None:
+                yield _sse("error", "user not found")
+                yield _sse("done", "")
+                return
+            try:
+                async for chunk in ctx.stream:
+                    yield _sse("chunk", chunk)
+            except Exception:
+                logger.exception("insight explain stream failed")
+                yield _sse("error", "stream interrupted")
+            yield _sse("done", "")
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     @app.post("/insights/mark-read", response_class=HTMLResponse)
     async def insights_mark_read(request: Request):
         repo.set_surface_ack("insights")

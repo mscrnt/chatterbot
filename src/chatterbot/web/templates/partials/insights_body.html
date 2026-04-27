@@ -50,14 +50,19 @@
     {% else %}
       <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
         {% for tp in talking_points %}
-          <a href="/users/{{ tp.user_id }}"
-             class="block rounded-xl border border-subtle bg-surface p-3 hover:bg-surface-raised transition-all duration-150 ease-out">
+          <button type="button"
+                  class="text-left block w-full rounded-xl border border-subtle bg-surface p-3 hover:bg-surface-raised hover:border-accent/40 transition-all duration-150 ease-out"
+                  hx-get="/modals/insight/talking_point/{{ tp.user_id }}?meta={{ tp.point | urlencode }}"
+                  hx-target="#modal-root"
+                  hx-swap="innerHTML"
+                  title="Open with chat context + LLM analysis">
             <div class="flex items-center gap-2 mb-1">
               {% with name=tp.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
               <span class="text-accent font-medium">{{ tp.name }}</span>
+              <i class="fa-solid fa-chevron-right text-muted text-xs ml-auto"></i>
             </div>
             <p class="text-sm text-primary leading-snug">{{ tp.point }}</p>
-          </a>
+          </button>
         {% endfor %}
       </div>
     {% endif %}
@@ -74,8 +79,12 @@
     </header>
     <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
       {% for u, milestone in anniversaries %}
-        <a href="/users/{{ u.twitch_id }}"
-           class="flex items-center gap-3 rounded-xl border border-accent/40 bg-accent/5 p-3 hover:bg-accent/10 transition-all duration-150 ease-out">
+        <button type="button"
+                class="text-left flex items-center gap-3 rounded-xl border border-accent/40 bg-accent/5 p-3 hover:bg-accent/10 transition-all duration-150 ease-out w-full"
+                hx-get="/modals/insight/anniversary/{{ u.twitch_id }}?meta={{ milestone | urlencode }}"
+                hx-target="#modal-root"
+                hx-swap="innerHTML"
+                title="Open with chat context + LLM analysis">
           {% with name=u.name, size='md' %}{% include "components/_avatar.html" %}{% endwith %}
           <div class="min-w-0 flex-1">
             <div class="flex items-center gap-2">
@@ -88,7 +97,8 @@
             </div>
             <p class="text-[11px] text-muted">first seen {{ u.first_seen | short_ts }}</p>
           </div>
-        </a>
+          <i class="fa-solid fa-chevron-right text-muted text-xs"></i>
+        </button>
       {% endfor %}
     </div>
   </section>
@@ -107,13 +117,17 @@
     {% else %}
       <div class="flex flex-wrap gap-2">
         {% for u in newcomers %}
-          <a href="/users/{{ u.twitch_id }}"
-             class="inline-flex items-center gap-2 px-2 py-1 rounded-full border border-subtle bg-surface hover:bg-surface-raised text-sm">
+          <button type="button"
+                  class="inline-flex items-center gap-2 px-2 py-1 rounded-full border border-subtle bg-surface hover:bg-surface-raised text-sm"
+                  hx-get="/modals/insight/newcomer/{{ u.twitch_id }}?meta={{ u.first_seen | urlencode }}"
+                  hx-target="#modal-root"
+                  hx-swap="innerHTML"
+                  title="Open with chat context + LLM analysis">
             {% with item_ts=u.first_seen, acked_at=acked_at %}{% include "components/_new_badge.html" %}{% endwith %}
             {% with name=u.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
             <span class="text-accent">{{ u.name }}</span>
             <span class="text-[10px] text-muted">{{ u.first_seen | short_ts }}</span>
-          </a>
+          </button>
         {% endfor %}
       </div>
     {% endif %}
@@ -132,16 +146,23 @@
     {% else %}
       <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
         {% for r in regulars %}
-          <li class="px-3 py-2 text-sm flex items-center gap-3 hover:bg-surface-raised">
-            {% with name=r.user.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
-            <a href="/users/{{ r.user.twitch_id }}" class="text-accent hover:underline font-medium">{{ r.user.name }}</a>
-            <span class="ml-auto text-xs text-muted">
-              <i class="fa-regular fa-comment mr-1"></i>{{ r.msg_count }}
-              <span class="mx-1">·</span>
-              <i class="fa-regular fa-note-sticky mr-1"></i>{{ r.note_count }}
-              <span class="mx-1">·</span>
-              last {{ r.last_message_ts | short_ts }}
-            </span>
+          <li>
+            <button type="button"
+                    class="w-full text-left px-3 py-2 text-sm flex items-center gap-3 hover:bg-surface-raised transition-all duration-150 ease-out"
+                    hx-get="/modals/insight/regular/{{ r.user.twitch_id }}?meta={{ window_label | urlencode }}"
+                    hx-target="#modal-root"
+                    hx-swap="innerHTML">
+              {% with name=r.user.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+              <span class="text-accent font-medium">{{ r.user.name }}</span>
+              <span class="ml-auto text-xs text-muted">
+                <i class="fa-regular fa-comment mr-1"></i>{{ r.msg_count }}
+                <span class="mx-1">·</span>
+                <i class="fa-regular fa-note-sticky mr-1"></i>{{ r.note_count }}
+                <span class="mx-1">·</span>
+                last {{ r.last_message_ts | short_ts }}
+              </span>
+              <i class="fa-solid fa-chevron-right text-muted text-xs"></i>
+            </button>
           </li>
         {% endfor %}
       </ul>
@@ -161,14 +182,21 @@
     {% else %}
       <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
         {% for r in lapsed %}
-          <li class="px-3 py-2 text-sm flex items-center gap-3 hover:bg-surface-raised">
-            {% with name=r.user.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
-            <a href="/users/{{ r.user.twitch_id }}" class="text-accent hover:underline font-medium">{{ r.user.name }}</a>
-            <span class="ml-auto text-xs text-muted">
-              <i class="fa-regular fa-comment mr-1"></i>{{ r.msg_count }} in window
-              <span class="mx-1">·</span>
-              last seen {{ r.last_message_ts | short_ts }}
-            </span>
+          <li>
+            <button type="button"
+                    class="w-full text-left px-3 py-2 text-sm flex items-center gap-3 hover:bg-surface-raised transition-all duration-150 ease-out"
+                    hx-get="/modals/insight/lapsed/{{ r.user.twitch_id }}?meta={{ r.last_message_ts | urlencode }}"
+                    hx-target="#modal-root"
+                    hx-swap="innerHTML">
+              {% with name=r.user.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+              <span class="text-accent font-medium">{{ r.user.name }}</span>
+              <span class="ml-auto text-xs text-muted">
+                <i class="fa-regular fa-comment mr-1"></i>{{ r.msg_count }} in window
+                <span class="mx-1">·</span>
+                last seen {{ r.last_message_ts | short_ts }}
+              </span>
+              <i class="fa-solid fa-chevron-right text-muted text-xs"></i>
+            </button>
           </li>
         {% endfor %}
       </ul>
