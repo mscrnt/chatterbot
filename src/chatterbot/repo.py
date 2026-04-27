@@ -2941,6 +2941,97 @@ class ChatterRepo:
                 for r in cur.fetchall()
             ]
 
+    def search_global_messages(
+        self,
+        query_embedding: list[float],
+        k: int = 20,
+        *,
+        exclude_emote_only: bool = True,
+    ) -> list[tuple[Message, float]]:
+        """Semantic search across every embedded message in the channel.
+        Returns (Message, distance) pairs sorted nearest-first. Distance is
+        the vec0 KNN score (lower = closer match)."""
+        blob = _vec_to_blob(query_embedding)
+        ann_k = max(k * 4, 80)
+        emote_clause = "AND m.is_emote_only = 0" if exclude_emote_only else ""
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT m.id, m.user_id, u.name, u.source, m.ts, m.content,
+                       m.reply_parent_login, m.reply_parent_body,
+                       v.distance AS dist
+                FROM vec_messages v
+                JOIN messages m ON m.id = v.message_id
+                JOIN users u    ON u.twitch_id = m.user_id
+                WHERE v.embedding MATCH ? AND k = ?
+                  AND u.opt_out = 0
+                  {emote_clause}
+                ORDER BY v.distance
+                LIMIT ?
+                """,
+                (blob, ann_k, k),
+            )
+            return [
+                (
+                    Message(
+                        id=int(r["id"]),
+                        user_id=r["user_id"],
+                        name=r["name"],
+                        ts=r["ts"],
+                        content=r["content"],
+                        reply_parent_login=r["reply_parent_login"],
+                        reply_parent_body=r["reply_parent_body"],
+                        source=r["source"] or "twitch",
+                    ),
+                    float(r["dist"]),
+                )
+                for r in cur.fetchall()
+            ]
+
+    def messages_embedding_coverage(self) -> tuple[int, int]:
+        """Returns (indexed, total_text). `total_text` excludes emote-only
+        rows since those aren't candidates for embedding."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM messages WHERE is_emote_only = 0"
+            )
+            total = int(cur.fetchone()["c"])
+            cur.execute("SELECT COUNT(*) AS c FROM vec_messages")
+            indexed = int(cur.fetchone()["c"])
+        return indexed, total
+
+    def messages_missing_embedding_global(self, limit: int) -> list[Message]:
+        """Like `messages_missing_embedding` but channel-wide. Used by the
+        backfill script to populate the search index over historical chat."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.id, m.user_id, u.name, m.ts, m.content,
+                       m.reply_parent_login, m.reply_parent_body
+                FROM messages m
+                JOIN users u ON u.twitch_id = m.user_id
+                LEFT JOIN vec_messages v ON v.message_id = m.id
+                WHERE v.message_id IS NULL
+                  AND m.is_emote_only = 0
+                  AND u.opt_out = 0
+                ORDER BY m.id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            return [
+                Message(
+                    id=int(r["id"]),
+                    user_id=r["user_id"],
+                    name=r["name"],
+                    ts=r["ts"],
+                    content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
+                )
+                for r in cur.fetchall()
+            ]
+
     def search_user_messages(
         self, user_id: str, query_embedding: list[float], k: int = 10
     ) -> list[Message]:
@@ -3033,6 +3124,76 @@ class ChatterRepo:
                 Message(
                     id=int(r["id"]), user_id=r["user_id"], name=r["name"],
                     ts=r["ts"], content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
+                )
+                for r in cur.fetchall()
+            ]
+
+    def channel_context_around_ids(
+        self,
+        message_ids: list[int],
+        *,
+        before: int = 2,
+        after: int = 2,
+    ) -> list[Message]:
+        """Pull a chat-wide context window around each focal message id.
+
+        For every id in `message_ids`, fetch up to `before` and `after`
+        adjacent messages across the whole channel (including the focal
+        message itself). Returns the union, deduped, oldest-first. Skips
+        emote-only rows so the context is actually informative.
+
+        Used by the summarizer to give the LLM the surrounding chat for
+        sarcasm + key-moment detection — a "lol kill them all" reaction
+        reads very differently when the prior line was a clutch save vs
+        a horror jump-scare.
+        """
+        if not message_ids:
+            return []
+        seen_ids: set[int] = set()
+        with self._cursor() as cur:
+            for mid in message_ids:
+                cur.execute(
+                    """
+                    SELECT m.id FROM messages m
+                    WHERE m.id < ? AND m.is_emote_only = 0
+                    ORDER BY m.id DESC LIMIT ?
+                    """,
+                    (mid, int(before)),
+                )
+                seen_ids.update(int(r["id"]) for r in cur.fetchall())
+                seen_ids.update(message_ids)
+                cur.execute(
+                    """
+                    SELECT m.id FROM messages m
+                    WHERE m.id > ? AND m.is_emote_only = 0
+                    ORDER BY m.id ASC LIMIT ?
+                    """,
+                    (mid, int(after)),
+                )
+                seen_ids.update(int(r["id"]) for r in cur.fetchall())
+            if not seen_ids:
+                return []
+            placeholders = ",".join("?" for _ in seen_ids)
+            cur.execute(
+                f"""
+                SELECT m.id, m.user_id, u.name, m.ts, m.content,
+                       m.reply_parent_login, m.reply_parent_body
+                FROM messages m
+                JOIN users u ON u.twitch_id = m.user_id
+                WHERE m.id IN ({placeholders})
+                ORDER BY m.id ASC
+                """,
+                tuple(seen_ids),
+            )
+            return [
+                Message(
+                    id=int(r["id"]),
+                    user_id=r["user_id"],
+                    name=r["name"],
+                    ts=r["ts"],
+                    content=r["content"],
                     reply_parent_login=r["reply_parent_login"],
                     reply_parent_body=r["reply_parent_body"],
                 )

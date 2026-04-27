@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Search · chatterbot{% endblock %}
+{% block content %}
+<div class="space-y-3">
+  <header class="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-2">
+    <h1 class="text-xl sm:text-2xl font-semibold inline-flex items-center gap-2">
+      <i class="fa-solid fa-wand-magic-sparkles text-accent"></i> Semantic search
+    </h1>
+    <p class="text-xs text-muted">
+      Vague descriptions work best — we look for messages that <em>mean</em>
+      similar things, not just the exact words.
+    </p>
+  </header>
+
+  <p class="text-[11px] text-muted">
+    Index coverage: <span class="text-primary font-medium">{{ indexed }}</span>
+    / {{ total }} text messages embedded
+    {% if total and indexed < total %}
+      ({{ "%.0f"|format(100 * indexed / total) }}%) — run
+      <code class="text-accent">uv run python scripts/backfill_message_embeddings.py --db &lt;db&gt;</code>
+      to fill the rest.
+    {% endif %}
+  </p>
+
+  <div class="relative">
+    {% with endpoint='/search?partial=1', target='#search-results',
+            value=q, placeholder='e.g. "someone asked about my pet" or "raid hype"…' %}
+      {% include "components/_search.html" %}
+    {% endwith %}
+  </div>
+
+  {% include "partials/search_results.html" %}
+</div>
+{% endblock %}

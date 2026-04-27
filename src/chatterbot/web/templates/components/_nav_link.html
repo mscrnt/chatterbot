@@ -7,15 +7,20 @@
   ('/topics',   'Topics',   'fa-comments',       current_path == '/topics'),
   ('/events',   'Events',   'fa-coins',          current_path == '/events'),
   ('/live',     'Live',     'fa-tower-broadcast', current_path == '/live'),
+  ('/search',   'Search',   'fa-wand-magic-sparkles', current_path == '/search'),
 ] %}
 {% if mod_mode_enabled %}
   {% set _ = links.append(('/moderation', 'Moderation', 'fa-shield-halved', current_path == '/moderation')) %}
 {% endif %}
 {% for href, label, icon, active in links %}
+{# Icon-only at rest; hovering expands the link inline with the label.
+   The active link always shows its label so the streamer can see where
+   they are at a glance. `aria-label` keeps screen-reader output stable. #}
 <a href="{{ href }}"
-   class="tap inline-flex items-center gap-2 px-3 rounded text-sm sm:text-base transition-all duration-150 ease-out
+   aria-label="{{ label }}"
+   class="group tap inline-flex items-center gap-2 px-3 rounded text-sm transition-all duration-150 ease-out
           {% if active %}bg-surface-raised text-primary{% else %}text-muted hover:text-primary hover:bg-surface-raised{% endif %}">
-  <i class="fa-solid {{ icon }} text-xs sm:text-sm"></i>
-  <span class="hidden sm:inline">{{ label }}</span>
+  <i class="fa-solid {{ icon }} text-base"></i>
+  <span class="whitespace-nowrap {% if not active %}hidden group-hover:inline group-focus:inline{% endif %}">{{ label }}</span>
 </a>
 {% endfor %}

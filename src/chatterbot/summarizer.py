@@ -39,70 +39,99 @@ from .threader import Threader
 logger = logging.getLogger(__name__)
 
 
-PROFILE_EXTRACTION_SYSTEM = """You build a soft profile of one chat viewer from their recent messages.
+_AUDIENCE_BLOCK = """STREAM CONTEXT (read first):
+- This is a Twitch stream focused on zombie / horror / gore games.
+- The audience skews 18-35, predominantly male. Casual profanity, dark
+  humor, gallows reactions to violence, and snark are baseline-normal —
+  not personality red flags.
+- Hype reactions to gory or violent moments ("LMAO they exploded", "lol
+  send him to hell", "kill them all") are a standard chat dialect for
+  this genre. Treat them as reaction noise, not as personality data.
+- Sarcasm is common. A line that sounds positive ("yeah totally fine",
+  "great strat bro", "this is going so well") often means the opposite
+  when the surrounding chat shows something just went wrong (death,
+  jump-scare, fail, controller throw). Use surrounding context lines
+  (prefixed `[ctx N]`) to disambiguate before extracting anything.
+- The streamer is the broadcaster, not a chat member. Reactions
+  ("ggs Bawk", "you got this", "ty for stream") are addressed AT them
+  and tell us nothing factual about the speaker.
+"""
 
-This is DIFFERENT from note extraction. Notes are hard, cited facts. This is
-the squishier "who is this person" view — pronouns, location, vibe, things
-they care about — and partial signals are fine because they accumulate over
-many batches.
 
-Each input line is prefixed with the message id in square brackets, e.g.
-`[42] my cat Loki keeps walking on my keyboard`.
+_INPUT_FORMAT_BLOCK = """INPUT FORMAT:
+- Each line starts with `[id]` (focal user's own message — extract from
+  these) or `[ctx id] otherUser:` (a chat-wide context line — DO NOT
+  extract from these; they're only there so you can read the moment).
+- A line tagged `(replying to X: "...")` used the platform's native
+  reply feature. Use the quoted parent for context only — do not extract
+  facts about person X or about the parent message itself.
+"""
+
+
+PROFILE_EXTRACTION_SYSTEM = (_AUDIENCE_BLOCK + "\n" + _INPUT_FORMAT_BLOCK + """
+TASK: build a soft profile of ONE chat viewer (the focal user) from their
+own messages. This is DIFFERENT from note extraction — notes are hard
+cited facts. This is the squishier "who is this person" view: pronouns,
+location, vibe, things they care about. Partial signals are fine; they
+accumulate across batches.
 
 Fields and rules:
-- `pronouns`: only set when the viewer explicitly used pronouns about
-  themselves ("she/her", "they/them", "i'm a guy"). Otherwise leave null.
-  Don't infer from username or display name.
-- `location`: only set when the viewer explicitly mentioned where they are
-  ("from Sydney", "I'm in Texas", "it's 2am here in Berlin"). Country,
-  region, city — whatever they said. Don't infer from time-of-day alone.
-  Otherwise leave null.
-- `demeanor`: pick ONE bucket that best fits the dominant tone of THIS
-  batch's messages. Acceptable buckets:
-    hype        — caps, exclamations, reacts strongly to clutch moments
+- `pronouns`: only set when the focal viewer explicitly used pronouns
+  about themselves ("she/her", "they/them", "i'm a dude"). Otherwise
+  null. Don't infer from username, display name, or assumed demographic.
+- `location`: only set when the viewer explicitly mentioned where they
+  are ("from Sydney", "I'm in Texas", "2am here in Berlin"). Otherwise
+  null. Don't infer from time-of-day or vocabulary alone.
+- `demeanor`: pick ONE bucket that best fits the focal viewer's dominant
+  tone in THIS batch, judged AGAINST the genre baseline above (so casual
+  profanity / dark humor on its own is not "snarky" — it's the genre).
+  Acceptable buckets:
+    hype        — heavy caps, exclamations, big reactions to clutch moments
     chill       — measured, conversational, even-keeled
     supportive  — encouraging, hype FOR others, positive replies
-    snarky      — dry/sarcastic humor, jokes at situations
+    snarky      — dry/sarcastic humor specifically beyond the genre baseline
     quiet       — short, infrequent, mostly reactive
     analytical  — technical commentary on gameplay/strategy
     unknown     — genuinely can't tell, or messages are too thin
-- `interests`: 0 to 5 short tags they've shown interest in (specific games,
-  genres, hobbies, topics, communities). Lowercase, snake-case-ish OK.
-  Examples: "speedrunning", "resident evil", "cats", "metalcore",
-  "vintage cameras". Skip generic "twitch" / "chat" / "streaming".
+- `interests`: 0 to 5 short tags the viewer has shown interest in (specific
+  games, genres, hobbies, topics, communities). Lowercase. Examples:
+  "speedrunning", "resident evil", "cats", "metalcore", "vintage cameras".
+  Skip generic "twitch" / "chat" / "streaming" / "zombies" (zombies is
+  the topic of the stream — not a viewer-specific interest signal).
 
-If you have no signal for a field, leave it null / empty. Empty fields are
-EXPECTED and NORMAL — don't fabricate.
-"""
+If you have no signal for a field, leave it null / empty. Empty is
+EXPECTED and NORMAL — do NOT fabricate.
+""")
 
 
-NOTE_EXTRACTION_SYSTEM = """You analyze recent Twitch chat messages from one viewer and extract short factual notes about that viewer.
+NOTE_EXTRACTION_SYSTEM = (_AUDIENCE_BLOCK + "\n" + _INPUT_FORMAT_BLOCK + """
+TASK: extract short factual notes about ONE chat viewer (the focal user)
+from their own messages.
 
-Each input line is prefixed with the message id in square brackets, e.g.
-`[42] my cat Loki keeps walking on my keyboard`.
-
-For each note you produce, include the `source_message_ids` list — the
-specific message ids that support that note. The streamer uses this to
-trace any fact back to the exact line(s) it came from.
+For each note, include `source_message_ids` — the specific focal-line ids
+that support that note. The streamer uses this to trace any fact back to
+the exact line(s) it came from. Context lines (`[ctx id]`) are NOT
+allowed in source_message_ids.
 
 RULES:
 - Extract 0 to 3 notes maximum.
-- Only facts the viewer explicitly stated about themselves: interests, pets,
-  gear, location, games they play, jobs, family, etc.
+- Only facts the focal viewer explicitly stated about themselves:
+  interests, pets, gear, location, games they play, jobs, family, etc.
 - No personality judgments. No inferred sentiment. No speculation about
   mood or intent.
-- If nothing notable was stated, return an empty list.
+- A SARCASTIC statement is NOT a fact. If the viewer says "great, I love
+  dying repeatedly to one zombie" right after a death context line,
+  do NOT record "loves dying to zombies." Skip it entirely.
+- Reactions to the stream content (kills, deaths, jump-scares, RNG, the
+  streamer's plays) are not facts about the viewer. Skip them.
+- If nothing notable was stated, return an empty list. Empty is normal
+  for this genre — most chat is reactions, not self-disclosure.
 - Each note: one short third-person sentence about the viewer (e.g.,
   "Has a cat named Loki.").
-- Ignore stream meta-chatter, reactions to gameplay, emote spam, and
-  questions to the streamer.
-- Some lines are tagged `(replying to X: "...")` — that's a Twitch native
-  reply. Use the quoted parent only as context to understand what the
-  viewer is responding to. Do NOT extract facts about person X or about
-  the parent message itself.
-- source_message_ids must reference ids that actually appear in the input.
-  If a note is supported by multiple messages, list them all (cap 5).
-"""
+- source_message_ids must reference focal `[id]` lines that actually
+  appear in the input. If a note is supported by multiple lines, list
+  them all (cap 5).
+""")
 
 
 TOPICS_SYSTEM = """You summarize what a Twitch chat is currently talking about.
@@ -170,25 +199,44 @@ class Summarizer:
             user = await asyncio.to_thread(self.repo.get_user, user_id)
             display_name = user.name if user else user_id
 
-            # Look up reply parents per message so the LLM can interpret
+            # Look up reply parents per focal message so the LLM can interpret
             # short responses ("yes", "me too", "no way") in context.
+            focal_ids = [mid for mid, _ in rows]
             full_msgs = await asyncio.to_thread(
-                self.repo.get_messages_by_ids, [mid for mid, _ in rows]
+                self.repo.get_messages_by_ids, focal_ids
             )
             by_id = {m.id: m for m in full_msgs}
+            # Pull a chat-wide context window around each focal message —
+            # 2 lines before, 2 after — so the LLM can spot sarcasm and
+            # frame reactions around key moments. Returned union is
+            # deduped + ordered by id; we render focal vs ctx differently.
+            ctx_msgs = await asyncio.to_thread(
+                self.repo.channel_context_around_ids, focal_ids,
+                before=2, after=2,
+            )
+            focal_id_set = set(focal_ids)
             corpus_lines: list[str] = []
-            for mid, content in rows:
-                m = by_id.get(mid)
-                if m and m.reply_parent_body:
-                    snippet = m.reply_parent_body[:160].replace('"', "'")
-                    parent = m.reply_parent_login or "?"
-                    corpus_lines.append(
-                        f'[{mid}] (replying to {parent}: "{snippet}") {content}'
-                    )
+            for cm in ctx_msgs:
+                if cm.id in focal_id_set:
+                    m = by_id.get(cm.id) or cm
+                    content = m.content
+                    if m.reply_parent_body:
+                        snippet = m.reply_parent_body[:160].replace('"', "'")
+                        parent = m.reply_parent_login or "?"
+                        corpus_lines.append(
+                            f'[{cm.id}] (replying to {parent}: "{snippet}") {content}'
+                        )
+                    else:
+                        corpus_lines.append(f"[{cm.id}] {content}")
                 else:
-                    corpus_lines.append(f"[{mid}] {content}")
+                    snippet = (cm.content or "")[:200].replace("\n", " ")
+                    corpus_lines.append(f"[ctx {cm.id}] {cm.name}: {snippet}")
             corpus = "\n".join(corpus_lines)
-            prompt = f"Viewer username: {display_name}\n\nMessages:\n{corpus}"
+            prompt = (
+                f"Focal viewer username: {display_name}\n\n"
+                f"Chat transcript (focal lines = `[id]`, context lines = "
+                f"`[ctx id] otherUser:`):\n{corpus}"
+            )
 
             try:
                 response = await self.llm.generate_structured(

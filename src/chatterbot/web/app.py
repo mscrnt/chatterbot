@@ -1119,6 +1119,35 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
 
     # ---------------- live chat (widget + full page) ----------------
 
+    # ---------------- semantic message search ----------------
+
+    @app.get("/search", response_class=HTMLResponse)
+    async def search_page(
+        request: Request,
+        q: str = Query(""),
+        partial: int = Query(0),
+        k: int = Query(20, ge=1, le=100),
+    ):
+        results: list[tuple] = []
+        error: str | None = None
+        if q.strip():
+            try:
+                q_vec = await llm.embed(q.strip())
+                results = repo.search_global_messages(q_vec, k=k)
+            except Exception as e:
+                logger.exception("search: embedding/query failed")
+                error = f"{type(e).__name__}: {e}"
+        indexed, total = repo.messages_embedding_coverage()
+        ctx = {
+            "q": q,
+            "results": results,
+            "indexed": indexed,
+            "total": total,
+            "error": error,
+        }
+        tpl = "partials/search_results.html" if partial else "search.html"
+        return TEMPLATES.TemplateResponse(request, tpl, ctx)
+
     @app.get("/live", response_class=HTMLResponse)
     async def live(
         request: Request,
