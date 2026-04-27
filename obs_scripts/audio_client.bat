@@ -20,7 +20,11 @@ REM the bat is launched from.
 cd /d "%~dp0\.."
 
 set VENV_DIR=.venv-win
-set REQS=numpy sounddevice
+REM soundcard is for the --loopback path (browser / window audio capture
+REM via WASAPI). audio_client.py also auto-installs it on first --loopback
+REM use so existing .venv-win installs self-heal — listing it here just
+REM saves the latency on the first capture run.
+set REQS=numpy sounddevice soundcard
 
 if not exist "%VENV_DIR%\Scripts\python.exe" (
     echo [audio_client] first run — bootstrapping %VENV_DIR%

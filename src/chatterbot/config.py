@@ -48,6 +48,7 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "whisper_buffer_seconds",
     "whisper_match_threshold",
     "whisper_min_silence_ms",
+    "whisper_unnamed_match_threshold",
 )
 
 # Subset that should be rendered as password inputs. Blank submissions for
@@ -150,6 +151,16 @@ class Settings(BaseSettings):
     # for natural conversational pacing; drop to 500-1000 if you want
     # tighter per-clause splits.
     whisper_min_silence_ms: int = 5000
+    # Talking-point cards are short and generic enough that vague
+    # utterances ("why that happened") repeatedly clear the regular
+    # threshold against unrelated cards. To gate that, we apply a
+    # higher bar when the streamer hasn't named the chatter in the
+    # utterance. Naming them ("that's right aquanote1, …") is the
+    # strongest signal of real engagement, so a name-mention drops
+    # the bar back to whisper_match_threshold. Set to a value ≥ 1.0
+    # to require name mention always; set equal to whisper_match_threshold
+    # to restore old uniform behavior.
+    whisper_unnamed_match_threshold: float = 0.80
 
     # Moderation mode — opt-in. When enabled, the bot batches recent
     # messages through a strict-rubric LLM classifier and persists
@@ -185,6 +196,11 @@ def _coerce(key: str, value: str) -> Any:
             return float(value)
         except (TypeError, ValueError):
             return 0.55
+    if key == "whisper_unnamed_match_threshold":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.80
     if key in (
         "streamelements_enabled", "mod_mode_enabled",
         "obs_enabled", "live_widget_enabled",

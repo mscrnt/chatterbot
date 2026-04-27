@@ -27,11 +27,43 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 import struct
 import time
 from dataclasses import dataclass, field
 
 import numpy as np
+
+
+_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+_TRAIL_DIGITS_RE = re.compile(r"\d+$")
+
+
+def _utterance_mentions_chatter(utterance: str, names: list[str]) -> bool:
+    """Heuristic: did the streamer name the chatter in this utterance?
+
+    Whisper transcribes phonetically and inserts whitespace freely, so
+    "aquanote1" can come back as "aqua note one" or "aqua note 1". We
+    normalize both sides to lowercase alphanumerics-only and check
+    substring containment. We also try the digit-stripped variant for
+    handles like "asmongold123" → look for "asmongold". Names shorter
+    than 4 chars after stripping are rejected as too noisy to gate on.
+    """
+    if not utterance or not names:
+        return False
+    u_norm = _ALNUM_RE.sub("", utterance.lower())
+    if not u_norm:
+        return False
+    for name in names:
+        if not name:
+            continue
+        n_norm = _ALNUM_RE.sub("", name.lower())
+        if len(n_norm) >= 4 and n_norm in u_norm:
+            return True
+        n_stripped = _TRAIL_DIGITS_RE.sub("", n_norm)
+        if len(n_stripped) >= 4 and n_stripped in u_norm:
+            return True
+    return False
 
 from .config import Settings
 from .llm.ollama_client import OllamaClient
@@ -88,6 +120,13 @@ class TranscriptService:
         # debug log line so the streamer can see WHY a transcript chunk
         # closely matched a card.
         self._card_embed_texts: dict[tuple[str, str], str] = {}
+        # For talking_point cards: the names the streamer might call the
+        # chatter by (display name + historical aliases). When
+        # `whisper_require_chatter_name` is on, we hard-gate the match
+        # on at least one of these appearing in the utterance — vague
+        # statements like "why that happened" otherwise mop up generic
+        # talking-points.
+        self._card_chatter_names: dict[tuple[str, str], list[str]] = {}
         self._card_embeds_refreshed_at: float = 0.0
         self._card_embeds_lock = asyncio.Lock()
         # Optional callback that returns the current talking points.
@@ -204,6 +243,9 @@ class TranscriptService:
         await self._refresh_card_embeds_if_stale()
 
         threshold = float(self.settings.whisper_match_threshold)
+        unnamed_threshold = float(
+            getattr(self.settings, "whisper_unnamed_match_threshold", 0.80)
+        )
         for text, start_s, end_s in segments:
             text = (text or "").strip()
             if not text or len(text) < 4:
@@ -212,9 +254,26 @@ class TranscriptService:
             best_kind, best_key, best_sim, best_text, qv = (
                 await self._best_candidate(text)
             )
-            crossed = (
-                best_sim is not None and best_sim >= threshold
+            # For talking_point cards, scale the bar by whether the
+            # streamer named the chatter. Naming them ("that's right
+            # aquanote1, …") is the strongest signal of actual
+            # engagement — without it, the points are short and generic
+            # enough that vague utterances ("why that happened") clear
+            # 0.55 against unrelated cards. Setting unnamed_threshold
+            # above 1.0 disables unnamed matching entirely; setting it
+            # equal to threshold restores the old uniform behavior.
+            named = (
+                best_kind == "talking_point"
+                and _utterance_mentions_chatter(
+                    text,
+                    self._card_chatter_names.get((best_kind, best_key), []),
+                )
             )
+            if best_kind == "talking_point" and not named:
+                effective_threshold = unnamed_threshold
+            else:
+                effective_threshold = threshold
+            crossed = best_sim is not None and best_sim >= effective_threshold
             # Always store the best candidate AND the embedding so the
             # chat ↔ transcript reverse lookup (a chat message can find
             # a recent utterance it semantically answered) works.
@@ -237,6 +296,16 @@ class TranscriptService:
                         note=f"(auto) {text}",
                     )
                     self._pending_count += 1
+                    # Drop the just-pendinged card from the in-memory
+                    # match pool so the next utterance can't keep
+                    # matching it (the streamer is presumably still
+                    # talking about the same thing — let *other* cards
+                    # win their similarity contest). The next periodic
+                    # refresh would do this too, but it's up to 60s out;
+                    # without this the live transcript spams near-miss
+                    # logs against the same card the whole window.
+                    self._card_embeds.pop((best_kind, best_key), None)
+                    self._card_embed_texts.pop((best_kind, best_key), None)
                     logger.info(
                         "transcript: AUTO-PENDING %s/%s sim=%.3f "
                         "spoken=%r → card=%r",
@@ -246,10 +315,18 @@ class TranscriptService:
                 except Exception:
                     logger.exception("transcript: auto-pending write failed")
             elif best_sim is not None:
+                # Tag whether the unnamed-threshold gate was the one
+                # blocking — makes it obvious in logs why otherwise
+                # decent-similarity utterances aren't auto-pending.
+                gate = (
+                    "unnamed-threshold"
+                    if best_kind == "talking_point" and not named
+                    else "threshold"
+                )
                 logger.info(
-                    "transcript: near-miss sim=%.3f (threshold=%.2f) "
+                    "transcript: near-miss sim=%.3f (%s=%.2f) "
                     "spoken=%r ≈ %s/%s=%r",
-                    best_sim, threshold,
+                    best_sim, gate, effective_threshold,
                     text[:80], best_kind, best_key, (best_text or "")[:80],
                 )
             else:
@@ -286,7 +363,12 @@ class TranscriptService:
             t_states = {}
         for t in threads:
             s = t_states.get(str(t.id))
-            if s and s.state in ("addressed", "snoozed", "skipped"):
+            # auto_pending also skipped: the card is awaiting confirm/reject
+            # or the 60s auto-promote. Keeping it in the pool means every
+            # subsequent utterance keeps "matching" the same card (logging
+            # AUTO-PENDING once, then a stream of near-misses against it),
+            # which makes the live transcript feel like a broken record.
+            if s and s.state in ("addressed", "snoozed", "skipped", "auto_pending"):
                 continue
             if t.status == "archived":
                 continue
@@ -311,6 +393,7 @@ class TranscriptService:
             logger.exception("transcript: talking_points_provider raised")
             tps = []
         import hashlib as _h
+        new_chatter_names: dict[tuple[str, str], list[str]] = {}
         for tp in tps:
             point = (tp.point or "").strip()
             if not point:
@@ -322,11 +405,28 @@ class TranscriptService:
                 self.repo.get_insight_states, "talking_point"
             )
             s = s_states.get(item_key)
-            if s and s.state in ("addressed", "snoozed", "skipped"):
+            # auto_pending also skipped: the card is awaiting confirm/reject
+            # or the 60s auto-promote. Keeping it in the pool means every
+            # subsequent utterance keeps "matching" the same card (logging
+            # AUTO-PENDING once, then a stream of near-misses against it),
+            # which makes the live transcript feel like a broken record.
+            if s and s.state in ("addressed", "snoozed", "skipped", "auto_pending"):
                 continue
             # Search text: blend chatter name + point so "ask alice
             # about her cat" can match either side.
             targets.append(("talking_point", item_key, f"{tp.name}: {point}"))
+            # Stash every name the streamer might call this chatter by,
+            # for the require-name gate at match time. Aliases handle the
+            # rename trail (zackrawrr → asmongold etc).
+            names: list[str] = [str(tp.name)] if tp.name else []
+            try:
+                aliases = await asyncio.to_thread(self.repo.get_user_aliases, str(uid))
+                for a in aliases:
+                    if a.name and a.name not in names:
+                        names.append(a.name)
+            except Exception:
+                pass
+            new_chatter_names[("talking_point", item_key)] = names
 
         # Resolve embeddings — re-use the cached embedding when we have
         # one for that key; otherwise call Ollama.
@@ -343,6 +443,7 @@ class TranscriptService:
                 logger.exception("transcript: embed failed for %s/%s", kind, key)
         self._card_embeds = new_embeds
         self._card_embed_texts = {(k, key): t for k, key, t in targets}
+        self._card_chatter_names = new_chatter_names
         self._card_embeds_refreshed_at = time.time()
         logger.info(
             "transcript: refreshed %d card embeddings (%d threads, %d talking-points)",

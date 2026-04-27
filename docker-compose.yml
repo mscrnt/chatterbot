@@ -50,6 +50,12 @@ x-base: &base
     - WHISPER_BUFFER_SECONDS=${WHISPER_BUFFER_SECONDS:-5.0}
     - WHISPER_MATCH_THRESHOLD=${WHISPER_MATCH_THRESHOLD:-0.55}
     - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-auto}
+    # Display timezone for the dashboard. Python's astimezone() reads
+    # this from the container's environment via /etc/localtime / TZ;
+    # without it the container falls back to UTC and timestamps render
+    # as if you were in London. Set in `.env` as e.g.
+    #   TZ=America/Los_Angeles
+    - TZ=${TZ:-UTC}
   volumes:
     - ./src:/app/src
     - ./data:/app/data

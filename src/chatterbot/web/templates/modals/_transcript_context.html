@@ -5,28 +5,47 @@
 {% extends "components/_modal.html" %}
 {% block modal_body %}
 <div class="space-y-4 text-sm">
-  {# Matched insight card — what the streamer was talking about. #}
+  {# Matched insight card — what the streamer was talking about. The
+     route resolves matched_kind ('thread' or 'talking_point') into a
+     {kind, label, href, secondary} dict so the template stays generic.
+     Falls through to a muted "no longer in cache" stub if matched_kind
+     was set but the underlying card has aged out. #}
   {% if matched_card %}
   <section class="rounded-lg border border-success/40 bg-success/5 p-3">
     <div class="flex items-baseline gap-2 mb-1">
       <i class="fa-solid fa-check-circle text-success text-[10px]"></i>
-      <span class="text-[11px] uppercase tracking-wider text-muted">matched topic thread</span>
+      <span class="text-[11px] uppercase tracking-wider text-muted">matched {{ matched_card.kind }}</span>
       {% if focal.similarity is not none %}
         <span class="text-[10px] text-muted ml-auto">sim {{ '%.2f'|format(focal.similarity) }}</span>
       {% endif %}
     </div>
-    <button type="button"
-            class="text-left text-primary leading-snug hover:underline"
-            hx-get="/modals/thread/{{ matched_card.id }}"
-            hx-target="#modal-root"
-            hx-swap="innerHTML">
-      {{ matched_card.title }}
-    </button>
+    {% if matched_card.href.startswith('/modals/') %}
+      {# Modal target: htmx-swap into #modal-root so the streamer can
+         walk between linked surfaces without losing the back-stack. #}
+      <button type="button"
+              class="text-left text-primary leading-snug hover:underline"
+              hx-get="{{ matched_card.href }}"
+              hx-target="#modal-root"
+              hx-swap="innerHTML">
+        {{ matched_card.label }}
+      </button>
+    {% else %}
+      {# Page target (e.g. talking-point links to the chatter): full
+         navigation since it's a context switch out of the modal flow. #}
+      <a href="{{ matched_card.href }}"
+         class="text-primary leading-snug hover:underline inline-flex items-center gap-1">
+        {{ matched_card.label }}
+        <i class="fa-solid fa-arrow-up-right-from-square text-[9px] text-accent"></i>
+      </a>
+    {% endif %}
+    {% if matched_card.secondary %}
+      <p class="text-[10px] text-muted mt-1">{{ matched_card.secondary }}</p>
+    {% endif %}
   </section>
   {% elif focal.matched_kind %}
-  <section class="rounded-lg border border-success/40 bg-success/5 p-3">
+  <section class="rounded-lg border border-subtle bg-surface p-3">
     <div class="text-[11px] text-muted">
-      matched {{ focal.matched_kind }} card
+      matched a {{ focal.matched_kind }} card that's no longer in the cache
       {% if focal.similarity is not none %}
         (sim {{ '%.2f'|format(focal.similarity) }})
       {% endif %}

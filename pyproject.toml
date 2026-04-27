@@ -38,6 +38,10 @@ dev = [
 whisper = [
     "faster-whisper>=1.0.0",
     "sounddevice>=0.4.6",
+    # WASAPI loopback path (browser / game / window audio capture).
+    # sounddevice doesn't expose loopback; soundcard does. Windows-only
+    # in practice — the `--loopback` flag is a no-op elsewhere.
+    "soundcard>=0.4.3",
 ]
 
 [project.scripts]

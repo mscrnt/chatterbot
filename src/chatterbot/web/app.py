@@ -614,6 +614,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             (
                 "whisper_enabled", "whisper_model",
                 "whisper_buffer_seconds", "whisper_match_threshold",
+                "whisper_unnamed_match_threshold",
                 "whisper_min_silence_ms",
             ),
         ),
@@ -1678,19 +1679,69 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     async def modal_transcript(request: Request, chunk_id: int):
         """Detail view for one transcript chunk: the utterance itself,
         adjacent transcript chunks for chronological context, and the
-        insight card it matched (if any)."""
+        insight card it matched (if any).
+
+        `matched_card` is a dict {kind, label, href, secondary?} that
+        the template renders generically. None when the chunk didn't
+        match anything (similarity below threshold), or matched but
+        the underlying card has aged out of cache.
+        """
         ctx = repo.transcript_context_around(chunk_id, before=3, after=3)
         if not ctx["focal"]:
             raise HTTPException(404, "transcript chunk not found")
         focal = ctx["focal"]
-        matched_card = None
-        if focal.matched_kind and focal.matched_item_key:
-            # Resolve the card to a display title + jump-to URL.
-            if focal.matched_kind == "thread":
-                try:
-                    matched_card = repo.get_thread(int(focal.matched_item_key))
-                except Exception:
-                    matched_card = None
+        matched_card: dict | None = None
+
+        if focal.matched_kind == "thread" and focal.matched_item_key:
+            try:
+                t = repo.get_thread(int(focal.matched_item_key))
+            except Exception:
+                t = None
+            if t is not None:
+                matched_card = {
+                    "kind": "topic thread",
+                    "label": t.title,
+                    "href": f"/modals/thread/{t.id}",
+                    "secondary": (t.category or "").strip(),
+                }
+
+        elif focal.matched_kind == "talking_point" and focal.matched_item_key:
+            # item_key is "{user_id}:{sha1_digest}". Walk the live talking-
+            # points cache to find the original (name, point) pair; if it's
+            # aged out we still have the user_id half and can link to them.
+            user_id = focal.matched_item_key.split(":", 1)[0]
+            user = repo.get_user(user_id) if user_id else None
+            chatter_name = user.name if user else user_id
+
+            point_text: str | None = None
+            try:
+                cache = insights.cache
+                tps = list(cache.talking_points) if (cache and cache.talking_points) else []
+            except Exception:
+                tps = []
+            import hashlib as _h
+            for tp in tps:
+                p = (tp.point or "").strip()
+                if not p:
+                    continue
+                digest = _h.sha1(f"{tp.user_id}|{p}".encode("utf-8")).hexdigest()[:16]
+                if f"{tp.user_id}:{digest}" == focal.matched_item_key:
+                    point_text = p
+                    chatter_name = tp.name
+                    break
+
+            if user_id:
+                matched_card = {
+                    "kind": "talking point",
+                    "label": (
+                        f"{chatter_name}: {point_text}"
+                        if point_text else
+                        f"{chatter_name} (talking-point card has aged out of the cache)"
+                    ),
+                    "href": f"/users/{user_id}",
+                    "secondary": "",
+                }
+
         return TEMPLATES.TemplateResponse(
             request, "modals/_transcript_context.html",
             {

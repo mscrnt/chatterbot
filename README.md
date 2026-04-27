@@ -283,13 +283,23 @@ Off by default. Each is independently toggled in **/settings** or via env.
   so no extra setup needed.
 - **Moderation classifier** — `MOD_MODE_ENABLED=true`. Advisory only.
 - **Whisper transcription** — `WHISPER_ENABLED=true` plus the `[whisper]`
-  extras (`uv sync --extra whisper`). Pair with the
-  `obs_scripts/audio_client.py` helper running on the streamer's machine to
-  POST mic / desktop audio to `/audio/ingest`; the bot transcribes via
+  extras (`uv sync --extra whisper`). The bot transcribes via
   `faster-whisper`, embeds each utterance, and auto-marks insight cards as
   `addressed` when you speak about them. First model load downloads
   ~75 MB–1 GB depending on `WHISPER_MODEL` (`tiny.en`/`base.en`/`small.en`/
-  `medium.en`).
+  `medium.en`). Two ways to feed audio in:
+
+    * **OBS script (recommended).** Add `obs_scripts/chatterbot_audio_relay.py`
+      via *Tools → Scripts*. Pick a mic (via `sounddevice` / PortAudio) and,
+      on Windows, any output device for WASAPI loopback (via `soundcard`)
+      to capture browser / game / system audio without a virtual cable. Both
+      sources stream to `/audio/ingest` simultaneously as separate
+      subprocesses; the OBS script auto-restarts any that die. Click
+      *Refresh devices* once on first run to bootstrap a Windows venv
+      (`.venv-win`).
+    * **Standalone client.** Run `obs_scripts/audio_client.py` directly
+      from a terminal. Same pipeline, single device, useful when OBS isn't
+      involved. `--loopback` for WASAPI loopback on Windows.
 - **YouTube ingestion** — STUB. Module exists at
   `src/chatterbot/youtube.py` with the wiring contract; no API polling yet.
 - **Discord ingestion** — STUB. Module exists at
@@ -348,8 +358,9 @@ chatterbot/
 │       ├── templates/             # Jinja2 + HTMX
 │       └── static/                # JS (SSE consumer) + CSS
 ├── obs_scripts/
-│   ├── audio_client.py            # streamer-side audio capture → /audio/ingest
-│   └── audio_client.bat           # Windows venv bootstrapper
+│   ├── chatterbot_audio_relay.py  # OBS script: coordinates audio_client subprocesses
+│   ├── audio_client.py            # standalone audio capture → /audio/ingest
+│   └── audio_client.bat           # Windows venv bootstrapper for audio_client.py
 ├── pyproject.toml
 ├── package.json                   # optional Tailwind CLI deps
 ├── tailwind.config.js
