@@ -1,15 +1,95 @@
+{# Notes list — paginated + searchable + origin-filterable. The whole div
+   is the htmx swap target; the inner search/filter controls hx-get this
+   same partial back into the same id. #}
+{% set _origin = notes_origin or 'all' %}
+{% set _q = notes_q or '' %}
+{% set _page = notes_page or 1 %}
+{% set _pages = notes_pages or 1 %}
+{% set _total = notes_total or 0 %}
+{% set _endpoint = '/users/' ~ user.twitch_id ~ '/notes' %}
+
 <div id="notes-list" class="space-y-2">
-  {% if not notes_with_sources %}
-    {% with icon='fa-note-sticky',
-            heading='No notes yet',
-            body='Notes appear after the summarizer processes this viewer\'s messages — or add one manually with the form above.' %}
-      {% include "components/_empty_state.html" %}
-    {% endwith %}
-  {% else %}
-    {% for nws in notes_with_sources %}
-      {% set note = nws.note %}
-      {% set sources = nws.sources %}
-      {% include "partials/note.html" %}
+
+  {# Filter chips (origin) — clicking sends GET with origin=… (q + page reset). #}
+  <div class="flex flex-wrap items-center gap-1 text-xs">
+    {% for key, label, icon in [
+        ('all',     'all',     'fa-asterisk'),
+        ('manual',  'manual',  'fa-user-pen'),
+        ('llm',     'LLM',     'fa-robot'),
+        ('suspect', 'suspect', 'fa-triangle-exclamation'),
+      ] %}
+      {% set _active = (_origin == key) %}
+      <button type="button"
+              class="tap inline-flex items-center gap-1.5 px-2 py-1 rounded-full border transition-all duration-150 ease-out
+                     {% if _active %}bg-accent/15 border-accent/40 text-primary{% else %}bg-surface border-subtle text-muted hover:bg-surface-raised hover:text-primary{% endif %}"
+              hx-get="{{ _endpoint }}?origin={{ key }}&q={{ _q | urlencode }}&page=1"
+              hx-target="#notes-list"
+              hx-swap="outerHTML"
+              aria-pressed="{{ 'true' if _active else 'false' }}">
+        <i class="fa-solid {{ icon }} text-[10px]"></i>{{ label }}
+      </button>
     {% endfor %}
+
+    <span class="text-muted ml-auto">
+      {{ _total }} note{{ '' if _total == 1 else 's' }}{% if _q %} matching “{{ _q }}”{% endif %}
+    </span>
+  </div>
+
+  {# Search input. Reuses the standard search component with the notes
+     endpoint. Filter chip selection rides along via `name="origin"` on a
+     hidden input that we hx-include. #}
+  <form class="contents">
+    <input type="hidden" name="origin" value="{{ _origin }}">
+    {% with endpoint=_endpoint, target='#notes-list',
+            placeholder='search notes…',
+            value=_q,
+            include_selector='closest form' %}
+      {% include "components/_search.html" %}
+    {% endwith %}
+  </form>
+
+  {% if not notes_with_sources %}
+    {% if _q or _origin != 'all' %}
+      <p class="text-sm text-muted italic px-1 py-3">
+        No notes match this filter. Try clearing the search or switching back to "all".
+      </p>
+    {% else %}
+      {% with icon='fa-note-sticky',
+              heading='No notes yet',
+              body='Notes appear after the summarizer processes this viewer\'s messages — or add one manually with the form above.' %}
+        {% include "components/_empty_state.html" %}
+      {% endwith %}
+    {% endif %}
+  {% else %}
+    {# Cap visible scroll height once a list is large enough to need it.
+       Below the cap the section flows naturally; above, it becomes a
+       scrolled region so the whole user page stays navigable. #}
+    <div class="space-y-2 {% if _total > 6 %}max-h-[640px] overflow-y-auto pr-1{% endif %}">
+      {% for nws in notes_with_sources %}
+        {% set note = nws.note %}
+        {% set sources = nws.sources %}
+        {% include "partials/note.html" %}
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {% if _pages > 1 %}
+  <div class="flex items-center justify-between pt-2 text-sm">
+    {% if _page > 1 %}
+      <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary"
+              hx-get="{{ _endpoint }}?q={{ _q | urlencode }}&origin={{ _origin }}&page={{ _page - 1 }}"
+              hx-target="#notes-list" hx-swap="outerHTML">
+        <i class="fa-solid fa-chevron-left text-xs"></i> prev
+      </button>
+    {% else %}<span></span>{% endif %}
+    <span class="text-muted">page {{ _page }} / {{ _pages }}</span>
+    {% if _page < _pages %}
+      <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary"
+              hx-get="{{ _endpoint }}?q={{ _q | urlencode }}&origin={{ _origin }}&page={{ _page + 1 }}"
+              hx-target="#notes-list" hx-swap="outerHTML">
+        next <i class="fa-solid fa-chevron-right text-xs"></i>
+      </button>
+    {% else %}<span></span>{% endif %}
+  </div>
   {% endif %}
 </div>

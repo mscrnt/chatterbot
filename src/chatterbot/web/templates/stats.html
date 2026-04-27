@@ -25,6 +25,37 @@
       {% include "components/_stat_tile.html" %}{% endwith %}
   </section>
 
+  {# Stream voice — only when whisper has actually produced rows. Survives
+     even when the service is currently off, so historical totals still show. #}
+  {% if transcripts.chunks %}
+  <section class="space-y-2">
+    <div class="flex items-baseline justify-between gap-2">
+      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+        <i class="fa-solid fa-microphone-lines text-accent"></i> Stream voice
+      </h2>
+      <span class="text-xs text-muted">
+        whisper transcripts · threshold {{ '%.2f'|format(match_threshold) }}
+      </span>
+    </div>
+    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+      {% set _mins = (transcripts.total_seconds / 60.0) %}
+      {% set _hits_pct = (100.0 * transcripts.auto_addressed / transcripts.chunks) if transcripts.chunks else 0 %}
+      {% with icon='fa-comment-dots', label='Utterances', value=transcripts.chunks, subtitle='lifetime' %}
+        {% include "components/_stat_tile.html" %}{% endwith %}
+      {% with icon='fa-stopwatch', label='Minutes spoken', value=('%.0f'|format(_mins)), subtitle='≈ ' ~ ('%.1f'|format(_mins/60.0)) ~ ' hrs' %}
+        {% include "components/_stat_tile.html" %}{% endwith %}
+      {% with icon='fa-circle-check', label='Auto-addressed', value=transcripts.auto_addressed, subtitle=('%.0f'|format(_hits_pct)) ~ '% match rate' %}
+        {% include "components/_stat_tile.html" %}{% endwith %}
+      {% with icon='fa-circle-notch', label='Near-misses', value=transcripts.near_miss, subtitle='≥0.30, below threshold' %}
+        {% include "components/_stat_tile.html" %}{% endwith %}
+      {% if transcripts.max_similarity is not none %}
+        {% with icon='fa-bullseye', label='Best match', value=('%.2f'|format(transcripts.max_similarity)), subtitle='peak cosine sim' %}
+          {% include "components/_stat_tile.html" %}{% endwith %}
+      {% endif %}
+    </div>
+  </section>
+  {% endif %}
+
   {# Did you know — random 3 facts on each page load #}
   <section class="space-y-2">
     <h2 class="font-semibold text-primary inline-flex items-center gap-2">
@@ -79,6 +110,17 @@
       <div class="relative h-64"><canvas id="chart-new-chatters"></canvas></div>
     </div>
 
+    {# Transcripts per day — only renders once whisper has produced rows. #}
+    {% if transcripts.chunks %}
+    <div class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 shadow-sm">
+      <h3 class="text-sm font-semibold mb-2 inline-flex items-center gap-2">
+        <i class="fa-solid fa-waveform-lines text-accent"></i> Stream voice per day
+        <span class="text-[11px] text-muted ml-auto">utterances · last 30 days</span>
+      </h3>
+      <div class="relative h-64"><canvas id="chart-transcripts-per-day"></canvas></div>
+    </div>
+    {% endif %}
+
     {# Donations breakdown — only renders when data exists #}
     {% if ev.tip_total or ev.bits_total or ev.sub_months %}
     <div class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 shadow-sm">
@@ -112,16 +154,43 @@
     {% endif %}
   </section>
 
-  {# Word cloud #}
-  {% if word_cloud %}
+  {# Word cloud — tabbed: chat (default) and voice transcripts. The voice
+     tab only renders if whisper has produced any tokenisable text. #}
+  {% if word_cloud or word_cloud_voice %}
   <section class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 shadow-sm">
-    <h3 class="text-sm font-semibold mb-2 inline-flex items-center gap-2">
-      <i class="fa-solid fa-cloud text-accent"></i> Word cloud
-      <span class="text-[11px] text-muted ml-auto">
-        top {{ word_cloud | length }} words across chat (stopwords removed)
-      </span>
-    </h3>
-    <div id="wordcloud-host" class="relative w-full" style="height: 360px;"></div>
+    <div class="flex items-baseline justify-between gap-2 mb-2 flex-wrap">
+      <h3 class="text-sm font-semibold inline-flex items-center gap-2">
+        <i class="fa-solid fa-cloud text-accent"></i> Word cloud
+      </h3>
+      <div role="tablist" aria-label="Word cloud source"
+           class="inline-flex rounded-lg border border-subtle overflow-hidden text-xs">
+        {% if word_cloud %}
+        <button type="button" role="tab" data-wc-tab="chat"
+                class="wc-tab px-3 py-1 bg-accent/15 text-primary"
+                aria-selected="true">
+          <i class="fa-solid fa-comment text-[10px] mr-1"></i>chat
+          <span class="text-muted ml-1">{{ word_cloud | length }}</span>
+        </button>
+        {% endif %}
+        {% if word_cloud_voice %}
+        <button type="button" role="tab" data-wc-tab="voice"
+                class="wc-tab px-3 py-1 hover:bg-surface-raised text-muted"
+                aria-selected="false">
+          <i class="fa-solid fa-microphone text-[10px] mr-1"></i>voice
+          <span class="text-muted ml-1">{{ word_cloud_voice | length }}</span>
+        </button>
+        {% endif %}
+      </div>
+    </div>
+    <div id="wordcloud-chat-host"
+         class="wc-pane relative w-full {% if not word_cloud %}hidden{% endif %}"
+         style="height: 360px;" data-wc-pane="chat"></div>
+    <div id="wordcloud-voice-host"
+         class="wc-pane relative w-full hidden"
+         style="height: 360px;" data-wc-pane="voice"></div>
+    {% if not word_cloud %}
+    <p class="text-xs text-muted italic">No chat words yet.</p>
+    {% endif %}
   </section>
   {% endif %}
 
@@ -170,6 +239,19 @@
     </h3>
     <blockquote class="border-l-2 border-accent/40 pl-3 text-sm text-primary italic break-words">
       {{ longest[1] }}
+    </blockquote>
+  </section>
+  {% endif %}
+
+  {# Longest single utterance — only when whisper has produced anything #}
+  {% if longest_utterance %}
+  <section class="rounded-xl border border-subtle bg-surface p-3 sm:p-4">
+    <h3 class="text-sm font-semibold mb-2 inline-flex items-center gap-2">
+      <i class="fa-solid fa-microphone text-accent"></i> Longest utterance ever
+      <span class="text-[11px] text-muted ml-auto">{{ longest_utterance[1] }} chars</span>
+    </h3>
+    <blockquote class="border-l-2 border-accent/40 pl-3 text-sm text-primary italic break-words">
+      {{ longest_utterance[0] }}
     </blockquote>
   </section>
   {% endif %}
@@ -272,33 +354,85 @@
     options: { responsive: true, maintainAspectRatio: false, ...noLegend, ...tightAxes },
   });
 
-  // Word cloud (wordcloud2.js). Renders into a <canvas> we inject.
-  {% if word_cloud %}
-  (function () {
-    const host = document.getElementById('wordcloud-host');
-    if (!host || typeof WordCloud !== 'function') return;
-    const cnv = document.createElement('canvas');
-    cnv.width = host.clientWidth || 800;
-    cnv.height = host.clientHeight || 360;
-    host.appendChild(cnv);
-    const palette = ['#9146FF', '#10B981', '#F59E0B', '#A266FF', '#7A2BFF'];
-    WordCloud(cnv, {
-      list: {{ word_cloud | tojson }},
-      gridSize: Math.round(8 * cnv.width / 800),
-      weightFactor: function (size) {
-        // size is the raw count; scale into a readable range.
-        return Math.max(8, Math.min(60, 6 + Math.log2(size + 1) * 8));
-      },
-      fontFamily: 'Inter, system-ui, sans-serif',
-      color: function () { return palette[Math.floor(Math.random() * palette.length)]; },
-      backgroundColor: 'transparent',
-      rotateRatio: 0.25,
-      rotationSteps: 2,
-      shrinkToFit: true,
-    });
-    // Re-render on theme change (colors stay; size could shift).
-  })();
+  // Transcripts per day (line) — mirror of "Messages per day" but for voice.
+  {% if transcripts.chunks %}
+  new Chart(document.getElementById('chart-transcripts-per-day'), {
+    type: 'line',
+    data: {
+      labels: {{ transcripts_per_day_labels | tojson }},
+      datasets: [{
+        data: {{ transcripts_per_day_values | tojson }},
+        borderColor: '#F59E0B',
+        backgroundColor: 'rgba(245, 158, 11, 0.18)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 2,
+        pointHoverRadius: 5,
+      }],
+    },
+    options: { responsive: true, maintainAspectRatio: false, ...noLegend, ...tightAxes },
+  });
   {% endif %}
+
+  // Word cloud (wordcloud2.js). Tabbed between chat + voice — render
+  // each on first selection so we don't pay the layout cost twice up
+  // front. Tab buttons toggle .hidden on the corresponding host.
+  (function () {
+    if (typeof WordCloud !== 'function') return;
+    const palette = ['#9146FF', '#10B981', '#F59E0B', '#A266FF', '#7A2BFF'];
+    const lists = {
+      chat:  {{ word_cloud | tojson }},
+      voice: {{ word_cloud_voice | tojson }},
+    };
+    const rendered = {chat: false, voice: false};
+
+    function renderInto(host, list) {
+      const cnv = document.createElement('canvas');
+      cnv.width = host.clientWidth || 800;
+      cnv.height = host.clientHeight || 360;
+      host.appendChild(cnv);
+      WordCloud(cnv, {
+        list: list,
+        gridSize: Math.round(8 * cnv.width / 800),
+        weightFactor: function (size) {
+          return Math.max(8, Math.min(60, 6 + Math.log2(size + 1) * 8));
+        },
+        fontFamily: 'Inter, system-ui, sans-serif',
+        color: function () { return palette[Math.floor(Math.random() * palette.length)]; },
+        backgroundColor: 'transparent',
+        rotateRatio: 0.25,
+        rotationSteps: 2,
+        shrinkToFit: true,
+      });
+    }
+
+    function showTab(name) {
+      document.querySelectorAll('.wc-pane').forEach(p => {
+        const match = p.dataset.wcPane === name;
+        p.classList.toggle('hidden', !match);
+        if (match && !rendered[name] && lists[name] && lists[name].length) {
+          renderInto(p, lists[name]);
+          rendered[name] = true;
+        }
+      });
+      document.querySelectorAll('.wc-tab').forEach(b => {
+        const active = b.dataset.wcTab === name;
+        b.setAttribute('aria-selected', active ? 'true' : 'false');
+        b.classList.toggle('bg-accent/15', active);
+        b.classList.toggle('text-primary', active);
+        b.classList.toggle('text-muted', !active);
+        b.classList.toggle('hover:bg-surface-raised', !active);
+      });
+    }
+
+    document.querySelectorAll('.wc-tab').forEach(btn => {
+      btn.addEventListener('click', () => showTab(btn.dataset.wcTab));
+    });
+
+    // Render the default tab (chat if present, else voice).
+    if (lists.chat && lists.chat.length) showTab('chat');
+    else if (lists.voice && lists.voice.length) showTab('voice');
+  })();
 
   // Support breakdown (donut). Tips → $, bits → $/100 (1 bit ≈ $0.01),
   // sub months → $5 each (Tier-1 baseline). Rough but useful.

@@ -87,30 +87,36 @@
       </div>
       {% include "partials/star_button.html" %}
       <button type="button"
-              class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary text-sm transition-all duration-150 ease-out"
+              class="tap inline-flex items-center justify-center w-9 h-9 rounded bg-surface-raised hover:bg-subtle text-primary text-sm transition-all duration-150 ease-out"
               hx-get="/modals/insight/adhoc/{{ user.twitch_id }}"
               hx-target="#modal-root"
               hx-swap="innerHTML"
+              aria-label="What to say"
               title="Ad-hoc — what should I say to this chatter right now?">
-        <i class="fa-solid fa-comment-dots"></i> what to say
+        <i class="fa-solid fa-comment-dots"></i>
       </button>
       <form hx-post="/users/{{ user.twitch_id }}/opt-out" hx-target="#opt-out-area" hx-swap="innerHTML">
-        <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary text-sm transition-all duration-150 ease-out">
+        <button class="tap inline-flex items-center justify-center w-9 h-9 rounded bg-surface-raised hover:bg-subtle text-primary text-sm transition-all duration-150 ease-out"
+                aria-label="{{ 'Un-opt-out' if user.opt_out else 'Opt-out' }}"
+                title="{{ 'Re-include this viewer in summarization' if user.opt_out else 'Stop summarizing this viewer' }}">
           <i class="fa-solid {{ 'fa-eye' if user.opt_out else 'fa-eye-slash' }}"></i>
-          {{ 'un-opt-out' if user.opt_out else 'opt-out' }}
         </button>
       </form>
       {% if not user.merged_into %}
-        <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary text-sm transition-all duration-150 ease-out"
+        <button class="tap inline-flex items-center justify-center w-9 h-9 rounded bg-surface-raised hover:bg-subtle text-primary text-sm transition-all duration-150 ease-out"
                 hx-get="/modals/merge/{{ user.twitch_id }}"
-                hx-target="#modal-root">
-          <i class="fa-solid fa-code-merge"></i> merge
+                hx-target="#modal-root"
+                aria-label="Merge"
+                title="Merge into another chatter (cross-platform identity)">
+          <i class="fa-solid fa-code-merge"></i>
         </button>
       {% endif %}
-      <button class="tap inline-flex items-center gap-2 px-3 rounded bg-danger/15 hover:bg-danger/25 text-danger text-sm transition-all duration-150 ease-out"
+      <button class="tap inline-flex items-center justify-center w-9 h-9 rounded bg-danger/15 hover:bg-danger/25 text-danger text-sm transition-all duration-150 ease-out"
               hx-get="/modals/forget/{{ user.twitch_id }}"
-              hx-target="#modal-root">
-        <i class="fa-solid fa-arrow-right-from-bracket"></i> forget
+              hx-target="#modal-root"
+              aria-label="Forget"
+              title="Forget — delete every row that touches this user">
+        <i class="fa-solid fa-arrow-right-from-bracket"></i>
       </button>
     </div>
   </header>
@@ -146,60 +152,11 @@
     </div>
   {% endif %}
 
-  {# Soft profile — pronouns / location / demeanor / interests built by
-     the LLM extractor over time. Hidden when the LLM hasn't seen any
-     clear signal yet, to avoid an empty placeholder. #}
-  {% set _has_profile = user.pronouns or user.location or user.demeanor or user.interests %}
-  {% if _has_profile %}
-    {% set _dem_tone = {
-      'hype':       'danger',
-      'chill':      'success',
-      'supportive': 'success',
-      'snarky':     'warning',
-      'quiet':      'neutral',
-      'analytical': 'accent',
-      'unknown':    'neutral',
-    }.get(user.demeanor or 'unknown', 'neutral') %}
-    <section class="rounded-xl border border-accent/30 bg-accent/5 p-3 sm:p-4">
-      <header class="flex items-baseline justify-between gap-2 mb-2">
-        <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-          <i class="fa-solid fa-id-badge text-accent"></i> Profile
-        </h2>
-        {% if user.profile_updated_at %}
-          <span class="text-[10px] text-muted">refreshed {{ user.profile_updated_at | short_ts }}</span>
-        {% endif %}
-      </header>
-      <div class="flex flex-wrap items-center gap-2 text-sm">
-        {% if user.pronouns %}
-          <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-subtle bg-surface text-primary">
-            <i class="fa-solid fa-user text-[10px] text-muted"></i> {{ user.pronouns }}
-          </span>
-        {% endif %}
-        {% if user.location %}
-          <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-subtle bg-surface text-primary">
-            <i class="fa-solid fa-location-dot text-[10px] text-muted"></i> {{ user.location }}
-          </span>
-        {% endif %}
-        {% if user.demeanor and user.demeanor != 'unknown' %}
-          {% with label=user.demeanor, tone=_dem_tone, icon='fa-face-smile' %}
-            {% include "components/_pill.html" %}
-          {% endwith %}
-        {% endif %}
-      </div>
-      {% if user.interests %}
-        <div class="mt-2">
-          <p class="text-[11px] uppercase tracking-wider text-muted mb-1">interests</p>
-          <div class="flex flex-wrap gap-1">
-            {% for tag in user.interests %}
-              <span class="inline-flex items-center px-2 py-0.5 text-xs rounded-full border border-accent/30 bg-accent/15 text-accent">
-                {{ tag }}
-              </span>
-            {% endfor %}
-          </div>
-        </div>
-      {% endif %}
-    </section>
-  {% endif %}
+  {# Soft profile — pronouns / location / demeanor / interests. Maintained
+     by the LLM extractor over time, but the streamer can edit / clear
+     directly via the modal. Always rendered (even when empty) so the edit
+     affordance is reachable. #}
+  {% include "partials/profile_section.html" %}
 
   {# Stat tiles #}
   <section class="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -249,10 +206,10 @@
     </details>
   </section>
 
-  {# Profile / notes #}
+  {# Notes — manual + LLM-extracted, searchable, filterable, paginated. #}
   <section class="space-y-2">
     <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-      <i class="fa-solid fa-id-card text-accent"></i> Profile
+      <i class="fa-solid fa-note-sticky text-accent"></i> Notes
     </h2>
     <form hx-post="/users/{{ user.twitch_id }}/notes"
           hx-target="#notes-list"

@@ -71,6 +71,7 @@ TEMPLATES = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 
 PAGE_SIZE = 50
 MESSAGE_PAGE_SIZE = 50
+NOTES_PAGE_SIZE = 20
 
 
 def _short_ts(ts: str | None) -> str:
@@ -303,7 +304,11 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         user = repo.get_user(twitch_id)
         if not user:
             raise HTTPException(404, "user not found")
-        notes_with_sources = repo.get_notes_with_sources(twitch_id)
+        notes_with_sources = repo.get_notes_filtered(
+            twitch_id, query="", origin="all",
+            limit=NOTES_PAGE_SIZE, offset=0,
+        )
+        notes_total = repo.count_notes_filtered(twitch_id, query="", origin="all")
         events = repo.get_user_events(twitch_id, limit=50)
         summary = repo.get_user_event_summary(twitch_id)
         messages = repo.get_messages(twitch_id, limit=MESSAGE_PAGE_SIZE)
@@ -337,6 +342,11 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             {
                 "user": user,
                 "notes_with_sources": notes_with_sources,
+                "notes_total": notes_total,
+                "notes_page": 1,
+                "notes_pages": max(1, (notes_total + NOTES_PAGE_SIZE - 1) // NOTES_PAGE_SIZE),
+                "notes_q": "",
+                "notes_origin": "all",
                 "events": events,
                 "summary": summary,
                 "messages": messages,
@@ -466,6 +476,46 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             request, "partials/star_button.html", {"user": user},
         )
 
+    def _notes_partial_ctx(
+        twitch_id: str,
+        *,
+        q: str,
+        origin: str,
+        page: int,
+    ) -> dict:
+        """Shared context builder for the notes partial — used by add, the
+        GET partial route, and any time we need to re-render the list."""
+        page = max(1, page)
+        offset = (page - 1) * NOTES_PAGE_SIZE
+        nws = repo.get_notes_filtered(
+            twitch_id, query=q, origin=origin,
+            limit=NOTES_PAGE_SIZE, offset=offset,
+        )
+        total = repo.count_notes_filtered(twitch_id, query=q, origin=origin)
+        pages = max(1, (total + NOTES_PAGE_SIZE - 1) // NOTES_PAGE_SIZE)
+        return {
+            "notes_with_sources": nws,
+            "notes_total": total,
+            "notes_page": page,
+            "notes_pages": pages,
+            "notes_q": q,
+            "notes_origin": origin,
+            "user": {"twitch_id": twitch_id},
+        }
+
+    @app.get("/users/{twitch_id}/notes", response_class=HTMLResponse)
+    async def user_notes_partial(
+        request: Request,
+        twitch_id: str,
+        q: str = Query(""),
+        origin: str = Query("all"),
+        page: int = Query(1, ge=1),
+    ):
+        if origin not in ("all", "manual", "llm", "suspect"):
+            origin = "all"
+        ctx = _notes_partial_ctx(twitch_id, q=q, origin=origin, page=page)
+        return TEMPLATES.TemplateResponse(request, "partials/notes_list.html", ctx)
+
     @app.post("/users/{twitch_id}/notes", response_class=HTMLResponse)
     async def add_user_note(
         request: Request,
@@ -473,29 +523,21 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         text: Annotated[str, Form()],
     ):
         text = text.strip()
-        if not text:
-            # Empty submissions: just re-render the current list, no insert.
-            nws = repo.get_notes_with_sources(twitch_id) if repo.get_user(twitch_id) else []
-            return TEMPLATES.TemplateResponse(
-                request, "partials/notes_list.html", {"notes_with_sources": nws}
-            )
         user = repo.get_user(twitch_id)
         if not user:
             raise HTTPException(404, "user not found")
-        # Embed for RAG; non-fatal if Ollama is unreachable.
-        embedding: list[float] | None
-        try:
-            embedding = await llm.embed(text[:500])
-        except Exception:
-            logger.exception("embed failed for manual note; storing without vector")
-            embedding = None
-        # Manual notes have no source_message_ids — origin='manual' so the
-        # template shows them as such (vs llm-extracted ones with sources).
-        repo.add_note(twitch_id, text[:500], embedding, origin="manual")
-        nws = repo.get_notes_with_sources(twitch_id)
-        return TEMPLATES.TemplateResponse(
-            request, "partials/notes_list.html", {"notes_with_sources": nws}
-        )
+        if text:
+            embedding: list[float] | None
+            try:
+                embedding = await llm.embed(text[:500])
+            except Exception:
+                logger.exception("embed failed for manual note; storing without vector")
+                embedding = None
+            repo.add_note(twitch_id, text[:500], embedding, origin="manual")
+        # Always reset to page 1 / no filter so the streamer sees what they
+        # just added at the top of the list.
+        ctx = _notes_partial_ctx(twitch_id, q="", origin="all", page=1)
+        return TEMPLATES.TemplateResponse(request, "partials/notes_list.html", ctx)
 
     @app.patch("/notes/{note_id}", response_class=HTMLResponse)
     async def patch_note(
@@ -863,6 +905,54 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             request, "modals/_edit_note.html", {"note": note}
         )
 
+    @app.get("/modals/profile/{twitch_id}/edit", response_class=HTMLResponse)
+    async def modal_edit_profile(request: Request, twitch_id: str):
+        user = repo.get_user(twitch_id)
+        if not user:
+            raise HTTPException(404, "user not found")
+        # interests is stored JSON-encoded in the column; the user model
+        # already deserialises it. Render as comma-joined for the form.
+        interests = user.interests or []
+        return TEMPLATES.TemplateResponse(
+            request,
+            "modals/_edit_profile.html",
+            {"user": user, "interests_csv": ", ".join(interests)},
+        )
+
+    @app.post("/users/{twitch_id}/profile", response_class=HTMLResponse)
+    async def update_user_profile_form(
+        request: Request,
+        twitch_id: str,
+        pronouns: Annotated[str, Form()] = "",
+        location: Annotated[str, Form()] = "",
+        demeanor: Annotated[str, Form()] = "",
+        interests: Annotated[str, Form()] = "",
+    ):
+        if not repo.get_user(twitch_id):
+            raise HTTPException(404, "user not found")
+        # demeanor: only persist when one of the known buckets so we don't
+        # poison the LLM-extractor's signal with free-form values. Empty =>
+        # clear it.
+        valid_demeanors = {"hype", "chill", "supportive", "snarky",
+                            "quiet", "analytical", "unknown"}
+        d = demeanor.strip().lower() if demeanor else ""
+        if d and d not in valid_demeanors:
+            d = ""
+        interest_list = [
+            tag.strip() for tag in (interests or "").split(",") if tag.strip()
+        ]
+        repo.set_user_profile(
+            twitch_id,
+            pronouns=pronouns,
+            location=location,
+            demeanor=d or None,
+            interests=interest_list or None,
+        )
+        user = repo.get_user(twitch_id)
+        return TEMPLATES.TemplateResponse(
+            request, "partials/profile_section.html", {"user": user},
+        )
+
     @app.get("/modals/note/{note_id}/delete", response_class=HTMLResponse)
     async def modal_delete_note(request: Request, note_id: int):
         note = repo.get_note(note_id)
@@ -1050,6 +1140,16 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         top_supporters = repo.stats_top_supporters(limit=5)
         new_per_week = repo.stats_new_chatters_per_week(weeks=12)
 
+        # Whisper transcript aggregates — only render the section if
+        # whisper has actually produced rows, but keep the data flowing
+        # for "did you know" facts whether the service is currently on
+        # or off.
+        live_settings = get_settings()
+        match_threshold = float(live_settings.whisper_match_threshold)
+        transcripts = repo.stats_transcripts(match_threshold=match_threshold)
+        transcripts_per_day = repo.stats_transcripts_per_day(days=30)
+        longest_utterance = repo.stats_longest_utterance()
+
         # "Did you know" pool — pick 3 at random per page load.
         avg_len = repo.stats_avg_message_length()
         longest = repo.stats_longest_message()
@@ -1107,6 +1207,18 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 f"<b>{ev['bits_total']:,}</b> bits cheered across "
                 f"{ev['unique_cheerers']:,} chatters."
             )
+        if transcripts["chunks"]:
+            mins = transcripts["total_seconds"] / 60.0
+            facts.append(
+                f"Whisper has logged <b>{transcripts['chunks']:,}</b> "
+                f"utterances totalling <b>{mins:,.0f}</b> minutes of stream voice."
+            )
+            if transcripts["auto_addressed"]:
+                pct = 100.0 * transcripts["auto_addressed"] / transcripts["chunks"]
+                facts.append(
+                    f"Of those, <b>{transcripts['auto_addressed']:,}</b> "
+                    f"({pct:.0f}%) auto-addressed an open insight card."
+                )
         if not facts:
             facts.append(
                 "No data yet — your stats grow as chatters speak."
@@ -1121,6 +1233,12 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         except Exception:
             logger.exception("stats: word-cloud query failed")
             top_words = []
+
+        try:
+            top_words_voice = repo.stats_top_words_transcripts(limit=120, min_count=2)
+        except Exception:
+            logger.exception("stats: transcript word-cloud query failed")
+            top_words_voice = []
 
         try:
             sessions = repo.stream_sessions(gap_minutes=30, limit=12)
@@ -1145,7 +1263,13 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "facts": random_facts,
                 "longest": longest,
                 "word_cloud": [[w, c] for w, c in top_words],
+                "word_cloud_voice": [[w, c] for w, c in top_words_voice],
                 "sessions": sessions,
+                "transcripts": transcripts,
+                "transcripts_per_day_labels": [d for d, _ in transcripts_per_day],
+                "transcripts_per_day_values": [n for _, n in transcripts_per_day],
+                "longest_utterance": longest_utterance,
+                "match_threshold": match_threshold,
             },
         )
 

@@ -2476,6 +2476,95 @@ class ChatterRepo:
             ).fetchone()
             return (row["name"], row["first_seen"]) if row else None
 
+    def stats_transcripts(self, *, match_threshold: float = 0.55) -> dict[str, float | int | str | None]:
+        """Aggregate stats over `transcript_chunks` for the stats page. Empty
+        DBs (whisper never ran) return zeros, not None."""
+        out: dict[str, float | int | str | None] = {
+            "chunks": 0,
+            "total_seconds": 0.0,
+            "matched": 0,
+            "auto_addressed": 0,
+            "near_miss": 0,
+            "mean_similarity": None,
+            "max_similarity": None,
+            "first_ts": None,
+            "last_ts": None,
+        }
+        try:
+            with self._cursor() as cur:
+                row = cur.execute(
+                    """
+                    SELECT
+                      COUNT(*)                                              AS chunks,
+                      COALESCE(SUM(duration_ms), 0) / 1000.0                AS total_seconds,
+                      SUM(CASE WHEN similarity IS NOT NULL THEN 1 ELSE 0 END) AS matched,
+                      SUM(CASE WHEN similarity >= ? THEN 1 ELSE 0 END)      AS auto_addressed,
+                      SUM(CASE WHEN similarity IS NOT NULL AND similarity >= 0.30
+                               AND similarity < ? THEN 1 ELSE 0 END)        AS near_miss,
+                      AVG(similarity)                                       AS mean_sim,
+                      MAX(similarity)                                       AS max_sim,
+                      MIN(ts)                                               AS first_ts,
+                      MAX(ts)                                               AS last_ts
+                    FROM transcript_chunks
+                    """,
+                    (float(match_threshold), float(match_threshold)),
+                ).fetchone()
+        except sqlite3.Error:
+            return out
+        if not row or not row["chunks"]:
+            return out
+        out["chunks"] = int(row["chunks"])
+        out["total_seconds"] = float(row["total_seconds"] or 0.0)
+        out["matched"] = int(row["matched"] or 0)
+        out["auto_addressed"] = int(row["auto_addressed"] or 0)
+        out["near_miss"] = int(row["near_miss"] or 0)
+        out["mean_similarity"] = float(row["mean_sim"]) if row["mean_sim"] is not None else None
+        out["max_similarity"] = float(row["max_sim"]) if row["max_sim"] is not None else None
+        out["first_ts"] = row["first_ts"]
+        out["last_ts"] = row["last_ts"]
+        return out
+
+    def stats_transcripts_per_day(self, days: int = 30) -> list[tuple[str, int]]:
+        """Daily utterance counts for the last `days`. Days with zero are
+        emitted explicitly so the chart x-axis stays continuous."""
+        try:
+            with self._cursor() as cur:
+                rows = cur.execute(
+                    """
+                    SELECT date(ts) AS d, COUNT(*) AS c
+                    FROM transcript_chunks
+                    WHERE ts >= datetime('now', ?)
+                    GROUP BY date(ts)
+                    """,
+                    (f"-{int(days)} days",),
+                ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        from datetime import date, timedelta
+        counts = {r["d"]: int(r["c"]) for r in rows}
+        today = date.today()
+        out: list[tuple[str, int]] = []
+        for i in range(days - 1, -1, -1):
+            d = today - timedelta(days=i)
+            key = d.isoformat()
+            out.append((key, counts.get(key, 0)))
+        return out
+
+    def stats_longest_utterance(self) -> tuple[str, int] | None:
+        """Single utterance with the most characters. (text, length).
+        Returns None if there are no transcripts yet."""
+        try:
+            with self._cursor() as cur:
+                row = cur.execute(
+                    "SELECT text, length(text) AS n FROM transcript_chunks "
+                    "ORDER BY n DESC LIMIT 1"
+                ).fetchone()
+        except sqlite3.Error:
+            return None
+        if not row or not row["n"]:
+            return None
+        return (row["text"], int(row["n"]))
+
     # ============================ Insights queries =========================
     # Streamer-only views: who's chatting now, who are the regulars, who's
     # lapsed, who's new today. All read-only / aggregate; no LLM calls here.
@@ -3146,6 +3235,162 @@ class ChatterRepo:
             NoteWithSources(note=n, sources=self.get_note_sources(n.id))
             for n in notes
         ]
+
+    def get_notes_filtered(
+        self,
+        user_id: str,
+        *,
+        query: str = "",
+        origin: str = "all",
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[NoteWithSources]:
+        """Filtered + paginated notes for the user-detail page.
+
+        `origin` is one of 'all' | 'manual' | 'llm' | 'suspect'.
+        - 'manual' = origin column = 'manual'
+        - 'llm'    = origin column = 'llm' AND has at least one cited source
+        - 'suspect' = origin column = 'llm' AND no cited sources
+                      (pre-hallucination-guard era — flag for review)
+
+        `query` is a case-insensitive LIKE substring match against the
+        note text.
+        """
+        params: list = [user_id]
+        clauses: list[str] = ["n.user_id = ?"]
+
+        if query and query.strip():
+            clauses.append("LOWER(n.text) LIKE ?")
+            params.append(f"%{query.strip().lower()}%")
+
+        join_sql = ""
+        having_sql = ""
+        if origin == "manual":
+            clauses.append("(n.origin IS NULL OR n.origin = 'manual')")
+        elif origin == "llm":
+            clauses.append("n.origin = 'llm'")
+            join_sql = "LEFT JOIN note_sources ns ON ns.note_id = n.id"
+            having_sql = "HAVING COUNT(ns.message_id) > 0"
+        elif origin == "suspect":
+            clauses.append("n.origin = 'llm'")
+            join_sql = "LEFT JOIN note_sources ns ON ns.note_id = n.id"
+            having_sql = "HAVING COUNT(ns.message_id) = 0"
+
+        where_sql = " AND ".join(clauses)
+        group_sql = "GROUP BY n.id" if join_sql else ""
+        sql = f"""
+            SELECT n.id, n.user_id, n.ts, n.text, n.origin
+            FROM notes n
+            {join_sql}
+            WHERE {where_sql}
+            {group_sql}
+            {having_sql}
+            ORDER BY n.ts DESC
+            LIMIT ? OFFSET ?
+        """
+        params.extend([int(limit), int(offset)])
+
+        with self._cursor() as cur:
+            rows = cur.execute(sql, params).fetchall()
+            notes = [
+                Note(
+                    id=int(r["id"]), user_id=r["user_id"], ts=r["ts"],
+                    text=r["text"], origin=r["origin"] or "manual",
+                )
+                for r in rows
+            ]
+        return [
+            NoteWithSources(note=n, sources=self.get_note_sources(n.id))
+            for n in notes
+        ]
+
+    def count_notes_filtered(
+        self,
+        user_id: str,
+        *,
+        query: str = "",
+        origin: str = "all",
+    ) -> int:
+        """Match the filter logic of get_notes_filtered for pagination math."""
+        params: list = [user_id]
+        clauses: list[str] = ["n.user_id = ?"]
+
+        if query and query.strip():
+            clauses.append("LOWER(n.text) LIKE ?")
+            params.append(f"%{query.strip().lower()}%")
+
+        join_sql = ""
+        having_sql = ""
+        if origin == "manual":
+            clauses.append("(n.origin IS NULL OR n.origin = 'manual')")
+        elif origin == "llm":
+            clauses.append("n.origin = 'llm'")
+            join_sql = "LEFT JOIN note_sources ns ON ns.note_id = n.id"
+            having_sql = "HAVING COUNT(ns.message_id) > 0"
+        elif origin == "suspect":
+            clauses.append("n.origin = 'llm'")
+            join_sql = "LEFT JOIN note_sources ns ON ns.note_id = n.id"
+            having_sql = "HAVING COUNT(ns.message_id) = 0"
+
+        where_sql = " AND ".join(clauses)
+
+        if join_sql:
+            sql = f"""
+                SELECT COUNT(*) FROM (
+                  SELECT n.id
+                  FROM notes n
+                  {join_sql}
+                  WHERE {where_sql}
+                  GROUP BY n.id
+                  {having_sql}
+                )
+            """
+        else:
+            sql = f"SELECT COUNT(*) FROM notes n WHERE {where_sql}"
+
+        with self._cursor() as cur:
+            return int(cur.execute(sql, params).fetchone()[0])
+
+    def set_user_profile(
+        self,
+        twitch_id: str,
+        *,
+        pronouns: str | None,
+        location: str | None,
+        demeanor: str | None,
+        interests: list[str] | None,
+    ) -> None:
+        """Strict-set semantics for the manual edit form: empty string ⇒ NULL,
+        empty list ⇒ NULL. Distinct from update_user_profile (which has
+        merge-only semantics for the LLM extractor)."""
+        norm_pronouns = pronouns.strip() if pronouns and pronouns.strip() else None
+        norm_location = location.strip() if location and location.strip() else None
+        norm_demeanor = demeanor.strip() if demeanor and demeanor.strip() else None
+        cleaned: list[str] = []
+        if interests:
+            seen: set[str] = set()
+            for entry in interests:
+                if not entry:
+                    continue
+                e = entry.strip()
+                if not e or e.lower() in seen:
+                    continue
+                cleaned.append(e)
+                seen.add(e.lower())
+        norm_interests = json.dumps(cleaned) if cleaned else None
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                UPDATE users SET
+                  pronouns = ?, location = ?, demeanor = ?,
+                  interests = ?, profile_updated_at = ?
+                WHERE twitch_id = ?
+                """,
+                (
+                    norm_pronouns, norm_location, norm_demeanor,
+                    norm_interests, _now_iso(), twitch_id,
+                ),
+            )
 
     def get_notes(self, user_id: str) -> list[Note]:
         with self._cursor() as cur:
@@ -3888,6 +4133,29 @@ class ChatterRepo:
                     if w in self._WORDCLOUD_STOPWORDS:
                         continue
                     counter[w] += 1
+        return [(w, c) for w, c in counter.most_common(limit) if c >= min_count]
+
+    def stats_top_words_transcripts(
+        self, *, limit: int = 100, min_count: int = 2
+    ) -> list[tuple[str, int]]:
+        """Top-words across whisper transcripts — same tokenisation as chat,
+        but min_count defaults lower since transcript volume is much
+        smaller than chat volume on most streams."""
+        import re as _re
+        from collections import Counter as _Counter
+        word_re = _re.compile(r"\b[a-z]{3,20}\b")
+        counter: _Counter[str] = _Counter()
+        try:
+            with self._cursor() as cur:
+                cur.execute("SELECT text FROM transcript_chunks")
+                for r in cur.fetchall():
+                    text = (r["text"] or "").lower()
+                    for w in word_re.findall(text):
+                        if w in self._WORDCLOUD_STOPWORDS:
+                            continue
+                        counter[w] += 1
+        except sqlite3.Error:
+            return []
         return [(w, c) for w, c in counter.most_common(limit) if c >= min_count]
 
     def get_topic_snapshot(self, snapshot_id: int) -> TopicSnapshot | None:

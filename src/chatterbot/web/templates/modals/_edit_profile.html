@@ -1,0 +1,73 @@
+{% set modal_title = 'Edit profile · ' ~ user.name %}
+{% set modal_icon = 'fa-id-badge' %}
+{% set modal_tone = 'accent' %}
+{% set modal_size = 'md' %}
+{% extends "components/_modal.html" %}
+{% block modal_body %}
+{% set demeanors = ['hype', 'chill', 'supportive', 'snarky', 'quiet', 'analytical'] %}
+<form class="space-y-4 text-sm"
+      hx-post="/users/{{ user.twitch_id }}/profile"
+      hx-target="#profile-section"
+      hx-swap="outerHTML"
+      hx-on::after-request="if (event.detail.successful) window.chatterbotCloseModal()">
+  <p class="text-xs text-muted">
+    Manual edits take immediate effect. The LLM extractor still augments these
+    over time but won't overwrite values that you've set explicitly.
+  </p>
+
+  <label class="block">
+    <span class="text-[11px] uppercase tracking-wider text-muted">Pronouns</span>
+    <input type="text" name="pronouns" value="{{ user.pronouns or '' }}"
+           maxlength="40" placeholder="e.g. she/her"
+           class="mt-1 w-full tap bg-canvas border border-subtle rounded px-3 py-2 text-base text-primary
+                  focus:outline-none focus:ring-2 focus:ring-accent">
+  </label>
+
+  <label class="block">
+    <span class="text-[11px] uppercase tracking-wider text-muted">Location</span>
+    <input type="text" name="location" value="{{ user.location or '' }}"
+           maxlength="80" placeholder="e.g. Tokyo · Pacific NW · UK"
+           class="mt-1 w-full tap bg-canvas border border-subtle rounded px-3 py-2 text-base text-primary
+                  focus:outline-none focus:ring-2 focus:ring-accent">
+  </label>
+
+  <fieldset>
+    <legend class="text-[11px] uppercase tracking-wider text-muted mb-1">Demeanor</legend>
+    <div class="flex flex-wrap gap-1.5">
+      <label class="inline-flex items-center gap-1.5 px-2 py-1 rounded-full border border-subtle bg-canvas hover:bg-surface-raised cursor-pointer text-xs text-muted has-[:checked]:bg-accent/15 has-[:checked]:text-primary has-[:checked]:border-accent/40">
+        <input type="radio" name="demeanor" value="" class="hidden peer"
+               {% if not user.demeanor or user.demeanor == 'unknown' %}checked{% endif %}>
+        <i class="fa-solid fa-circle-xmark text-[10px]"></i> none
+      </label>
+      {% for d in demeanors %}
+        <label class="inline-flex items-center gap-1.5 px-2 py-1 rounded-full border border-subtle bg-canvas hover:bg-surface-raised cursor-pointer text-xs text-muted has-[:checked]:bg-accent/15 has-[:checked]:text-primary has-[:checked]:border-accent/40">
+          <input type="radio" name="demeanor" value="{{ d }}" class="hidden peer"
+                 {% if user.demeanor == d %}checked{% endif %}>
+          {{ d }}
+        </label>
+      {% endfor %}
+    </div>
+  </fieldset>
+
+  <label class="block">
+    <span class="text-[11px] uppercase tracking-wider text-muted">Interests</span>
+    <input type="text" name="interests" value="{{ interests_csv }}"
+           maxlength="500" placeholder="comma-separated · e.g. resident evil, speedruns, bonsai"
+           class="mt-1 w-full tap bg-canvas border border-subtle rounded px-3 py-2 text-base text-primary
+                  focus:outline-none focus:ring-2 focus:ring-accent">
+    <span class="text-[10px] text-muted">Leave a field blank to clear it.</span>
+  </label>
+
+  <div class="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 pt-1">
+    <button type="button"
+            class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-surface-raised hover:bg-subtle text-primary"
+            onclick="window.chatterbotCloseModal()">
+      Cancel
+    </button>
+    <button type="submit"
+            class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-accent hover:bg-accent-600 text-white font-medium">
+      <i class="fa-solid fa-floppy-disk"></i> Save
+    </button>
+  </div>
+</form>
+{% endblock %}
