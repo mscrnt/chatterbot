@@ -87,9 +87,16 @@ class InsightsService:
         interval = interval_seconds or self.DEFAULT_REFRESH_SECONDS
         # First pass after a small delay so the dashboard finishes booting.
         await asyncio.sleep(5)
+        last_processed_id = 0
         while True:
             try:
-                await self._refresh()
+                # Skip when no new messages have arrived since the last
+                # refresh — same active chatters, same recent messages,
+                # would just produce the same talking points.
+                latest = await asyncio.to_thread(self.repo.latest_message_id)
+                if latest > last_processed_id:
+                    await self._refresh()
+                    last_processed_id = latest
             except asyncio.CancelledError:
                 raise
             except Exception:

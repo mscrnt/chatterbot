@@ -397,10 +397,19 @@ class Summarizer:
     async def topics_loop(self) -> None:
         interval_seconds = max(60, self.settings.topics_interval_minutes * 60)
         max_msgs = self.settings.topics_max_messages
+        last_processed_id = 0
         while True:
             try:
                 await asyncio.sleep(interval_seconds)
+                # Skip the LLM call entirely when no new messages have
+                # arrived since our last snapshot — same window in, same
+                # topics out, just wasted inference. The bot wakes the
+                # next iteration on schedule and re-checks.
+                latest = await asyncio.to_thread(self.repo.latest_message_id)
+                if latest <= last_processed_id:
+                    continue
                 await self._take_topic_snapshot(max_msgs)
+                last_processed_id = latest
             except asyncio.CancelledError:
                 raise
             except Exception:

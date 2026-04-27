@@ -899,6 +899,15 @@ class ChatterRepo:
                 for r in cur.fetchall()
             ]
 
+    def latest_message_id(self) -> int:
+        """The highest message id in the table, or 0 if empty. Used by the
+        topics + insights loops as a freshness check — if this hasn't
+        advanced since their last run, there's no point re-summarizing the
+        same window."""
+        with self._cursor() as cur:
+            cur.execute("SELECT COALESCE(MAX(id), 0) AS m FROM messages")
+            return int(cur.fetchone()["m"])
+
     def is_opted_out(self, twitch_id: str) -> bool:
         with self._cursor() as cur:
             cur.execute("SELECT opt_out FROM users WHERE twitch_id = ?", (twitch_id,))
