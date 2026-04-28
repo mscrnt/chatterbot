@@ -1,0 +1,118 @@
+{# Vanilla JS driver for the Individuals panel (Talking-to-you /
+   Active-but-not-engaged tabs + show-more queue expansion).
+
+   Bypassing Alpine here because the panel re-renders on every
+   SSE-triggered body swap, and Alpine's re-hydration on this
+   specific subtree was unreliable — both panes would go blank
+   after a few swaps. Delegated body-level click handlers run
+   regardless of how often the DOM gets replaced; the apply()
+   pass after each swap re-syncs visibility from localStorage
+   so the streamer's choice survives.
+
+   localStorage keys (unchanged from the Alpine version):
+     chatterbot.insightIndividualsTab    — 'mentions' | 'lurkers'
+     chatterbot.mentionsExpanded         — '1' | '0'
+     chatterbot.lurkersExpanded          — '1' | '0' #}
+<script>
+(function () {
+  if (window._chatterbotIndividualsBound) {
+    // Re-apply state on each htmx swap that re-renders the panel.
+    window._chatterbotIndividualsApply();
+    return;
+  }
+  window._chatterbotIndividualsBound = true;
+
+  const TAB_KEY = 'chatterbot.insightIndividualsTab';
+  const EXP_KEYS = {
+    mentions: 'chatterbot.mentionsExpanded',
+    lurkers:  'chatterbot.lurkersExpanded',
+  };
+  const ACTIVE_BTN = ['border-warning', 'text-warning', 'bg-warning/10', 'font-semibold'];
+  const IDLE_BTN   = ['border-transparent', 'text-muted', 'hover:text-primary', 'hover:bg-surface-raised'];
+
+  function readTab(panel) {
+    const stored = localStorage.getItem(TAB_KEY);
+    if (stored === 'mentions' || stored === 'lurkers') return stored;
+    return panel.dataset.defaultTab || 'mentions';
+  }
+
+  function applyTab(panel, tab) {
+    // Buttons: active / idle classes.
+    panel.querySelectorAll('[data-tab-target]').forEach(btn => {
+      const target = btn.dataset.tabTarget;
+      const active = target === tab;
+      btn.setAttribute('aria-selected', active ? 'true' : 'false');
+      ACTIVE_BTN.forEach(c => btn.classList.toggle(c, active));
+      IDLE_BTN.forEach(c => btn.classList.toggle(c, !active));
+    });
+    // Panes: show / hide.
+    panel.querySelectorAll('[data-tab-pane]').forEach(pane => {
+      pane.classList.toggle('hidden', pane.dataset.tabPane !== tab);
+    });
+  }
+
+  function applyExpanded(panel, kind) {
+    const expanded = localStorage.getItem(EXP_KEYS[kind]) === '1';
+    const list = panel.querySelector(`[data-individuals-list="${kind}"]`);
+    if (list) {
+      list.querySelectorAll('[data-overflow-row]').forEach(row => {
+        row.classList.toggle('hidden', !expanded);
+      });
+    }
+    const btn = panel.querySelector(`[data-show-more-toggle="${kind}"]`);
+    if (btn) {
+      const icon = btn.querySelector('[data-show-more-icon]');
+      const label = btn.querySelector('[data-show-more-label]');
+      const hiddenCount = btn.dataset.hiddenCount || '0';
+      if (icon) {
+        icon.classList.toggle('fa-chevron-up', expanded);
+        icon.classList.toggle('fa-chevron-down', !expanded);
+      }
+      if (label) {
+        label.textContent = expanded
+          ? 'show less'
+          : 'show ' + hiddenCount + ' more in queue';
+      }
+    }
+  }
+
+  function apply() {
+    document.querySelectorAll('[data-individuals-tabs]').forEach(panel => {
+      const tab = readTab(panel);
+      applyTab(panel, tab);
+      applyExpanded(panel, 'mentions');
+      applyExpanded(panel, 'lurkers');
+    });
+  }
+  window._chatterbotIndividualsApply = apply;
+
+  // Delegated click handlers on the body — the panel can be wiped
+  // and recreated by SSE swaps and these still work.
+  document.body.addEventListener('click', (e) => {
+    const tabBtn = e.target.closest('[data-tab-target]');
+    if (tabBtn && tabBtn.closest('[data-individuals-tabs]')) {
+      e.preventDefault();
+      const target = tabBtn.dataset.tabTarget;
+      localStorage.setItem(TAB_KEY, target);
+      apply();
+      return;
+    }
+    const moreBtn = e.target.closest('[data-show-more-toggle]');
+    if (moreBtn && moreBtn.closest('[data-individuals-tabs]')) {
+      e.preventDefault();
+      const kind = moreBtn.dataset.showMoreToggle;
+      const cur = localStorage.getItem(EXP_KEYS[kind]) === '1';
+      localStorage.setItem(EXP_KEYS[kind], cur ? '0' : '1');
+      apply();
+      return;
+    }
+  });
+
+  // Re-apply after every htmx swap (the body refetch via
+  // `messages from:body` fires often during chat).
+  document.body.addEventListener('htmx:afterSwap', apply);
+
+  // First-paint sync.
+  apply();
+})();
+</script>

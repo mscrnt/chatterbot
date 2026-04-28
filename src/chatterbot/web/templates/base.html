@@ -115,6 +115,10 @@
   <script defer src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js"></script>
 
   <style>
+    /* Alpine x-cloak: hides elements until Alpine has hydrated.
+       Without this rule the attribute does nothing and any panel
+       with x-show="..." flashes visible during initial render. */
+    [x-cloak] { display: none !important; }
     :root {
       /* Light theme tokens */
       --c-canvas:         250 250 252;

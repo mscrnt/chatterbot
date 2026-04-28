@@ -184,14 +184,19 @@
     {% call panel('individuals', 'Talking to you / Lurkers',
                   icon='fa-comment-dots', icon_tone='warning',
                   count=(_visible_mentions|length + _visible_lurkers|length)) %}
-    <div x-data="{ tab: '{{ _default_tab }}' }"
-         x-init="(() => { const t = localStorage.getItem('chatterbot.insightIndividualsTab'); if (t === 'mentions' || t === 'lurkers') tab = t; })()">
+    {# Vanilla JS tab switcher — bypassing Alpine here because the
+       panel re-renders on every SSE-triggered body swap, and
+       Alpine's re-hydration on this specific panel was unreliable
+       (panes would go blank after a few swaps). The driver below
+       is idempotent across swaps via a delegated body-level click
+       handler — no per-element wiring to forget. #}
+    <div data-individuals-tabs
+         data-default-tab="{{ _default_tab }}">
       <header class="flex items-center gap-1 border-b border-subtle mb-2">
         {% set _tab_base = 'tap inline-flex items-center gap-2 px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-all duration-150 ease-out' %}
         {% if _visible_mentions %}
         <button type="button"
-                @click="tab = 'mentions'; localStorage.setItem('chatterbot.insightIndividualsTab', 'mentions')"
-                :class="tab === 'mentions' ? 'border-warning text-warning' : 'border-transparent text-muted hover:text-primary hover:bg-surface-raised'"
+                data-tab-target="mentions"
                 class="{{ _tab_base }}">
           <i class="fa-solid fa-comment-dots text-xs"></i>
           Talking to you
@@ -200,8 +205,7 @@
         {% endif %}
         {% if _visible_lurkers %}
         <button type="button"
-                @click="tab = 'lurkers'; localStorage.setItem('chatterbot.insightIndividualsTab', 'lurkers')"
-                :class="tab === 'lurkers' ? 'border-warning text-warning' : 'border-transparent text-muted hover:text-primary hover:bg-surface-raised'"
+                data-tab-target="lurkers"
                 class="{{ _tab_base }}">
           <i class="fa-solid fa-user-clock text-xs"></i>
           Active but not engaged
@@ -223,13 +227,13 @@
          control is keyed by user_id so acknowledging once hides every
          mention from that chatter. #}
       {% if _visible_mentions %}
-      <div x-show="tab === 'mentions'" x-cloak
-           x-data="{ expanded: localStorage.getItem('chatterbot.mentionsExpanded') === '1' }">
+      <div data-tab-pane="mentions">
         <p class="text-[11px] text-muted mb-1 px-1">questions / @-mentions of you in the last window — click a row for context</p>
-        <ul class="divide-y divide-subtle rounded-xl border border-warning/30 bg-warning/5 overflow-hidden">
+        <ul class="divide-y divide-subtle rounded-xl border border-warning/30 bg-warning/5 overflow-hidden"
+            data-individuals-list="mentions">
           {% for m, _s in _visible_mentions %}
             <li class="insight-card-root px-3 py-2 text-sm flex items-baseline gap-2 hover:bg-warning/10 cursor-pointer transition-all duration-150 ease-out"
-                {% if loop.index0 >= _individuals_visible %}x-show="expanded" x-cloak{% endif %}
+                {% if loop.index0 >= _individuals_visible %}data-overflow-row{% endif %}
                 hx-get="/modals/insight/direct_mention/{{ m.user_id }}?meta={{ m.content[:200] | urlencode }}&focus={{ m.id }}"
                 hx-target="#modal-root"
                 hx-swap="innerHTML"
@@ -252,11 +256,11 @@
         {% if _visible_mentions | length > _individuals_visible %}
         <div class="flex justify-center pt-1">
           <button type="button"
-                  class="tap text-[11px] text-muted hover:text-primary px-2 py-1 inline-flex items-center gap-1"
-                  @click="expanded = !expanded; localStorage.setItem('chatterbot.mentionsExpanded', expanded ? '1' : '0')">
-            <i class="fa-solid" :class="expanded ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
-            <span x-show="!expanded">show {{ _visible_mentions | length - _individuals_visible }} more in queue</span>
-            <span x-show="expanded" x-cloak>show less</span>
+                  data-show-more-toggle="mentions"
+                  data-hidden-count="{{ _visible_mentions | length - _individuals_visible }}"
+                  class="tap text-[11px] text-muted hover:text-primary px-2 py-1 inline-flex items-center gap-1">
+            <i class="fa-solid fa-chevron-down" data-show-more-icon></i>
+            <span data-show-more-label>show {{ _visible_mentions | length - _individuals_visible }} more in queue</span>
           </button>
         </div>
         {% endif %}
@@ -268,13 +272,13 @@
          modal; the username link still navigates straight to /users/
          via stopPropagation as a power-user shortcut. #}
       {% if _visible_lurkers %}
-      <div x-show="tab === 'lurkers'" x-cloak
-           x-data="{ expanded: localStorage.getItem('chatterbot.lurkersExpanded') === '1' }">
+      <div data-tab-pane="lurkers">
         <p class="text-[11px] text-muted mb-1 px-1">here now, not addressed lately — click a row for context</p>
-        <ul class="divide-y divide-subtle rounded-xl border border-warning/30 bg-warning/5 overflow-hidden">
+        <ul class="divide-y divide-subtle rounded-xl border border-warning/30 bg-warning/5 overflow-hidden"
+            data-individuals-list="lurkers">
           {% for u, _s in _visible_lurkers %}
             <li class="insight-card-root px-3 py-2 text-sm flex items-center gap-3 hover:bg-warning/10 cursor-pointer transition-all duration-150 ease-out"
-                {% if loop.index0 >= _individuals_visible %}x-show="expanded" x-cloak{% endif %}
+                {% if loop.index0 >= _individuals_visible %}data-overflow-row{% endif %}
                 hx-get="/modals/insight/neglected_lurker/{{ u.twitch_id }}"
                 hx-target="#modal-root"
                 hx-swap="innerHTML"
@@ -296,17 +300,18 @@
         {% if _visible_lurkers | length > _individuals_visible %}
         <div class="flex justify-center pt-1">
           <button type="button"
-                  class="tap text-[11px] text-muted hover:text-primary px-2 py-1 inline-flex items-center gap-1"
-                  @click="expanded = !expanded; localStorage.setItem('chatterbot.lurkersExpanded', expanded ? '1' : '0')">
-            <i class="fa-solid" :class="expanded ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
-            <span x-show="!expanded">show {{ _visible_lurkers | length - _individuals_visible }} more in queue</span>
-            <span x-show="expanded" x-cloak>show less</span>
+                  data-show-more-toggle="lurkers"
+                  data-hidden-count="{{ _visible_lurkers | length - _individuals_visible }}"
+                  class="tap text-[11px] text-muted hover:text-primary px-2 py-1 inline-flex items-center gap-1">
+            <i class="fa-solid fa-chevron-down" data-show-more-icon></i>
+            <span data-show-more-label>show {{ _visible_lurkers | length - _individuals_visible }} more in queue</span>
           </button>
         </div>
         {% endif %}
       </div>
       {% endif %}
     </div>
+    {% include "partials/_individuals_tabs.html" %}
     {% endcall %}
   {% endif %}
 
