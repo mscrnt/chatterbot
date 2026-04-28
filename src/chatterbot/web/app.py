@@ -889,22 +889,59 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "screenshot_grid_max",
             ),
         ),
+        (
+            "ai", "AI Provider", "fa-solid fa-robot",
+            "Which backend handles generation calls (notes, recaps, "
+            "engaging-subjects, etc). Embeddings ALWAYS run on local "
+            "Ollama regardless — vec_messages dim is locked. "
+            "Set `llm_provider` to ollama / anthropic / openai. "
+            "Restart the dashboard after changes.",
+            (
+                "llm_provider",
+                "anthropic_api_key", "anthropic_model",
+                "anthropic_thinking_budget_tokens",
+                "openai_api_key", "openai_model",
+                "openai_reasoning_model", "openai_organization",
+            ),
+        ),
+        (
+            "internal", "Internal bus", "fa-solid fa-bolt",
+            "Cross-process notification bus — the bot pushes to the "
+            "dashboard's SSE stream when chat arrives so clients see "
+            "updates with ~10ms latency instead of waiting for the "
+            "10s watermark fallback. Empty URL disables push (the "
+            "fallback poll still works).",
+            (
+                "dashboard_internal_url",
+                "internal_notify_secret",
+            ),
+        ),
     )
 
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_page(request: Request, saved: int = Query(0)):
         live, db_sources = get_settings_with_sources()
 
+        # Enum-style fields render as a <select> with these options.
+        # Adding a new entry here AND a corresponding `is_set` /
+        # validation rule is the only place to touch — the template
+        # falls back to text input otherwise.
+        ENUM_FIELDS: dict[str, list[str]] = {
+            "llm_provider": ["ollama", "anthropic", "openai"],
+        }
+
         def _row(key: str) -> dict:
             value = getattr(live, key)
             is_secret = key in SECRET_SETTING_KEYS
             is_bool = isinstance(value, bool)
+            options = ENUM_FIELDS.get(key)
             return {
                 "key": key,
                 "label": key.replace("_", " "),
                 "value": value,
                 "is_secret": is_secret,
                 "is_bool": is_bool,
+                "options": options,
                 "is_set": bool(value) if not is_bool else True,
                 "source": "db" if key in db_sources else "env",
             }

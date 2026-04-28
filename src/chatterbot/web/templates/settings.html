@@ -48,8 +48,27 @@
       Fine for a single-user local tool — but if you sync this DB elsewhere, you're moving credentials with it.</span>
   </div>
 
-  {# ---------------- tab strip ---------------- #}
-  <nav class="flex gap-1 overflow-x-auto border-b border-subtle"
+  {# ---------------- tab selector ----------------
+     On mobile / narrow portrait viewports the row of pill-tabs
+     overflows or stacks weirdly. Dropdown on small screens, full
+     tab strip on md+. Both edit the same Alpine `tab` variable so
+     the URL ?tab=… syncs no matter which one the streamer used. #}
+
+  {# Mobile / portrait: dropdown #}
+  <div class="md:hidden">
+    <label class="block text-[11px] uppercase tracking-wider text-muted mb-1">Section</label>
+    <select x-model="tab"
+            @change="history.replaceState(null, '', '?tab=' + tab)"
+            class="w-full tap bg-surface border border-subtle rounded px-3 py-2 text-sm text-primary focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out">
+      {% for g in groups %}
+        <option value="{{ g.id }}">{{ g.title }}</option>
+      {% endfor %}
+      <option value="diagnostics">Diagnostics</option>
+    </select>
+  </div>
+
+  {# md+: traditional tab strip #}
+  <nav class="hidden md:flex gap-1 overflow-x-auto border-b border-subtle"
        role="tablist" aria-label="Settings sections">
     {% for g in groups %}
       <button type="button"
@@ -112,6 +131,13 @@
                        class="h-5 w-5 accent-accent">
                 <span class="text-sm text-primary">enabled</span>
               </label>
+            {% elif r.options %}
+              <select name="{{ r.key }}"
+                      class="w-full tap bg-canvas border border-subtle rounded px-3 py-2 text-base text-primary focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out">
+                {% for opt in r.options %}
+                  <option value="{{ opt }}" {% if r.value == opt %}selected{% endif %}>{{ opt }}</option>
+                {% endfor %}
+              </select>
             {% elif r.is_secret %}
               <input type="password" name="{{ r.key }}"
                      placeholder="{% if r.is_set %}•••••••• (leave blank to keep current){% else %}not set{% endif %}"

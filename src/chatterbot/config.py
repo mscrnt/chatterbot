@@ -80,6 +80,18 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "engaging_subjects_notes_per_driver",
     "engaging_subjects_max_drivers_with_notes",
     "streamer_facts_path",
+    # ---------- LLM provider switch ----------
+    "llm_provider",
+    "anthropic_api_key",
+    "anthropic_model",
+    "anthropic_thinking_budget_tokens",
+    "openai_api_key",
+    "openai_model",
+    "openai_reasoning_model",
+    "openai_organization",
+    # ---------- Cross-process bus ----------
+    "dashboard_internal_url",
+    "internal_notify_secret",
 )
 
 # Subset that should be rendered as password inputs. Blank submissions for
@@ -92,6 +104,9 @@ SECRET_SETTING_KEYS: frozenset[str] = frozenset(
         "obs_password",
         "youtube_api_key",
         "discord_bot_token",
+        "anthropic_api_key",
+        "openai_api_key",
+        "internal_notify_secret",
     }
 )
 
@@ -419,6 +434,7 @@ def _coerce(key: str, value: str) -> Any:
         "engaging_subjects_min_cluster_size",
         "engaging_subjects_notes_per_driver",
         "engaging_subjects_max_drivers_with_notes",
+        "anthropic_thinking_budget_tokens",
     ):
         try:
             return int(value)
@@ -452,6 +468,7 @@ def _coerce(key: str, value: str) -> Any:
                 "engaging_subjects_min_cluster_size": 3,
                 "engaging_subjects_notes_per_driver": 2,
                 "engaging_subjects_max_drivers_with_notes": 8,
+                "anthropic_thinking_budget_tokens": 4096,
             }[key]
     if key in (
         "streamelements_enabled", "mod_mode_enabled",
