@@ -147,20 +147,55 @@ the rule.
 - Python 3.11+, [`uv`](https://github.com/astral-sh/uv) for deps
 - Twitch chat: `twitchio` 2.x (read-only IRC listener)
 - StreamElements realtime via socket.io v3 (`python-socketio`)
-- LLM: local Ollama at `192.168.69.229:11434`, `qwen3.5:9b` for summarization,
-  `nomic-embed-text` for embeddings (`think: false` always passed)
+- LLM generation: pluggable backend via `LLM_PROVIDER` setting —
+  - `ollama` (default): local Ollama, `qwen3.5:9b` or whatever's
+    set in `OLLAMA_MODEL`. Per-call `think=True` available for
+    accuracy-critical paths (notes, recaps).
+  - `anthropic`: Claude via the Messages API; structured output
+    via tool-use, `think=True` enables extended thinking.
+  - `openai`: Chat Completions; structured output via
+    `response_format={"type":"json_schema","strict":true}`,
+    `think=True` routes to a configurable reasoning model.
+- LLM embeddings: ALWAYS local Ollama (`nomic-embed-text`, 768d).
+  vec_messages / vec_threads geometry is locked to nomic; switching
+  embedding models requires re-embedding everything, so the
+  provider switch covers generation only.
 - Storage: SQLite at `data/chatters.db` with [`sqlite-vec`](https://github.com/asg017/sqlite-vec), WAL mode
+- Cross-process notification: bot POSTs to dashboard's
+  `/internal/notify` on every chat message so SSE clients see
+  updates with ~10 ms latency. Falls back to a 10 s watermark
+  poll if `DASHBOARD_INTERNAL_URL` isn't reachable.
 - TUI: [Textual](https://textual.textualize.io/)
-- Dashboard: FastAPI + Jinja2 + HTMX + Tailwind (server-rendered, no SPA)
+- Dashboard: FastAPI + Jinja2 + HTMX + Tailwind + SortableJS
+  (server-rendered, no SPA). Insights panels are drag-reorderable
+  + collapsible per-streamer (state in localStorage).
+
+## Switching LLM providers
+
+```env
+LLM_PROVIDER=anthropic           # or "openai" or "ollama" (default)
+ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_MODEL=claude-opus-4-7
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4o
+OPENAI_REASONING_MODEL=o4-mini   # used when think=True is passed
+```
+
+Or edit live from `/settings → AI Provider` (no env edit, but
+restart the dashboard for the new client to load).
 
 ## Schema
 
 ```
 users(twitch_id PK, name, first_seen, last_seen, opt_out,
       sub_tier, sub_months, is_mod, is_vip, is_founder,        -- IRCv3 badge snapshot
-      source DEFAULT 'twitch', merged_into NULL)               -- cross-platform identity
+      source DEFAULT 'twitch', merged_into NULL,               -- cross-platform identity
+      followed_at)                                             -- Helix follower-since
+user_profiles(user_id PK FK, pronouns, location, demeanor,     -- LLM-extracted profile +
+              interests, profile_updated_at, is_starred)       --   streamer-personal star
 messages(id PK, user_id FK, ts, content,
-         reply_parent_login, reply_parent_body)                -- Twitch native-reply context
+         reply_parent_login, reply_parent_body,                -- Twitch native-reply context
+         is_emote_only, spam_score, spam_reasons)              -- spam scoring at ingest
 notes(id PK, user_id FK, ts, text, embedding BLOB)             -- LLM-extracted facts
 note_sources(note_id FK, message_id FK)                        -- which messages a note cites
 events(id PK, user_id FK NULL, twitch_name, type,              -- StreamElements events
@@ -302,30 +337,36 @@ thumbnail, fired-reminders bell, newcomers-today counter).
 
 Top-level pages:
 
-- `/` — chatters list with search-as-you-type, sort, paginate, activity
-  badges (first-timer / regular / frequent / quiet)
+- `/` — Insights home. Talking-to-you / Active-but-not-engaged
+  tabs, engaging subjects, live conversation threads, regulars,
+  lapsed, anniversaries, newcomers. Each section is a draggable +
+  collapsible panel; the streamer's order + collapse state
+  persist in localStorage. "Reset panel layout" link at the bottom.
+- `/chatters` — chatters list with search-as-you-type, sort,
+  paginate, activity badges (first-timer / regular / frequent /
+  quiet). Was the original home page.
 - `/users/{id}` — profile: badges (sub tier/months, mod, VIP, founder, source),
   notes (with citation links to source messages), reminders, donations &
   events log, paginated + searchable message history, "Ask Qwen about this
   user" streaming RAG, merge button, "merged from" provenance list
-- `/topics` — bucketed by status (active / dormant / archived); the "Right
-  now" snapshot's bullets are clickable per-topic detail modals; threads
-  cluster recurring conversations
-- `/insights` — community/engagement helper: live talking points for active
-  chatters, anniversaries today, newcomers, regulars, lapsed regulars,
-  configurable time window
+- `/insights?view=topics` — bucketed by status (active / dormant /
+  archived); the "Right now" snapshot's bullets are clickable
+  per-topic detail modals; threads cluster recurring conversations
 - `/stats` — totals, "did you know" facts, charts (messages/day, hour-of-day,
   top chatters, new-per-week, support breakdown), word cloud, recent
   bucketed stream sessions
-- `/live` — full-page live chat feed (also embedded as a floating widget
-  globally when `live_widget_enabled` is on); first-timer / returning
-  highlights; clicking a row jumps to the chatter with a context modal
-  showing 3 messages before/after
+- `/live` — full-page live chat feed in chat-window flow (oldest at
+  top, newest at bottom, auto-scroll on new arrivals). Also
+  embedded as a floating widget globally when
+  `live_widget_enabled` is on. Clicking a row opens the chatter
+  with surrounding context.
 - `/reminders` — fired-but-not-dismissed inbox
 - `/events` — StreamElements feed, filter by type
 - `/moderation` — opt-in incident queue (review / dismiss)
-- `/settings` — tabbed: Twitch · OBS · StreamElements · YouTube · Discord ·
-  Moderation · Dashboard UI · Whisper · Diagnostics
+- `/settings` — tabbed: Twitch · OBS · StreamElements · YouTube ·
+  Discord · Moderation · Dashboard UI · Whisper · AI Provider ·
+  Internal bus · Diagnostics. Tabs collapse to a dropdown on
+  narrow viewports.
 
 Notable HTMX endpoints:
 
