@@ -3,6 +3,11 @@
      1. Angles (sub-aspects observed within this subject)
      2. Drivers (clickable chips)
      3. Recent messages (verbatim, oldest-first)
+     4. "That wasn't the subject" reject button — for when the
+        streamer reads the messages and concludes the LLM mislabeled
+        them. Same blocklist mechanism as the row-header "dismiss"
+        button; placed here as a more emphatic deep-reject after
+        actual review.
 
    No advice — pure observation. The streamer reads, decides. #}
 
@@ -55,4 +60,21 @@
       {% endfor %}
     </ul>
   {% endif %}
+</div>
+
+{# Bottom-of-expand reject affordance — for when the streamer has
+   actually read the messages above and concluded the subject label
+   doesn't match the conversation. Same blocklist mechanism as the
+   row-header "dismiss" button; framed as a more emphatic deep-reject. #}
+<div class="mt-3 pt-2 border-t border-subtle flex items-center justify-end">
+  <button type="button"
+          class="tap inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-[11px] uppercase tracking-wider bg-danger/10 hover:bg-danger/25 text-danger border border-danger/30 transition-all duration-150 ease-out"
+          title="The messages above don't match this subject label — block it from future passes."
+          hx-post="/insights/subject/{{ subject.slug }}/reject"
+          hx-swap="outerHTML"
+          hx-target="#subject-row-{{ subject.slug }}"
+          onclick="event.stopPropagation()">
+    <i class="fa-solid fa-circle-xmark text-[10px]"></i>
+    that wasn't the subject
+  </button>
 </div>
