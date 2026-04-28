@@ -893,12 +893,14 @@ Good output:
             ))
             try:
                 items = await asyncio.to_thread(
-                    self.repo.recent_messages_with_embeddings,
-                    limit=limit, within_minutes=window_min,
+                    self.repo.recent_messages,
+                    limit=limit,
+                    within_minutes=window_min,
+                    with_embeddings=True,
                 )
             except Exception:
                 logger.exception(
-                    "engaging-subjects: recent_messages_with_embeddings failed",
+                    "engaging-subjects: recent_messages failed",
                 )
                 return
             msgs = [m for m, _ in items]

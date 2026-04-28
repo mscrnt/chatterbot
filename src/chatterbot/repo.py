@@ -1567,65 +1567,53 @@ class ChatterRepo:
                 for r in cur.fetchall()
             ]
 
-    def recent_messages_with_embeddings(
-        self, *, limit: int = 250, within_minutes: int = 20,
-    ) -> list[tuple[Message, list[float]]]:
-        """Recent non-emote messages within the lookback window that
-        ALSO have an embedding in vec_messages, paired with the vector.
-        Drives the cluster-first engaging-subjects extractor — we only
-        cluster messages we have embeddings for; messages still in the
-        embedding queue are skipped on this pass and picked up next
-        time. Returns (Message, vec) oldest-first."""
-        with self._cursor() as cur:
-            cur.execute(
-                """
-                SELECT m.id, m.user_id, u.name, u.source, m.ts, m.content,
-                       m.reply_parent_login, m.reply_parent_body,
-                       v.embedding
-                FROM messages m
-                JOIN users u ON u.twitch_id = m.user_id
-                JOIN vec_messages v ON v.message_id = m.id
-                WHERE u.opt_out = 0
-                  AND m.is_emote_only = 0 AND m.spam_score < 0.5
-                  AND datetime(m.ts) >= datetime('now', ?)
-                ORDER BY m.id DESC
-                LIMIT ?
-                """,
-                (f"-{int(within_minutes)} minutes", int(limit)),
-            )
-            rows = cur.fetchall()
-        out: list[tuple[Message, list[float]]] = []
-        for r in rows:
-            msg = Message(
-                id=int(r["id"]), user_id=r["user_id"], name=r["name"],
-                source=r["source"] or "twitch",
-                ts=r["ts"], content=r["content"],
-                reply_parent_login=r["reply_parent_login"],
-                reply_parent_body=r["reply_parent_body"],
-            )
-            try:
-                vec = _blob_to_vec(r["embedding"])
-            except Exception:
-                continue
-            out.append((msg, vec))
-        out.reverse()
-        return out
+    # ============================================================
+    # CANONICAL "CLEAN MESSAGE" FILTER
+    # ------------------------------------------------------------
+    # The single source of truth for "messages we want the LLM /
+    # word-cloud / topic clusterer to see". Any read path that feeds
+    # downstream NLP work should compose this WHERE-clause snippet
+    # via _CLEAN_MSG_WHERE so future filter changes (a new spam
+    # signal, a new opt_out variant) touch one place instead of N.
+    # ============================================================
+    _CLEAN_MSG_WHERE = (
+        "u.opt_out = 0 "
+        "AND m.is_emote_only = 0 "
+        "AND m.spam_score < 0.5"
+    )
 
     def recent_messages(
-        self, *, limit: int = 250, within_minutes: int = 20,
-    ) -> list[Message]:
-        """Recent non-emote chat messages within the last `within_minutes`,
-        oldest-first. Used by the engaging-subjects extractor on
-        InsightsService."""
+        self,
+        *,
+        limit: int = 250,
+        within_minutes: int = 20,
+        with_embeddings: bool = False,
+    ) -> list[Message] | list[tuple[Message, list[float]]]:
+        """Recent clean (non-emote, non-spam, opt-in) messages within
+        the lookback window, oldest-first. Default returns
+        `list[Message]`; when `with_embeddings=True`, each row is
+        paired with its `vec_messages` vector and rows lacking an
+        embedding (still in the index queue) are skipped.
+
+        Used by the engaging-subjects extractor (with_embeddings=True
+        for cluster-first labeling) and any other path that needs
+        clean recent text. Filter logic comes from `_CLEAN_MSG_WHERE`
+        — change spam / opt-out / emote rules there once."""
+        join = (
+            "JOIN vec_messages v ON v.message_id = m.id"
+            if with_embeddings else ""
+        )
+        select_extra = ", v.embedding" if with_embeddings else ""
         with self._cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT m.id, m.user_id, u.name, u.source, m.ts, m.content,
                        m.reply_parent_login, m.reply_parent_body
+                       {select_extra}
                 FROM messages m
                 JOIN users u ON u.twitch_id = m.user_id
-                WHERE u.opt_out = 0
-                  AND m.is_emote_only = 0 AND m.spam_score < 0.5
+                {join}
+                WHERE {self._CLEAN_MSG_WHERE}
                   AND datetime(m.ts) >= datetime('now', ?)
                 ORDER BY m.id DESC
                 LIMIT ?
@@ -1633,6 +1621,23 @@ class ChatterRepo:
                 (f"-{int(within_minutes)} minutes", int(limit)),
             )
             rows = cur.fetchall()
+        if with_embeddings:
+            out_paired: list[tuple[Message, list[float]]] = []
+            for r in rows:
+                msg = Message(
+                    id=int(r["id"]), user_id=r["user_id"], name=r["name"],
+                    source=r["source"] or "twitch",
+                    ts=r["ts"], content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
+                )
+                try:
+                    vec = _blob_to_vec(r["embedding"])
+                except Exception:
+                    continue
+                out_paired.append((msg, vec))
+            out_paired.reverse()
+            return out_paired
         out = [
             Message(
                 id=int(r["id"]), user_id=r["user_id"], name=r["name"],
@@ -1645,6 +1650,17 @@ class ChatterRepo:
         ]
         out.reverse()
         return out
+
+    def recent_messages_with_embeddings(
+        self, *, limit: int = 250, within_minutes: int = 20,
+    ) -> list[tuple[Message, list[float]]]:
+        """Compatibility shim — prefer `recent_messages(...,
+        with_embeddings=True)` directly. Kept so existing callers
+        don't break during the staged rollout."""
+        return self.recent_messages(
+            limit=limit, within_minutes=within_minutes,
+            with_embeddings=True,
+        )  # type: ignore[return-value]
 
     def recent_messages_for_topics(self, limit: int) -> list[tuple[int, str, str]]:
         """Latest `limit` messages across all opted-in users, oldest-first."""
