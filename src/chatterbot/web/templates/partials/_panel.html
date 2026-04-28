@@ -28,15 +28,25 @@
          data-panel-title="{{ title }}"
          {% if preserve %}id="panel-{{ panel_id }}" hx-preserve="true"{% endif %}
          class="rounded-xl border border-subtle bg-surface overflow-hidden">
-  <header class="flex items-center gap-2 px-3 py-2 border-b border-subtle bg-surface-raised/40">
+  {# The whole header is the collapse-toggle hit area. The drag
+     handle is a sibling button that calls stopPropagation so a
+     drag-grip click doesn't also collapse the panel. The chevron
+     is an indicator, not a button — clicking anywhere on the row
+     (including the chevron) toggles. #}
+  <header class="panel-header flex items-center gap-2 px-3 py-2 border-b border-subtle bg-surface-raised/40 cursor-pointer hover:bg-surface-raised select-none"
+          role="button"
+          tabindex="0"
+          aria-label="Toggle {{ title }} panel">
     {# Drag handle — the only place SortableJS will pick up. Keeping
        it scoped to this grip glyph means clicks on links, buttons,
        and form fields inside the body never accidentally start a
-       drag. #}
+       drag. stopPropagation so dragging the grip doesn't collapse
+       the panel. #}
     <button type="button"
             class="panel-drag-handle cursor-grab text-muted hover:text-primary px-1"
             title="Drag to reorder this panel"
-            aria-label="reorder panel">
+            aria-label="reorder panel"
+            onclick="event.stopPropagation()">
       <i class="fa-solid fa-grip-vertical text-xs"></i>
     </button>
     <h2 class="text-sm font-semibold text-primary inline-flex items-baseline gap-2 flex-1 min-w-0">
@@ -49,12 +59,8 @@
         <span class="text-[11px] text-muted truncate">· {{ subtitle }}</span>
       {% endif %}
     </h2>
-    <button type="button"
-            class="panel-collapse-toggle text-muted hover:text-primary px-2"
-            title="Collapse / expand"
-            aria-label="toggle panel">
-      <i class="fa-solid fa-chevron-down text-xs"></i>
-    </button>
+    <i class="panel-collapse-icon fa-solid fa-chevron-down text-muted text-xs px-2 shrink-0"
+       aria-hidden="true"></i>
   </header>
   <div class="panel-body p-3">
     {{ caller() }}

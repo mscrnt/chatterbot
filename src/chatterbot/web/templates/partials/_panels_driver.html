@@ -73,7 +73,7 @@
     panelsIn(container).forEach(p => {
       const id = p.dataset.panelId;
       const body = p.querySelector(':scope > .panel-body');
-      const icon = p.querySelector(':scope > header .panel-collapse-toggle i');
+      const icon = p.querySelector(':scope > header .panel-collapse-icon');
       const isCollapsed = collapsed.has(id);
       if (body) body.classList.toggle('hidden', isCollapsed);
       if (icon) {
@@ -85,16 +85,27 @@
 
   function wireToggles(container) {
     panelsIn(container).forEach(p => {
-      const btn = p.querySelector(':scope > header .panel-collapse-toggle');
-      if (!btn || btn._wired) return;
-      btn._wired = true;
-      btn.addEventListener('click', () => {
+      // Whole header is the toggle hit area — clicking anywhere on
+      // the row (title, chevron, padding) collapses/expands. The
+      // drag-handle button stopPropagation()s so it doesn't also
+      // collapse when the streamer grabs to reorder.
+      const header = p.querySelector(':scope > header.panel-header');
+      if (!header || header._wired) return;
+      header._wired = true;
+      const toggle = () => {
         const id = p.dataset.panelId;
         const collapsed = new Set(readJson(COLLAPSED_KEY, []));
         if (collapsed.has(id)) collapsed.delete(id);
         else collapsed.add(id);
         writeJson(COLLAPSED_KEY, Array.from(collapsed));
         applyCollapsed(container);
+      };
+      header.addEventListener('click', toggle);
+      header.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          toggle();
+        }
       });
     });
   }
