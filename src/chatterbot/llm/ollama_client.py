@@ -141,7 +141,13 @@ class OllamaClient:
                 response = await client.post(f"{self.base_url}/api/generate", json=payload)
                 response.raise_for_status()
                 data = response.json()
-                return data.get("response", "")
+                # Ollama 0.20+ in `think:true` + `format:{schema}` mode
+                # emits the actual answer in `thinking`, not `response`
+                # (the model generates during its CoT pass; there's no
+                # separate "answer" phase). We fall back to `thinking`
+                # so think-mode + structured output works. Plain
+                # `think:false` calls still use `response` as before.
+                return data.get("response", "") or data.get("thinking", "") or ""
 
     async def generate_structured(
         self,
@@ -223,7 +229,11 @@ class OllamaClient:
                             event = json.loads(line)
                         except json.JSONDecodeError:
                             continue
-                        chunk = event.get("response")
+                        # In `think:true` mode, content arrives in
+                        # `thinking` events first, then `response`
+                        # events. Yield whichever is present per
+                        # event so think and non-think both work.
+                        chunk = event.get("response") or event.get("thinking")
                         if chunk:
                             yield chunk
                         if event.get("done"):

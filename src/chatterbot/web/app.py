@@ -2289,6 +2289,26 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         tpl = "partials/search_results.html" if partial else "search.html"
         return TEMPLATES.TemplateResponse(request, tpl, ctx)
 
+    def _live_context(messages):
+        """Shared context build for live-chat templates — resolves
+        arrival signals, callbacks, and starred users for a given
+        message list. Used by both the initial GET /live render and
+        the SSE delta stream."""
+        user_ids = {m.user_id for m in messages}
+        signals = repo.arrival_signals_for_users(user_ids)
+        returning_ids = {uid for uid, sig in signals.items() if sig == "returning"}
+        callbacks = repo.last_callback_for_users(returning_ids) if returning_ids else {}
+        starred = {
+            uid for uid in user_ids
+            if (u := repo.get_user(uid)) and u.is_starred
+        }
+        return {
+            "messages": messages,
+            "arrival_signals": signals,
+            "callbacks": callbacks,
+            "starred": starred,
+        }
+
     @app.get("/live", response_class=HTMLResponse)
     async def live(
         request: Request,
@@ -2296,26 +2316,92 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         partial: int = Query(0),
     ):
         messages = repo.recent_global_messages(limit=limit)
-        user_ids = {m.user_id for m in messages}
-        signals = repo.arrival_signals_for_users(user_ids)
-        # Conversation continuity — for chatters who are 'returning' (back
-        # after a gap), surface their most recent note as a one-line
-        # callback hint so the streamer can pick up the thread.
-        returning_ids = {uid for uid, sig in signals.items() if sig == "returning"}
-        callbacks = repo.last_callback_for_users(returning_ids) if returning_ids else {}
-        # Starred set — drives the gold-bordered live row treatment.
-        starred = {
-            uid for uid in user_ids
-            if (u := repo.get_user(uid)) and u.is_starred
-        }
-        ctx = {
-            "messages": messages, "limit": limit,
-            "arrival_signals": signals,
-            "callbacks": callbacks,
-            "starred": starred,
-        }
+        ctx = _live_context(messages) | {"limit": limit}
         tpl = "partials/live_rows.html" if partial else "live.html"
         return TEMPLATES.TemplateResponse(request, tpl, ctx)
+
+    @app.get("/live/stream")
+    async def live_stream(
+        request: Request,
+        limit: int = Query(30, ge=1, le=500),
+        since: int = Query(0, ge=0),
+    ):
+        """Server-sent events stream of new chat messages. Replaces
+        the old `hx-trigger="every 2s"` HTMX poll on the live widget
+        and the /live page. The client opens one connection, gets the
+        starting watermark from the initial page render, and receives
+        only the rows that arrive after that.
+
+        Cadence: 1 s server-side DB poll. When no new messages, sends
+        a comment-line heartbeat to keep the connection alive through
+        proxies that drop idle TCP. When messages arrive, renders
+        them with the same partial template and pushes one `rows`
+        event with the HTML fragment.
+
+        Idle-stream cost is 0 template renders, just one tiny SQL
+        `SELECT MAX(id)` per second. Compare to the old poll: ~30
+        full-page partial renders / minute / page open."""
+        async def gen():
+            # Watermark — start from `since` if the caller passed one
+            # (matches the largest id on their initial render); fall
+            # back to "current latest" so a freshly opened SSE doesn't
+            # replay the last hour of chat.
+            watermark = since
+            if watermark <= 0:
+                try:
+                    watermark = repo.latest_message_id()
+                except Exception:
+                    watermark = 0
+            # Tell the client where we're picking up so it can compare
+            # against its initial render and dedupe if needed.
+            yield _sse("watermark", str(watermark))
+            heartbeat_every = 15  # seconds
+            poll_every = 1.0      # seconds
+            ticks_since_heartbeat = 0
+            while True:
+                if await request.is_disconnected():
+                    return
+                try:
+                    new_msgs = await asyncio.to_thread(
+                        repo.recent_global_messages_after_id,
+                        watermark, limit=limit,
+                    )
+                except Exception:
+                    logger.exception("live_stream: db poll failed")
+                    new_msgs = []
+                if new_msgs:
+                    # newest-first by query; push as-is and let the
+                    # client prepend each row in order.
+                    watermark = max(watermark, new_msgs[0].id)
+                    ctx = _live_context(new_msgs)
+                    try:
+                        html = TEMPLATES.get_template(
+                            "partials/live_rows.html"
+                        ).render(ctx)
+                    except Exception:
+                        logger.exception("live_stream: template render failed")
+                        html = ""
+                    if html:
+                        yield _sse("rows", html)
+                    ticks_since_heartbeat = 0
+                else:
+                    ticks_since_heartbeat += 1
+                    if ticks_since_heartbeat >= heartbeat_every:
+                        # SSE comment line; not delivered to event
+                        # listeners but keeps proxies from culling
+                        # the connection.
+                        yield ": ping\n\n"
+                        ticks_since_heartbeat = 0
+                await asyncio.sleep(poll_every)
+
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     # ---------------- topics (merged into /insights as a sub-view) ----------------
 

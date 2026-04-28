@@ -1,0 +1,75 @@
+{# Live-chat SSE driver. Replaces the old `hx-trigger="every 2s"`
+   poll with a single EventSource connection per page open. The
+   server pushes only NEW message rows, which we prepend to any
+   element marked `data-live-feed`, then trim past `data-live-limit`.
+
+   Initial render is server-side (HTMX one-shot for the sidebar, the
+   page template itself for /live). The SSE stream takes over from
+   there.
+
+   Idle cost: ~0 bytes/s once the heartbeat lull settles in. Compare
+   to the old poll: 30 full template renders per minute per page open. #}
+<script>
+(function () {
+  const containers = document.querySelectorAll('[data-live-feed]');
+  if (!containers.length) return;
+
+  function attach(container) {
+    if (container._liveSseAttached) return;
+    container._liveSseAttached = true;
+
+    const limit = parseInt(container.dataset.liveLimit || '30', 10);
+    const since = parseInt(container.dataset.liveSince || '0', 10);
+    let url = '/live/stream?limit=' + encodeURIComponent(limit);
+    if (since > 0) url += '&since=' + encodeURIComponent(since);
+
+    let es;
+    let backoff = 1000;
+
+    function connect() {
+      es = new EventSource(url);
+      es.addEventListener('watermark', () => { backoff = 1000; });
+      es.addEventListener('rows', (e) => {
+        // Server sent SSE-encoded data with literal `\n` escapes for
+        // multi-line payloads (see _sse() in app.py). Reverse that.
+        const html = e.data.replace(/\\n/g, '\n');
+        const tmp = document.createElement('div');
+        tmp.innerHTML = html;
+        // Drop any "no messages yet" empty-state placeholder.
+        container.querySelectorAll('p.italic').forEach(p => p.remove());
+        // Prepend new rows in their natural newest-first order, so
+        // multiple rows in one event keep their internal ordering.
+        const newRows = Array.from(tmp.children);
+        for (let i = newRows.length - 1; i >= 0; i--) {
+          container.prepend(newRows[i]);
+        }
+        // Trim from the bottom so the feed stays bounded.
+        while (container.children.length > limit) {
+          container.removeChild(container.lastElementChild);
+        }
+      });
+      es.onerror = () => {
+        // Browser auto-reconnects on EventSource error, but we close
+        // explicitly and back off so we don't tight-loop on a 500.
+        es.close();
+        setTimeout(connect, Math.min(backoff, 30000));
+        backoff = Math.min(backoff * 2, 30000);
+      };
+    }
+
+    // Wait for the initial HTMX render to land on the sidebar
+    // container before reading data-live-since (the page-level
+    // /live container has it server-rendered already).
+    if (container.getAttribute('hx-get')) {
+      container.addEventListener('htmx:afterSwap', function once() {
+        container.removeEventListener('htmx:afterSwap', once);
+        connect();
+      }, { once: true });
+    } else {
+      connect();
+    }
+  }
+
+  containers.forEach(attach);
+})();
+</script>

@@ -363,14 +363,20 @@
         <i class="fa-solid fa-up-right-from-square text-[10px]"></i> see all
       </a>
     </header>
+    {# Initial render is one-shot via HTMX load; subsequent updates
+       come from the SSE stream below — no more 2s poll cycle. #}
     <div class="overflow-y-auto px-2 py-1 text-sm"
          x-show="!liveCollapsed"
+         data-live-feed
+         data-live-limit="30"
+         data-live-since="0"
          hx-get="/live?partial=1&limit=30"
-         hx-trigger="load, every 2s"
+         hx-trigger="load"
          hx-swap="innerHTML">
       <p class="text-muted italic px-1 py-2 text-xs">connecting…</p>
     </div>
   </aside>
+  {% include "partials/_live_sse.html" %}
   {% endif %}
 
   {# ---------------- modal root (HTMX target) ---------------- #}

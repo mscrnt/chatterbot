@@ -6,14 +6,16 @@
     <h1 class="text-xl sm:text-2xl font-semibold inline-flex items-center gap-2">
       <i class="fa-solid fa-tower-broadcast text-accent"></i> Live chat
     </h1>
-    <span class="text-xs text-muted">last {{ limit }} · refreshes every 2s</span>
+    <span class="text-xs text-muted">last {{ limit }} · live</span>
   </header>
+  {# Initial render is server-side; the SSE stream below pushes new rows. #}
   <div id="live-feed"
-       class="rounded-xl border border-subtle bg-surface px-3 py-2 text-sm space-y-0.5 shadow-sm"
-       hx-get="/live?partial=1&limit={{ limit }}"
-       hx-trigger="every 2s"
-       hx-swap="innerHTML">
+       data-live-feed
+       data-live-limit="{{ limit }}"
+       data-live-since="{{ messages[0].id if messages else 0 }}"
+       class="rounded-xl border border-subtle bg-surface px-3 py-2 text-sm space-y-0.5 shadow-sm">
     {% include "partials/live_rows.html" %}
   </div>
 </div>
+{% include "partials/_live_sse.html" %}
 {% endblock %}

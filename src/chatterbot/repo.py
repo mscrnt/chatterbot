@@ -1487,6 +1487,42 @@ class ChatterRepo:
                     out[r["twitch_id"]] = "returning"
         return out
 
+    def recent_global_messages_after_id(
+        self, after_id: int, *, limit: int = 50,
+    ) -> list[Message]:
+        """Messages with id > after_id, newest first. Used by the
+        live-chat SSE stream — server polls this with the connection's
+        watermark every ~1 s and emits whatever's new. Bounded by
+        `limit` so a chatty surge doesn't blow the SSE event size.
+        Empty list (no new messages) is the common case; SSE sends
+        nothing in that case beyond the heartbeat."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.id, m.user_id, u.name, u.source,
+                       m.ts, m.content, m.reply_parent_login, m.reply_parent_body
+                FROM messages m
+                JOIN users u ON u.twitch_id = m.user_id
+                WHERE m.id > ?
+                ORDER BY m.id DESC
+                LIMIT ?
+                """,
+                (int(after_id), int(limit)),
+            )
+            return [
+                Message(
+                    id=int(r["id"]),
+                    user_id=r["user_id"],
+                    name=r["name"],
+                    ts=r["ts"],
+                    content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
+                    source=r["source"] or "twitch",
+                )
+                for r in cur.fetchall()
+            ]
+
     def recent_global_messages(self, limit: int = 30) -> list[Message]:
         """Latest messages across all sources, newest first.
 
