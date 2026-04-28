@@ -274,12 +274,22 @@ class EngagingSubject(BaseModel):
     how many recent messages the model judged to be on this subject.
     `is_sensitive` flags subjects involving religion, politics, or
     other controversies that the streamer probably wants the dashboard
-    to silently filter out."""
+    to silently filter out.
+
+    `brief` is a 1-2 sentence observational summary of what chatters
+    are actually saying about the subject — paraphrase, not advice.
+    `angles` is up to 3 sub-aspects of the subject that have come up
+    in the messages (e.g. for "Resident Evil parry timing": "aim-parry
+    vs perfect parry", "comparison to Ninja Gaiden 4"). These ride
+    along with the subject so they're available the moment the
+    streamer expands the row — no on-demand LLM call needed."""
 
     name: EngagingSubjectName
     drivers: list[str] = Field(default_factory=list, max_length=20)
     msg_count: int = Field(ge=0, default=0)
     is_sensitive: bool = False
+    brief: str = Field(default="", max_length=400)
+    angles: list[str] = Field(default_factory=list, max_length=4)
 
 
 class EngagingSubjectsResponse(BaseModel):

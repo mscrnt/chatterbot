@@ -1,0 +1,58 @@
+{# Expand body for one engaging subject row. Loaded via htmx the
+   first time the streamer opens the row. Order:
+     1. Angles (sub-aspects observed within this subject)
+     2. Drivers (clickable chips)
+     3. Recent messages (verbatim, oldest-first)
+
+   No advice — pure observation. The streamer reads, decides. #}
+
+{% if subject.angles %}
+<div class="mb-2">
+  <p class="text-[10px] uppercase tracking-wider text-muted mb-1">angles in play</p>
+  <ul class="space-y-0.5">
+    {% for a in subject.angles %}
+      <li class="text-[12px] text-primary inline-flex items-baseline gap-1.5">
+        <i class="fa-solid fa-circle text-accent text-[5px] shrink-0 mt-1.5"></i>
+        <span>{{ a }}</span>
+      </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% if subject.drivers %}
+<div class="mb-2">
+  <p class="text-[10px] uppercase tracking-wider text-muted mb-1">drivers</p>
+  <div class="flex flex-wrap gap-1">
+    {% for d in subject.drivers %}
+      <a href="/users/{{ d | urlencode }}"
+         class="text-[11px] text-muted hover:text-accent hover:underline px-1.5 py-0.5 rounded bg-surface border border-subtle"
+         onclick="event.stopPropagation()">
+        {{ d }}
+      </a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<div>
+  <p class="text-[10px] uppercase tracking-wider text-muted mb-1">
+    recent messages from drivers ({{ messages | length }} · last {{ within_minutes }}m)
+  </p>
+  {% if not messages %}
+    <p class="text-[12px] text-muted italic">no recent messages from these chatters in the last {{ within_minutes }} minutes</p>
+  {% else %}
+    <ul class="divide-y divide-subtle rounded-lg border border-subtle bg-surface overflow-hidden">
+      {% for m in messages %}
+        <li class="px-2 py-1.5 text-[12px] flex items-baseline gap-2 hover:bg-surface-raised/60 transition-all duration-150 ease-out">
+          <span class="text-[10px] text-muted shrink-0 tabular-nums">{{ m.ts | short_ts }}</span>
+          {% with source=m.source %}{% include "components/_source_mark.html" %}{% endwith %}
+          <a href="/users/{{ m.user_id }}?focus={{ m.id }}"
+             class="text-accent hover:underline font-medium shrink-0"
+             onclick="event.stopPropagation()">{{ m.name }}</a>
+          <span class="text-primary break-words flex-1">{{ m.content }}</span>
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</div>

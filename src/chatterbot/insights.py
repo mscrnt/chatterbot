@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pydantic import ValidationError
 
@@ -75,10 +75,18 @@ class EngagingSubjectEntry:
     from `topic_threads` (which cluster snapshots by embedding cosine):
     these come from a direct subject-extraction pass over messages, so
     the unit is "actual conversation subject" rather than "embedding-
-    similar text"."""
+    similar text".
+
+    `brief` + `angles` ride along so the row can expand without another
+    LLM call. `slug` is a deterministic short id derived from the name,
+    used by the on-demand /insights/subject-messages route to identify
+    a subject without leaking cache indices."""
     name: str
     drivers: list[str]
     msg_count: int
+    brief: str = ""
+    angles: list[str] = field(default_factory=list)
+    slug: str = ""
 
 
 @dataclass
@@ -367,6 +375,11 @@ Empty / partial replies are fine. Skipping is the right call when in doubt.
     SUBJECTS_NUM_CTX = 8192
     SUBJECTS_LOOKBACK_MINUTES = 20
     SUBJECTS_MAX_MESSAGES = 250
+    # Streamer-controlled blocklist key in app_settings. Each entry:
+    # {"slug": str, "name": str, "rejected_at": iso}. Fed into the
+    # prompt as an "exclude these" list so subsequent LLM passes don't
+    # re-extract a hallucinated subject the streamer already rejected.
+    SUBJECTS_BLOCKLIST_KEY = "engaging_subjects_blocklist"
 
     SUBJECTS_SYSTEM = """You're identifying distinct conversation subjects in a Twitch chat for the streamer's dashboard.
 
@@ -393,6 +406,8 @@ For each remaining subject:
 - drivers: distinct chatters actually engaged (NOT just present in the window)
 - msg_count: rough number of messages on this subject in the window
 - is_sensitive: false (you've already filtered the sensitive ones)
+- brief: 1-2 sentence OBSERVATIONAL summary of what chatters are actually saying about it. Paraphrase. NO "you should…", NO "the streamer could…". Pure description.
+- angles: up to 3 distinct SUB-ASPECTS that have come up *within this subject* in the messages. Example for subject "Resident Evil parry timing": ["aim-parry vs perfect parry", "comparison to Ninja Gaiden 4", "no-save-no-damage feasibility"]. These are sub-aspects observed in the messages, NOT recommendations.
 
 Return AT MOST 8 subjects, sorted by len(drivers) desc. Empty list is the right answer when chat is too quiet or unfocused.
 
@@ -419,6 +434,62 @@ IMPORTANT: emit observation, not advice. No "you should…", no "the streamer co
             except Exception:
                 logger.exception("engaging-subjects iteration failed")
             await asyncio.sleep(interval)
+
+    def _load_subject_blocklist(self) -> list[dict]:
+        """Load the streamer-flagged subject blocklist from app_settings.
+        Stored as a JSON array of {slug, name, rejected_at} dicts."""
+        import json as _json
+        raw = self.repo.get_app_setting(self.SUBJECTS_BLOCKLIST_KEY)
+        if not raw:
+            return []
+        try:
+            data = _json.loads(raw)
+            return [d for d in data if isinstance(d, dict)]
+        except (TypeError, ValueError):
+            return []
+
+    def reject_subject(self, slug: str, name: str) -> None:
+        """Add a subject to the blocklist. The next extraction pass
+        will see it in the prompt's exclusion list, and the cache-
+        write filter is also keyed off it as a defense in depth."""
+        import json as _json
+        from datetime import datetime as _dt, timezone as _tz
+        blocklist = self._load_subject_blocklist()
+        slug_lc = (slug or "").lower()
+        name_lc = (name or "").lower()
+        # Idempotent — don't add twice.
+        if any(
+            (b.get("slug") or "").lower() == slug_lc
+            or (b.get("name") or "").lower() == name_lc
+            for b in blocklist
+        ):
+            return
+        blocklist.append({
+            "slug": slug_lc,
+            "name": name.strip(),
+            "rejected_at": _dt.now(_tz.utc).isoformat(timespec="seconds"),
+        })
+        # Cap at 50 entries so app_settings doesn't grow unbounded.
+        blocklist = blocklist[-50:]
+        self.repo.set_app_setting(self.SUBJECTS_BLOCKLIST_KEY, _json.dumps(blocklist))
+        # Drop the rejected subject from the live cache immediately so
+        # the streamer doesn't have to wait for the next refresh.
+        self._subjects_cache = EngagingSubjectsCache(
+            subjects=[
+                s for s in self._subjects_cache.subjects
+                if s.slug.lower() != slug_lc
+                and s.name.lower() != name_lc
+            ],
+            refreshed_at=self._subjects_cache.refreshed_at,
+            error=self._subjects_cache.error,
+        )
+
+    def clear_subject_blocklist(self) -> int:
+        """Wipe all rejections — used when the streamer wants to reset
+        (e.g., new stream, different topic). Returns the count cleared."""
+        n = len(self._load_subject_blocklist())
+        self.repo.set_app_setting(self.SUBJECTS_BLOCKLIST_KEY, "[]")
+        return n
 
     async def _refresh_engaging_subjects(self) -> None:
         async with self._subjects_lock:
@@ -458,10 +529,30 @@ IMPORTANT: emit observation, not advice. No "you should…", no "the streamer co
                 f"  [{user_id_to_name.get(m.user_id, m.user_id)}] {m.content[:200]}"
                 for m in msgs
             ]
+            # Blocklist injection — the streamer has flagged these
+            # subjects as hallucinated / wrong / irrelevant. The LLM
+            # is told to NOT extract them again. We also filter at
+            # cache-write time as belt-and-suspenders.
+            blocklist = await asyncio.to_thread(self._load_subject_blocklist)
+            blocklist_lines = ""
+            if blocklist:
+                names = [b.get("name", "") for b in blocklist if b.get("name")]
+                if names:
+                    blocklist_lines = (
+                        "\n\nDO NOT EXTRACT (streamer flagged as wrong / "
+                        "hallucinated / not actually a thing chatters are "
+                        "discussing): "
+                        + "; ".join(f'"{n}"' for n in names[-30:])
+                        + ". If you see chatter messages mentioning anything "
+                        "from this list, treat it as off-limits and don't "
+                        "include it in your output. The streamer has already "
+                        "decided this isn't a useful subject."
+                    )
             prompt = (
                 f"Recent chat ({len(msgs)} msgs over the last "
                 f"{window_min} min, oldest first):\n"
                 + "\n".join(lines)
+                + blocklist_lines
                 + "\n\nReturn the distinct conversation subjects, sorted by "
                 "engagement (driver count). Skip sensitive topics."
             )
@@ -487,16 +578,35 @@ IMPORTANT: emit observation, not advice. No "you should…", no "the streamer co
                 )
                 return
 
+            import hashlib as _h
+            block_set_slug = {(b.get("slug") or "").lower() for b in blocklist}
+            block_set_name = {(b.get("name") or "").lower() for b in blocklist}
             entries: list[EngagingSubjectEntry] = []
             for s in response.subjects:
                 if s.is_sensitive:
                     continue
-                if not s.name.strip():
+                clean_name = s.name.strip()
+                if not clean_name:
+                    continue
+                # Slug: deterministic 12-char hash of the name. Used by
+                # the on-demand /insights/subject-messages route so the
+                # UI doesn't have to send the full name in URLs.
+                slug = _h.sha1(clean_name.lower().encode("utf-8")).hexdigest()[:12]
+                # Blocklist filter (the LLM might re-extract a flagged
+                # subject anyway — defense in depth).
+                if slug in block_set_slug or clean_name.lower() in block_set_name:
+                    logger.info(
+                        "engaging-subjects: dropped re-extracted blocklisted "
+                        "subject %r", clean_name,
+                    )
                     continue
                 entries.append(EngagingSubjectEntry(
-                    name=s.name.strip(),
+                    name=clean_name,
                     drivers=[d for d in s.drivers if d],
                     msg_count=int(s.msg_count or 0),
+                    brief=(s.brief or "").strip(),
+                    angles=[a.strip() for a in (s.angles or []) if a and a.strip()][:3],
+                    slug=slug,
                 ))
             self._subjects_cache = EngagingSubjectsCache(
                 subjects=entries, refreshed_at=time.time(), error=None,

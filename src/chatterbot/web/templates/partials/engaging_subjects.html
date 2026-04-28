@@ -1,21 +1,27 @@
 {# Engaging subjects panel — distinct conversation subjects extracted
-   from recent chat by the LLM. Each row: subject + driver chips +
-   message count. Pure observation, no "you should…" prescription.
-   The streamer scans the panel and decides what to lean into.
+   from recent chat by the LLM. Each row expands on click to reveal:
+     - 1-2 sentence observational brief
+     - up to 3 sub-aspects ("angles") that have come up
+     - recent verbatim messages from the subject's drivers
+
+   Pure observation — no "you should…" prescription. Streamer scans
+   the panel and decides what to lean into.
+
+   "drunk Qwen" / wrong button (top-right of each row) adds the subject
+   to a session blocklist; the next extraction pass skips it. Used when
+   the LLM hallucinates a subject (e.g. "FF8 remake" from one passing
+   mention). Belt-and-suspenders: filter at cache-write time too.
 
    Sensitive subjects (religion / politics / controversy) are stripped
    at the prompt + cache layer; nothing here surfaces them. #}
 {% set _subjects_age = engaging_subjects_age_seconds %}
 {% set _has_subjects = engaging_subjects and engaging_subjects | length > 0 %}
-{# Show the panel once any pass has completed OR errored, so the streamer
-   sees what the feature looks like even during quiet stretches. Pre-first-
-   pass (warming up) is hidden — there's nothing useful to display yet. #}
 {% if _has_subjects or engaging_subjects_error or _subjects_age is not none %}
 <section class="space-y-2">
   <header class="flex items-baseline justify-between gap-2">
     <h2 class="font-semibold text-primary inline-flex items-center gap-2">
       <i class="fa-solid fa-fire text-accent"></i> Engaging subjects
-      <span class="text-[11px] text-muted font-normal">what chat is actually talking about — distinct subjects, ranked by chatter count</span>
+      <span class="text-[11px] text-muted font-normal">click a row to expand · "wrong" tells the LLM to drop it</span>
     </h2>
     <span class="text-[11px] text-muted">
       {% if _subjects_age is not none %}refreshed {{ _subjects_age }}s ago{% else %}warming up…{% endif %}
@@ -34,8 +40,14 @@
   {% else %}
     <ul class="divide-y divide-subtle rounded-xl border border-accent/30 bg-accent/5 overflow-hidden">
       {% for s in engaging_subjects %}
-        <li class="px-3 py-2.5 flex flex-col gap-1.5">
-          <div class="flex items-baseline gap-2 flex-wrap">
+        <li id="subject-row-{{ s.slug }}"
+            class="insight-card-root"
+            x-data="{ open: false }">
+          {# Row header — clickable to toggle expand #}
+          <div class="px-3 py-2.5 flex items-baseline gap-2 flex-wrap cursor-pointer hover:bg-accent/10 transition-all duration-150 ease-out"
+               @click="open = !open">
+            <i class="fa-solid text-accent text-[10px] shrink-0"
+               :class="open ? 'fa-chevron-down' : 'fa-chevron-right'"></i>
             <span class="font-medium text-primary text-sm sm:text-base">{{ s.name }}</span>
             <span class="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] uppercase tracking-wide rounded-full bg-accent/15 text-accent border border-accent/30">
               <i class="fa-solid fa-users text-[9px]"></i>
@@ -44,17 +56,42 @@
             {% if s.msg_count %}
               <span class="text-[10px] text-muted">{{ s.msg_count }} msg{{ '' if s.msg_count == 1 else 's' }}</span>
             {% endif %}
+            {# "wrong" / drunk-Qwen reject button. POSTs to the reject
+               route, removes the row on success, adds to the prompt
+               blocklist for future passes. #}
+            <button type="button"
+                    class="ml-auto tap inline-flex items-center justify-center px-2 py-0.5 rounded text-[10px] uppercase tracking-wider bg-danger/10 hover:bg-danger/25 text-danger border border-danger/30 transition-all duration-150 ease-out"
+                    title="The LLM got this wrong / hallucinated. Adds it to the blocklist so it stops re-extracting it."
+                    hx-post="/insights/subject/{{ s.slug }}/reject"
+                    hx-swap="outerHTML"
+                    hx-target="#subject-row-{{ s.slug }}"
+                    @click.stop>
+              <i class="fa-solid fa-xmark text-[9px]"></i> wrong
+            </button>
           </div>
-          {% if s.drivers %}
-            <div class="flex flex-wrap gap-1">
-              {% for d in s.drivers %}
-                <a href="/users/{{ d | urlencode }}"
-                   class="text-[11px] text-muted hover:text-accent hover:underline px-1.5 py-0.5 rounded bg-surface border border-subtle">
-                  {{ d }}
-                </a>
-              {% endfor %}
-            </div>
+
+          {# Inline brief + angles — always visible since they're cheap.
+             Driver chips are inside the expand body since they get
+             repeated context in the messages list there. #}
+          {% if s.brief %}
+            <p class="px-3 pb-2 -mt-1 text-[12px] text-primary leading-snug">{{ s.brief }}</p>
           {% endif %}
+
+          {# Expanded body — htmx-loaded on first open so we don't
+             pre-fetch every subject's messages. Cached for the row's
+             lifetime; closing/reopening doesn't re-fetch. #}
+          <div x-show="open"
+               x-cloak
+               x-transition:enter="transition duration-150 ease-out"
+               x-transition:enter-start="opacity-0 -translate-y-1"
+               x-transition:enter-end="opacity-100 translate-y-0"
+               class="px-3 pb-3 pt-1 border-t border-accent/20 bg-canvas/30">
+            <div hx-get="/insights/subject/{{ s.slug }}/expand"
+                 hx-trigger="intersect once"
+                 hx-swap="innerHTML">
+              <p class="text-xs text-muted italic py-2">loading context…</p>
+            </div>
+          </div>
         </li>
       {% endfor %}
     </ul>

@@ -1698,6 +1698,62 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         resp.headers["HX-Trigger"] = "insights-state-changed"
         return resp
 
+    @app.get("/insights/subject/{slug}/expand", response_class=HTMLResponse)
+    async def subject_expand(request: Request, slug: str):
+        """Render the expand-on-click body for an engaging subject:
+        the brief + angles (already in cache) + recent verbatim
+        messages from the subject's drivers within the lookback
+        window. No LLM call — pure SQL."""
+        # Find the cached subject by slug
+        subject = next(
+            (s for s in insights.subjects_cache.subjects if s.slug == slug),
+            None,
+        )
+        if subject is None:
+            raise HTTPException(404, "subject not found in cache")
+        within = int(getattr(
+            settings, "engaging_subjects_lookback_minutes", 20,
+        ))
+        msgs = (
+            repo.messages_for_names_within(
+                subject.drivers, within_minutes=within, limit=40,
+            )
+            if subject.drivers else []
+        )
+        return TEMPLATES.TemplateResponse(
+            request,
+            "partials/engaging_subject_expand.html",
+            {"subject": subject, "messages": msgs, "within_minutes": within},
+        )
+
+    @app.post("/insights/subject/{slug}/reject", response_class=HTMLResponse)
+    async def subject_reject(request: Request, slug: str):
+        """Streamer flagged a subject as hallucinated / wrong / not
+        actually being discussed. Add to the blocklist so subsequent
+        extraction passes exclude it. Returns an empty body so the
+        UI can `hx-swap="outerHTML"` to remove the row."""
+        subject = next(
+            (s for s in insights.subjects_cache.subjects if s.slug == slug),
+            None,
+        )
+        if subject is None:
+            # Already gone from cache (refresh raced) — still record the
+            # rejection if we got the slug, to prevent the next pass from
+            # re-extracting whatever name eventually maps to it.
+            await asyncio.to_thread(insights.reject_subject, slug, "")
+        else:
+            await asyncio.to_thread(
+                insights.reject_subject, subject.slug, subject.name,
+            )
+        return Response(status_code=200, content="")
+
+    @app.post("/insights/subjects/clear-rejections", response_class=HTMLResponse)
+    async def subject_clear_rejections(request: Request):
+        """Wipe the subject blocklist. The next extraction pass starts
+        from a clean slate. Useful at stream boundaries."""
+        n = await asyncio.to_thread(insights.clear_subject_blocklist)
+        return Response(status_code=200, content=f"cleared {n} rejection(s)")
+
     _GOAL_KINDS = (
         "address_first_timers", "clear_due_snoozes", "address_returning_regulars",
     )

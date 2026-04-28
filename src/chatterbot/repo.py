@@ -4803,6 +4803,64 @@ class ChatterRepo:
                 topics_json=r["topics_json"],
             )
 
+    def messages_for_names_within(
+        self,
+        names: list[str],
+        *,
+        within_minutes: int = 30,
+        limit: int = 50,
+    ) -> list[Message]:
+        """Recent messages from any of `names` (matched against current
+        users.name OR historical aliases) within the lookback window,
+        oldest-first. Used by the engaging-subjects expand route to
+        surface verbatim context for a subject."""
+        if not names:
+            return []
+        placeholders = ",".join("?" for _ in names)
+        lower_names = [n.lower() for n in names]
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT DISTINCT u.twitch_id
+                FROM users u
+                LEFT JOIN user_aliases a ON a.user_id = u.twitch_id
+                WHERE LOWER(u.name) IN ({placeholders})
+                   OR LOWER(a.name) IN ({placeholders})
+                """,
+                lower_names + lower_names,
+            )
+            twitch_ids = [r["twitch_id"] for r in cur.fetchall()]
+            if not twitch_ids:
+                return []
+            id_placeholders = ",".join("?" for _ in twitch_ids)
+            cur.execute(
+                f"""
+                SELECT m.id, m.user_id, u.name, u.source, m.ts, m.content,
+                       m.reply_parent_login, m.reply_parent_body
+                FROM messages m
+                JOIN users u ON u.twitch_id = m.user_id
+                WHERE m.user_id IN ({id_placeholders})
+                  AND m.is_emote_only = 0
+                  AND datetime(m.ts) >= datetime('now', ?)
+                ORDER BY m.id DESC
+                LIMIT ?
+                """,
+                twitch_ids + [f"-{int(within_minutes)} minutes", int(limit)],
+            )
+            rows = cur.fetchall()
+        out = [
+            Message(
+                id=int(r["id"]), user_id=r["user_id"], name=r["name"],
+                source=r["source"] or "twitch",
+                ts=r["ts"], content=r["content"],
+                reply_parent_login=r["reply_parent_login"],
+                reply_parent_body=r["reply_parent_body"],
+            )
+            for r in rows
+        ]
+        out.reverse()
+        return out
+
     def messages_in_id_range_for_names(
         self,
         first_id: int,
