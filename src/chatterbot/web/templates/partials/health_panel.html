@@ -1,7 +1,7 @@
 {# Health snapshot for the Settings → Diagnostics tab. Lazy-loaded via
    HTMX so opening Settings doesn't block on the Ollama probe. #}
 <div id="health-panel" class="space-y-3 text-sm"
-     hx-get="/health" hx-trigger="every 30s" hx-target="#health-panel" hx-swap="outerHTML">
+     hx-get="/health" hx-trigger="twitch from:body, obs from:body" hx-target="#health-panel" hx-swap="outerHTML">
 
   <div class="rounded-xl border {% if ollama_ok %}border-success/30{% else %}border-danger/40 bg-danger/5{% endif %} p-3">
     <header class="flex items-baseline justify-between gap-2">

@@ -1,0 +1,52 @@
+{# Dashboard-wide SSE event dispatcher.
+
+   Opens one EventSource against /events/stream. On each `event: <ch>`
+   message, dispatches a DOM event of the same name on `body` so HTMX
+   panels can listen via `hx-trigger="<ch> from:body"`.
+
+   Replaces the old per-panel `hx-trigger="every Xs"` polls. Idle cost
+   is one heartbeat ping every ~22 s. State-change cost is one tiny
+   SSE event + the panel's own HTMX refetch. The server-side watermark
+   poll runs every 1.5 s but only emits when something actually moved.
+
+   The driver auto-reconnects with capped exponential backoff on
+   error. #}
+<script>
+(function () {
+  if (window._chatterbotEventSse) return;  // idempotent across HTMX swaps
+  window._chatterbotEventSse = true;
+
+  const URL = '/events/stream';
+  // Channels the server emits. Keep in sync with /events/stream's
+  // `channels` registry in app.py — adding a new event there means
+  // panels can `hx-trigger="<new-channel> from:body"`.
+  const CHANNELS = [
+    'chatters', 'messages', 'events', 'transcript',
+    'insights:engagement', 'insights:topics',
+    'twitch', 'obs',
+  ];
+
+  let es;
+  let backoff = 1000;
+
+  function dispatch(channel) {
+    document.body.dispatchEvent(new CustomEvent(channel, {
+      bubbles: true,
+    }));
+  }
+
+  function connect() {
+    es = new EventSource(URL);
+    es.addEventListener('hello', () => { backoff = 1000; });
+    CHANNELS.forEach(ch => {
+      es.addEventListener(ch, () => dispatch(ch));
+    });
+    es.onerror = () => {
+      es.close();
+      setTimeout(connect, Math.min(backoff, 30000));
+      backoff = Math.min(backoff * 2, 30000);
+    };
+  }
+  connect();
+})();
+</script>

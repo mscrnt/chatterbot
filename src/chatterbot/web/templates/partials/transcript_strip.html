@@ -16,13 +16,11 @@
    seconds is fast enough to feel near-real-time (whisper flushes
    every 5 s anyway) AND slow enough that the pill toggles always
    have a stable enough DOM for clicks to land cleanly. #}
-{% set _is_summary = view not in ("log", "verbatim") %}
-{% set _refresh_interval = "5s" if not _is_summary else "30s" %}
 <div id="transcript-strip"
      class="rounded-xl border border-subtle bg-surface p-3"
      hx-get="/transcript"
      hx-vals='js:{ view: localStorage.getItem("chatterbot.transcriptView") || "summary", limit: 15, last_pending: {{ pending_count or 0 }} }'
-     {% if service_status.enabled %}hx-trigger="every {{ _refresh_interval }}, transcript-view-changed from:body"{% else %}hx-trigger="transcript-view-changed from:body"{% endif %}
+     {% if service_status.enabled %}hx-trigger="transcript from:body, transcript-view-changed from:body"{% else %}hx-trigger="transcript-view-changed from:body"{% endif %}
      hx-swap="outerHTML">
   <header class="flex items-baseline justify-between gap-2 mb-2">
     <h3 class="text-sm font-semibold text-primary inline-flex items-center gap-2">

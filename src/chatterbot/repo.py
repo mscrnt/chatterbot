@@ -1314,6 +1314,62 @@ class ChatterRepo:
             cur.execute("SELECT COALESCE(MAX(id), 0) AS m FROM messages")
             return int(cur.fetchone()["m"])
 
+    # ============================================================
+    # CHANGE-WATERMARK QUERIES (for the /events/stream multiplexed SSE)
+    # ------------------------------------------------------------
+    # Each channel of the dashboard's event bus polls a tiny "version
+    # stamp" SQL — typically a MAX(id) or MAX(ts) — and emits an SSE
+    # event when the value changes. Polling the DB every 1.5 s for 4
+    # of these queries is microseconds; the win is that downstream
+    # HTMX-rendered panels stop re-rendering on a fixed Xs cadence.
+    # See web/app.py /events/stream for the consumers.
+    # ============================================================
+
+    def latest_topic_thread_version(self) -> str:
+        """Compact version stamp for the topic_threads list. Captures
+        any add / title-update / recap-update / member-add. Returned as
+        a string so the SSE poller can compare via ==."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  COUNT(*)                               AS n,
+                  COALESCE(MAX(t.last_ts), '')           AS lts,
+                  COALESCE(MAX(t.recap_updated_at), '')  AS rua
+                FROM topic_threads t
+                """
+            )
+            r = cur.fetchone()
+            return f"{int(r['n'])}|{r['lts']}|{r['rua']}"
+
+    def latest_transcript_chunk_id(self) -> int:
+        """Highest transcript chunk id, or 0 if empty. Watermark for
+        the live transcript strip's SSE channel."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(MAX(id), 0) AS m FROM transcript_chunks"
+            )
+            return int(cur.fetchone()["m"])
+
+    def latest_event_id(self) -> int:
+        """Highest StreamElements / Twitch event id. Drives the events
+        list channel; bumps on any new tip / sub / cheer / follow."""
+        with self._cursor() as cur:
+            cur.execute("SELECT COALESCE(MAX(id), 0) AS m FROM events")
+            return int(cur.fetchone()["m"])
+
+    def latest_user_change_version(self) -> str:
+        """Coarse "anything changed in users table" version. Drives the
+        chatters-list channel. Captures new users (count) AND any
+        last_seen update (max), so badge changes / new arrivals all
+        fire."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS n, COALESCE(MAX(last_seen), '') AS m FROM users"
+            )
+            r = cur.fetchone()
+            return f"{int(r['n'])}|{r['m']}"
+
     def is_opted_out(self, twitch_id: str) -> bool:
         with self._cursor() as cur:
             cur.execute("SELECT opt_out FROM users WHERE twitch_id = ?", (twitch_id,))

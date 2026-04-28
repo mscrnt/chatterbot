@@ -4,7 +4,7 @@
    already spoken to on stream. The streamer never types in chat. #}
 <div id="insights-body" class="space-y-5"
      hx-get="/insights?view=engagement&partial=1&window={{ window }}"
-     hx-trigger="every 60s"
+     hx-trigger="insights:engagement from:body, messages from:body"
      hx-swap="outerHTML"
      hx-on::before-swap="window.__chatterbotPreserveScroll = window.scrollY"
      hx-on::after-swap="if(typeof window.__chatterbotPreserveScroll === 'number') window.scrollTo(0, window.__chatterbotPreserveScroll)">

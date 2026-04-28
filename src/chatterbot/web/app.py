@@ -2344,6 +2344,100 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         tpl = "partials/live_rows.html" if partial else "live.html"
         return TEMPLATES.TemplateResponse(request, tpl, ctx)
 
+    @app.get("/events/stream")
+    async def events_stream(request: Request):
+        """Multiplexed change-notification SSE for HTMX-driven panels.
+
+        One persistent connection per page open. Every ~1.5 s the
+        server polls a tiny "version" extractor for each channel; on
+        change, emits one SSE event per channel:
+
+            event: <channel>
+            data: <version stamp>
+            \n
+
+        The client-side driver in base.html dispatches a corresponding
+        DOM event on `body` so HTMX panels can subscribe via
+        `hx-trigger="<channel> from:body"`. Replaces the old
+        `hx-trigger="every Xs"` polls — panels render on actual state
+        change, not on a fixed cadence.
+
+        Channel registry below; add channels here + a watermark fn on
+        repo. Watermarks must be cheap (MAX(id) / MAX(ts), no joins)
+        because we run all of them every tick."""
+        # Channel → (watermark function, refresh-the-status-pills?).
+        # The status flag is a side-channel: the in-memory pill
+        # statuses (twitch_status, obs_status) live on services; we
+        # poll their `refreshed_at` to know if anything changed.
+        def _twitch_v():
+            ts = getattr(twitch_status, "status", None)
+            return f"{getattr(ts, 'refreshed_at', 0)}|{getattr(ts, 'is_live', False)}|{getattr(ts, 'viewer_count', 0)}"
+        def _obs_v():
+            o = getattr(obs_status, "status", None)
+            return f"{getattr(o, 'refreshed_at', 0)}|{getattr(o, 'streaming', False)}|{getattr(o, 'recording', False)}|{getattr(o, 'scene', '')}"
+        def _insights_engagement_v():
+            tp = getattr(insights, "cache", None)
+            es = getattr(insights, "subjects_cache", None)
+            return f"{getattr(tp, 'refreshed_at', 0)}|{getattr(es, 'refreshed_at', 0)}"
+
+        channels = {
+            "chatters":            lambda: repo.latest_user_change_version(),
+            "messages":            lambda: repo.latest_message_id(),
+            "events":              lambda: repo.latest_event_id(),
+            "transcript":          lambda: repo.latest_transcript_chunk_id(),
+            "insights:engagement": _insights_engagement_v,
+            "insights:topics":     lambda: repo.latest_topic_thread_version(),
+            "twitch":              _twitch_v,
+            "obs":                 _obs_v,
+        }
+        last: dict[str, object] = {ch: None for ch in channels}
+
+        async def gen():
+            # Send a hello so the client knows the connection is up
+            # before any state changes.
+            yield _sse("hello", "")
+            poll_every = 1.5
+            heartbeat_every = 15  # ticks of poll_every (~22 s)
+            ticks_since_heartbeat = 0
+            while True:
+                if await request.is_disconnected():
+                    return
+                emitted = 0
+                for ch, vfn in channels.items():
+                    try:
+                        v = await asyncio.to_thread(vfn)
+                    except Exception:
+                        logger.exception("events_stream: watermark %s failed", ch)
+                        continue
+                    if last[ch] is None:
+                        # First read — record it but don't emit. The
+                        # initial page render already reflects this
+                        # state; sending an event now would cause an
+                        # immediate redundant refetch.
+                        last[ch] = v
+                        continue
+                    if v != last[ch]:
+                        last[ch] = v
+                        yield _sse(ch, str(v))
+                        emitted += 1
+                if emitted:
+                    ticks_since_heartbeat = 0
+                else:
+                    ticks_since_heartbeat += 1
+                    if ticks_since_heartbeat >= heartbeat_every:
+                        yield ": ping\n\n"
+                        ticks_since_heartbeat = 0
+                await asyncio.sleep(poll_every)
+
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @app.get("/live/stream")
     async def live_stream(
         request: Request,

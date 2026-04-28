@@ -1,6 +1,6 @@
 <div id="chatters-table" class="space-y-2"
      hx-get="/chatters?q={{ q | urlencode }}&sort={{ sort }}&page={{ page }}"
-     hx-trigger="every 15s"
+     hx-trigger="chatters from:body"
      hx-swap="outerHTML">
   {% if not rows %}
     {% with icon='fa-comments-slash',

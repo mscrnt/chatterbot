@@ -1,6 +1,6 @@
 <div id="topics-list" class="space-y-3"
      hx-get="/topics?partial=1"
-     hx-trigger="every 30s"
+     hx-trigger="insights:topics from:body, messages from:body"
      hx-swap="outerHTML">
   {% if not snapshots %}
     {% with icon='fa-comments',

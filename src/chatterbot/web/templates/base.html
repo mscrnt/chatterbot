@@ -382,6 +382,15 @@
   {# ---------------- modal root (HTMX target) ---------------- #}
   <div id="modal-root"></div>
 
+  {# ---------------- multiplexed change-notification SSE ----------------
+     One persistent connection. The server polls a handful of cheap
+     watermarks (latest_message_id, twitch_status.refreshed_at, etc.)
+     every ~1.5 s; on change it emits one SSE event per channel. We
+     dispatch a matching DOM event on `body` so any HTMX panel can
+     subscribe via `hx-trigger="<channel> from:body"` instead of the
+     old `every Xs` poll. #}
+  {% include "partials/_events_sse.html" %}
+
   {# ---------------- back-to-top button ----------------
      Appears once you've scrolled past 400px on any page. Tucked into
      the bottom-left on sm+ where the live widget + toasts dominate the

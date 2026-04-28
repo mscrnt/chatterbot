@@ -81,7 +81,7 @@
 
 <div id="topics-body" class="space-y-5"
      hx-get="/insights?view=topics&partial=1&status={{ status }}&q={{ q | urlencode }}"
-     hx-trigger="every 30s, insights-state-changed from:body"
+     hx-trigger="insights:topics from:body, insights-state-changed from:body"
      hx-swap="outerHTML">
 
   {# Latest snapshot pinned at the top — anchor for "right now" #}
