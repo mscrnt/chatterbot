@@ -18,9 +18,15 @@
    collapse state on first render and after every HTMX swap. #}
 
 {% macro panel(panel_id, title, icon='fa-circle', count=None,
-               icon_tone='accent', subtitle=None) %}
+               icon_tone='accent', subtitle=None, preserve=False) %}
+{# `preserve=True` adds an id + hx-preserve so this panel survives
+   the body's HTMX outerHTML swap. Useful for panels whose interior
+   maintains its own refresh cadence (the live transcript strip is
+   the canonical case — it has its own hx-trigger and shouldn't get
+   nuked when /insights body refreshes on a new chat message). #}
 <section data-panel-id="{{ panel_id }}"
          data-panel-title="{{ title }}"
+         {% if preserve %}id="panel-{{ panel_id }}" hx-preserve="true"{% endif %}
          class="rounded-xl border border-subtle bg-surface overflow-hidden">
   <header class="flex items-center gap-2 px-3 py-2 border-b border-subtle bg-surface-raised/40">
     {# Drag handle — the only place SortableJS will pick up. Keeping

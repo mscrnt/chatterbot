@@ -4,55 +4,65 @@
      - summary — one LLM-summarised line per ~60 s window (default)
      - log     — every raw whisper utterance, with match-similarity icon
 
-   The auto-refresh's hx-vals reads localStorage at fire time, so each
-   tick honors whichever mode the streamer most recently picked. The
-   buttons trigger a synthetic event the strip listens for, so a click
-   re-fetches immediately rather than waiting for the next tick.
-
-   The strip is rendered by insights.html OUTSIDE #insights-body so
-   the engagement view's 60 s body refresh never clobbers it.
-
-   Polling cadence: 30 s in summary mode, 5 s in full-log mode. Five
-   seconds is fast enough to feel near-real-time (whisper flushes
-   every 5 s anyway) AND slow enough that the pill toggles always
-   have a stable enough DOM for clicks to land cleanly. #}
+   The strip lives inside #insights-body as a panel (with
+   `preserve=True` so the body's HTMX outerHTML swap doesn't reach
+   it). Its own hx-trigger handles refreshes on the SSE
+   `transcript` channel, and the view-toggle buttons fire a synthetic
+   `transcript-view-changed` event the strip listens for so a click
+   re-fetches immediately rather than waiting for the next chunk. #}
+{% set _is_summary = view not in ("log", "verbatim") %}
 <div id="transcript-strip"
-     class="rounded-xl border border-subtle bg-surface p-3"
      hx-get="/transcript"
      hx-vals='js:{ view: localStorage.getItem("chatterbot.transcriptView") || "summary", limit: 15, last_pending: {{ pending_count or 0 }} }'
-     {% if service_status.enabled %}hx-trigger="transcript from:body, transcript-view-changed from:body"{% else %}hx-trigger="transcript-view-changed from:body"{% endif %}
+     {# `load delay:200ms` fires once on initial page load so the
+        server-side default view (always summary) syncs with whatever
+        the streamer last chose in localStorage. Prevents the
+        buttons from showing the wrong active state until something
+        else triggers a refetch. #}
+     {% if service_status.enabled %}hx-trigger="load delay:200ms, transcript from:body, transcript-view-changed from:body"{% else %}hx-trigger="load delay:200ms, transcript-view-changed from:body"{% endif %}
      hx-swap="outerHTML">
-  <header class="flex items-baseline justify-between gap-2 mb-2">
-    <h3 class="text-sm font-semibold text-primary inline-flex items-center gap-2">
-      <i class="fa-solid fa-microphone text-accent"></i> Live transcript
+  {# Status badge + view-toggle pills. Title comes from the panel
+     wrapper now; we keep service status (model name / waiting /
+     error) inline as a subtitle so the streamer doesn't have to
+     hover for it. #}
+  <header class="flex items-baseline justify-between gap-2 mb-2 flex-wrap">
+    <div class="text-[11px] text-muted">
       {% if not service_status.enabled %}
-        <span class="text-[10px] text-muted italic">disabled — turn on in Settings → Whisper</span>
+        <span class="italic">disabled — turn on in Settings → Whisper</span>
       {% elif service_status.model_error %}
-        <span class="text-[10px] text-danger italic">model error: {{ service_status.model_error }}</span>
+        <span class="text-danger italic">model error: {{ service_status.model_error }}</span>
       {% elif not service_status.model_loaded %}
-        <span class="text-[10px] text-warning italic">waiting for first audio…</span>
+        <span class="text-warning italic">waiting for first audio…</span>
       {% else %}
-        <span class="text-[10px] text-muted">{{ service_status.model }} · {{ service_status.card_embeds }} cards indexed</span>
+        {{ service_status.model }} · {{ service_status.card_embeds }} cards indexed
       {% endif %}
-    </h3>
-    <div class="inline-flex items-center gap-1">
-      {% set _btn_base = 'tap inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] uppercase tracking-wider transition-all duration-150 ease-out' %}
+    </div>
+    <div class="inline-flex items-center gap-1"
+         role="tablist" aria-label="Transcript view">
+      {% set _btn_active = 'tap inline-flex items-center gap-1 px-2.5 py-1 rounded-full border-2 border-accent bg-accent/20 text-primary font-semibold text-[10px] uppercase tracking-wider transition-all duration-150 ease-out' %}
+      {% set _btn_idle   = 'tap inline-flex items-center gap-1 px-2.5 py-1 rounded-full border border-subtle bg-surface text-muted hover:bg-surface-raised hover:text-primary text-[10px] uppercase tracking-wider transition-all duration-150 ease-out' %}
       <button type="button"
-              class="{{ _btn_base }} {% if _is_summary %}bg-accent/15 border-accent/40 text-primary{% else %}bg-surface border-subtle text-muted hover:bg-surface-raised{% endif %}"
+              role="tab"
+              aria-selected="{{ 'true' if _is_summary else 'false' }}"
+              class="{% if _is_summary %}{{ _btn_active }}{% else %}{{ _btn_idle }}{% endif %}"
               onclick="localStorage.setItem('chatterbot.transcriptView','summary'); document.body.dispatchEvent(new CustomEvent('transcript-view-changed'));"
-              title="Show LLM summaries — one row per window">
-        <i class="fa-solid fa-microphone-lines text-[9px]"></i>summary
+              title="Show LLM summaries — one row per ~60s window">
+        {% if _is_summary %}<i class="fa-solid fa-circle-check text-[9px]"></i>{% else %}<i class="fa-solid fa-microphone-lines text-[9px]"></i>{% endif %}
+        summary
       </button>
       <button type="button"
-              class="{{ _btn_base }} {% if not _is_summary %}bg-accent/15 border-accent/40 text-primary{% else %}bg-surface border-subtle text-muted hover:bg-surface-raised{% endif %}"
+              role="tab"
+              aria-selected="{{ 'false' if _is_summary else 'true' }}"
+              class="{% if not _is_summary %}{{ _btn_active }}{% else %}{{ _btn_idle }}{% endif %}"
               onclick="localStorage.setItem('chatterbot.transcriptView','log'); document.body.dispatchEvent(new CustomEvent('transcript-view-changed'));"
-              title="Show every raw utterance — polls every 5 s for near-real-time updates">
-        <i class="fa-solid fa-list text-[9px]"></i>full log
+              title="Show every raw utterance">
+        {% if not _is_summary %}<i class="fa-solid fa-circle-check text-[9px]"></i>{% else %}<i class="fa-solid fa-list text-[9px]"></i>{% endif %}
+        full log
       </button>
-      {% if groups %}
-        <span class="text-[10px] text-muted ml-1">{{ groups | length }} recent</span>
-      {% elif chunks %}
-        <span class="text-[10px] text-muted ml-1">{{ chunks | length }} recent</span>
+      {% if _is_summary and groups %}
+        <span class="text-[10px] text-muted ml-1 tabular-nums">{{ groups | length }}</span>
+      {% elif (not _is_summary) and chunks %}
+        <span class="text-[10px] text-muted ml-1 tabular-nums">{{ chunks | length }}</span>
       {% endif %}
     </div>
   </header>
@@ -71,93 +81,118 @@
      across page loads. #}
   {% set _strip_visible = 5 %}
 
+  {# Cold-start placeholder — whisper either disabled or no audio yet. #}
   {% if not groups and not chunks %}
-    <p class="text-xs text-muted italic">
-      Nothing heard yet. Drop
-      <code class="text-accent">obs_scripts/chatterbot_audio_relay.py</code>
-      into your OBS scripts folder to feed audio in.
-    </p>
-  {% elif groups %}
-    {# Summary view — one LLM-summarised row per ~60 s window. #}
-    <div x-data="{ expanded: localStorage.getItem('chatterbot.transcriptExpanded') === '1' }">
-      <ul class="space-y-1 text-sm">
-        {% for g in groups %}
-          <li {% if loop.index0 >= _strip_visible %}x-show="expanded" x-cloak{% endif %}>
-            <button type="button"
-                    class="{{ _row_btn }}"
-                    hx-get="/modals/transcript-group/{{ g.id }}"
-                    hx-target="#modal-root"
-                    hx-swap="innerHTML"
-                    title="Open with the underlying utterances + screenshots">
-              <span class="{{ _row_ts }}">{{ g.start_ts | short_ts }}</span>
-              <i class="fa-solid fa-microphone-lines text-muted text-[10px] shrink-0"></i>
-              <span class="{{ _row_text }}">{{ g.summary }}</span>
-              <span class="{{ _row_trail }}">
-                {{ g.last_chunk_id - g.first_chunk_id + 1 }} lines
-              </span>
-            </button>
-          </li>
-        {% endfor %}
-      </ul>
-      {% if groups | length > _strip_visible %}
-      <div class="flex justify-center pt-1">
-        <button type="button"
-                class="tap text-[10px] text-muted hover:text-primary px-2 py-0.5 inline-flex items-center gap-1"
-                @click="expanded = !expanded; localStorage.setItem('chatterbot.transcriptExpanded', expanded ? '1' : '0')">
-          <i class="fa-solid" :class="expanded ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
-          <span x-show="!expanded">show {{ groups | length - _strip_visible }} more</span>
-          <span x-show="expanded" x-cloak>show less</span>
-        </button>
-      </div>
+    <div class="text-xs text-muted italic px-1 py-2">
+      {% if not service_status.enabled %}
+        Whisper is disabled. Turn on in <a href="/settings" class="text-accent hover:underline">Settings → Whisper</a>
+        and drop <code class="text-accent">obs_scripts/chatterbot_audio_relay.py</code>
+        into your OBS scripts folder to feed audio in.
+      {% else %}
+        Nothing heard yet — once OBS starts streaming audio in,
+        utterances will appear here within a few seconds.
       {% endif %}
     </div>
+
+  {# Summary view — honor the streamer's choice even when groups
+     are empty, so the active button doesn't lie. Show a placeholder
+     when groups is empty + a hint that "full log" is the live one. #}
+  {% elif _is_summary %}
+    {% if not groups %}
+      <div class="text-xs text-muted italic px-1 py-2">
+        Summaries roll up every ~60 s of audio into one line. None
+        yet for this stream — switch to <strong class="text-primary">full log</strong>
+        if you want raw utterances right now.
+      </div>
+    {% else %}
+      <div x-data="{ expanded: localStorage.getItem('chatterbot.transcriptExpanded') === '1' }">
+        <ul class="space-y-1 text-sm">
+          {% for g in groups %}
+            <li {% if loop.index0 >= _strip_visible %}x-show="expanded" x-cloak{% endif %}>
+              <button type="button"
+                      class="{{ _row_btn }}"
+                      hx-get="/modals/transcript-group/{{ g.id }}"
+                      hx-target="#modal-root"
+                      hx-swap="innerHTML"
+                      title="Open with the underlying utterances + screenshots">
+                <span class="{{ _row_ts }}">{{ g.start_ts | short_ts }}</span>
+                <i class="fa-solid fa-microphone-lines text-muted text-[10px] shrink-0"></i>
+                <span class="{{ _row_text }}">{{ g.summary }}</span>
+                <span class="{{ _row_trail }}">
+                  {{ g.last_chunk_id - g.first_chunk_id + 1 }} lines
+                </span>
+              </button>
+            </li>
+          {% endfor %}
+        </ul>
+        {% if groups | length > _strip_visible %}
+        <div class="flex justify-center pt-1">
+          <button type="button"
+                  class="tap text-[10px] text-muted hover:text-primary px-2 py-0.5 inline-flex items-center gap-1"
+                  @click="expanded = !expanded; localStorage.setItem('chatterbot.transcriptExpanded', expanded ? '1' : '0')">
+            <i class="fa-solid" :class="expanded ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
+            <span x-show="!expanded">show {{ groups | length - _strip_visible }} more</span>
+            <span x-show="expanded" x-cloak>show less</span>
+          </button>
+        </div>
+        {% endif %}
+      </div>
+    {% endif %}
+
+  {# Full-log view — every raw whisper utterance, sim-icon lead. #}
   {% else %}
-    {# Full-log view — every raw whisper utterance, sim-icon lead. #}
-    {% set _thr = 0.55 %}
-    <div x-data="{ expanded: localStorage.getItem('chatterbot.transcriptExpanded') === '1' }">
-      <ul class="space-y-1 text-sm">
-        {% for c in chunks %}
-          {% set _sim = c.similarity %}
-          {% set _hit = _sim is not none and _sim >= _thr %}
-          {% set _close = _sim is not none and _sim >= 0.30 and not _hit %}
-          <li {% if loop.index0 >= _strip_visible %}x-show="expanded" x-cloak{% endif %}>
-            <button type="button"
-                    class="{{ _row_btn }}"
-                    hx-get="/modals/transcript/{{ c.id }}"
-                    hx-target="#modal-root"
-                    hx-swap="innerHTML"
-                    title="Open with surrounding context + matched card">
-              <span class="{{ _row_ts }}">{{ c.ts | short_ts }}</span>
-              {% if _hit %}
-                <i class="fa-solid fa-check-circle text-success text-[10px] shrink-0"></i>
-              {% elif _close %}
-                <i class="fa-solid fa-circle-notch text-warning text-[10px] shrink-0"></i>
-              {% elif _sim is not none %}
-                <i class="fa-solid fa-circle text-muted text-[10px] shrink-0"></i>
-              {% else %}
-                <i class="fa-solid fa-circle text-subtle text-[10px] shrink-0"></i>
-              {% endif %}
-              <span class="{{ _row_text }}">{{ c.text }}</span>
-              {% if _sim is not none %}
-                <span class="{{ _row_trail }}">{{ '%.2f'|format(_sim) }}</span>
-              {% else %}
-                <span class="{{ _row_trail }}">—</span>
-              {% endif %}
-            </button>
-          </li>
-        {% endfor %}
-      </ul>
-      {% if chunks | length > _strip_visible %}
-      <div class="flex justify-center pt-1">
-        <button type="button"
-                class="tap text-[10px] text-muted hover:text-primary px-2 py-0.5 inline-flex items-center gap-1"
-                @click="expanded = !expanded; localStorage.setItem('chatterbot.transcriptExpanded', expanded ? '1' : '0')">
-          <i class="fa-solid" :class="expanded ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
-          <span x-show="!expanded">show {{ chunks | length - _strip_visible }} more</span>
-          <span x-show="expanded" x-cloak>show less</span>
-        </button>
+    {% if not chunks %}
+      <div class="text-xs text-muted italic px-1 py-2">
+        No raw utterances captured yet — once whisper finishes its
+        first VAD-bounded segment, lines appear here.
       </div>
-      {% endif %}
-    </div>
+    {% else %}
+      {% set _thr = 0.55 %}
+      <div x-data="{ expanded: localStorage.getItem('chatterbot.transcriptExpanded') === '1' }">
+        <ul class="space-y-1 text-sm">
+          {% for c in chunks %}
+            {% set _sim = c.similarity %}
+            {% set _hit = _sim is not none and _sim >= _thr %}
+            {% set _close = _sim is not none and _sim >= 0.30 and not _hit %}
+            <li {% if loop.index0 >= _strip_visible %}x-show="expanded" x-cloak{% endif %}>
+              <button type="button"
+                      class="{{ _row_btn }}"
+                      hx-get="/modals/transcript/{{ c.id }}"
+                      hx-target="#modal-root"
+                      hx-swap="innerHTML"
+                      title="Open with surrounding context + matched card">
+                <span class="{{ _row_ts }}">{{ c.ts | short_ts }}</span>
+                {% if _hit %}
+                  <i class="fa-solid fa-check-circle text-success text-[10px] shrink-0"></i>
+                {% elif _close %}
+                  <i class="fa-solid fa-circle-notch text-warning text-[10px] shrink-0"></i>
+                {% elif _sim is not none %}
+                  <i class="fa-solid fa-circle text-muted text-[10px] shrink-0"></i>
+                {% else %}
+                  <i class="fa-solid fa-circle text-subtle text-[10px] shrink-0"></i>
+                {% endif %}
+                <span class="{{ _row_text }}">{{ c.text }}</span>
+                {% if _sim is not none %}
+                  <span class="{{ _row_trail }}">{{ '%.2f'|format(_sim) }}</span>
+                {% else %}
+                  <span class="{{ _row_trail }}">—</span>
+                {% endif %}
+              </button>
+            </li>
+          {% endfor %}
+        </ul>
+        {% if chunks | length > _strip_visible %}
+        <div class="flex justify-center pt-1">
+          <button type="button"
+                  class="tap text-[10px] text-muted hover:text-primary px-2 py-0.5 inline-flex items-center gap-1"
+                  @click="expanded = !expanded; localStorage.setItem('chatterbot.transcriptExpanded', expanded ? '1' : '0')">
+            <i class="fa-solid" :class="expanded ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
+            <span x-show="!expanded">show {{ chunks | length - _strip_visible }} more</span>
+            <span x-show="expanded" x-cloak>show less</span>
+          </button>
+        </div>
+        {% endif %}
+      </div>
+    {% endif %}
   {% endif %}
 </div>

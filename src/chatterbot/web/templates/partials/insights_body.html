@@ -21,12 +21,34 @@
    server-side changes from other surfaces — and the scroll-preserve
    handlers above keep the viewport pinned across the full-body swap. #}
 
-  {# Live transcript strip lives OUTSIDE this body now (rendered by
-     insights.html above #insights-body) so the 60 s outer-body
-     refresh can't reach it. The strip has its own ~30 s / 2 s ticker
-     and toggle UI that needs to survive across body re-renders. #}
+  {# Default order top-to-bottom (per streamer ask):
+       1. Live transcript    — what whisper just heard (most "now")
+       2. Stream goals       — pinned tracker, dismissible
+       3. Activity sparkline — quick pulse check
+       4. …rest as usual…
+     Each section keeps a stable `data-panel-id` so the streamer
+     can drag any of them anywhere; this is just the default. #}
 
-  {# ---------------- Recent LLM transcript matches ---------------- #}
+  {# ---------------- Live transcript strip ----------------
+     `preserve=True` so the body's outer HTMX swap doesn't clobber
+     the strip's own refresh cadence (it has its own SSE-driven
+     hx-trigger inside). #}
+  {% if transcript_status and (transcript_status.enabled or transcript_chunks or transcript_groups) %}
+    {% call panel('transcript', 'Live transcript', icon='fa-microphone',
+                  subtitle='whisper', preserve=True) %}
+      {% with chunks=transcript_chunks, groups=transcript_groups,
+              service_status=transcript_status, view='summary',
+              embedded=True %}
+        {% include "partials/transcript_strip.html" %}
+      {% endwith %}
+    {% endcall %}
+  {% endif %}
+
+  {# ---------------- Recent LLM transcript matches ----------------
+     Default-positioned right under the live transcript since both
+     are about transcript-driven flow — an utterance gets matched
+     to an open insight card and the row reflects it here. The
+     streamer can drag them apart if they prefer. #}
   {% if recent_matches %}
     {% include "partials/recent_matches.html" %}
   {% endif %}
@@ -35,6 +57,34 @@
   {% if goals_state %}
     {% with goals=goals_state %}{% include "partials/goals_panel.html" %}{% endwith %}
   {% endif %}
+
+  {# ---------------- Activity pulse sparkline ---------------- #}
+  {% set _pulse_total = pulse | sum(attribute=1) if pulse else 0 %}
+  {% set _pulse_max = pulse | map(attribute=1) | max if pulse else 0 %}
+  {% set _last5_total = pulse[-5:] | sum(attribute=1) if pulse and pulse|length >= 5 else _pulse_total %}
+  {% call panel('activity', 'Activity', icon='fa-chart-line',
+                subtitle=(_last5_total ~ '/5m · ' ~ _pulse_total ~ '/h')) %}
+    <div class="flex items-center gap-3">
+      {% if _pulse_max > 0 %}
+        <svg viewBox="0 0 240 32" preserveAspectRatio="none"
+             class="flex-1 h-8" aria-label="messages per minute, last 60">
+          {% for slot, c in pulse %}
+            {% set _x = loop.index0 * (240 / (pulse | length)) %}
+            {% set _h = (c / _pulse_max) * 30 %}
+            {% set _y = 32 - _h %}
+            {% set _w = (240 / (pulse | length)) - 1 %}
+            <rect x="{{ _x }}" y="{{ _y }}" width="{{ _w }}" height="{{ _h }}"
+                  fill="rgb(var(--c-primary))"
+                  opacity="{{ 0.3 + (loop.index0 / (pulse | length)) * 0.7 }}"></rect>
+          {% endfor %}
+        </svg>
+      {% else %}
+        <p class="flex-1 text-xs text-muted italic text-center">
+          quiet — no messages in the last hour
+        </p>
+      {% endif %}
+    </div>
+  {% endcall %}
 
   {# ---------------- Last stream recap + KPI deltas ---------------- #}
   {% if latest_recap %}
@@ -66,51 +116,11 @@
   {% endcall %}
   {% endif %}
 
-  {# ---------------- Activity pulse sparkline ---------------- #}
-  {% set _pulse_total = pulse | sum(attribute=1) if pulse else 0 %}
-  {% set _pulse_max = pulse | map(attribute=1) | max if pulse else 0 %}
-  {% set _last5_total = pulse[-5:] | sum(attribute=1) if pulse and pulse|length >= 5 else _pulse_total %}
-  {% call panel('activity', 'Activity', icon='fa-chart-line',
-                subtitle=(_last5_total ~ '/5m · ' ~ _pulse_total ~ '/h')) %}
-    <div class="flex items-center gap-3">
-      {% if _pulse_max > 0 %}
-        <svg viewBox="0 0 240 32" preserveAspectRatio="none"
-             class="flex-1 h-8" aria-label="messages per minute, last 60">
-          {% for slot, c in pulse %}
-            {% set _x = loop.index0 * (240 / (pulse | length)) %}
-            {% set _h = (c / _pulse_max) * 30 %}
-            {% set _y = 32 - _h %}
-            {% set _w = (240 / (pulse | length)) - 1 %}
-            <rect x="{{ _x }}" y="{{ _y }}" width="{{ _w }}" height="{{ _h }}"
-                  fill="rgb(var(--c-primary))"
-                  opacity="{{ 0.3 + (loop.index0 / (pulse | length)) * 0.7 }}"></rect>
-          {% endfor %}
-        </svg>
-      {% else %}
-        <p class="flex-1 text-xs text-muted italic text-center">
-          quiet — no messages in the last hour
-        </p>
-      {% endif %}
-    </div>
-  {% endcall %}
-
-  {# ---------------- Window selector ---------------- #}
-  <div class="flex items-center gap-2 flex-wrap">
-    <span class="text-[11px] uppercase tracking-wider text-muted">window</span>
-    <select name="window"
-            class="tap bg-surface border border-subtle rounded px-2 text-sm text-primary focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out"
-            hx-get="/insights?view=engagement&partial=1"
-            hx-target="#insights-body"
-            hx-swap="outerHTML"
-            hx-trigger="change">
-      {% for key, _modifier, label in window_options %}
-        <option value="{{ key }}" {% if key == window %}selected{% endif %}>{{ label }}</option>
-      {% endfor %}
-    </select>
-    <span class="text-[11px] text-muted">
-      affects Regulars + Lapsed regulars · "Active" and "New today" stay live
-    </span>
-  </div>
+  {# ---------------- Regulars / Lapsed window selector ----------------
+     Moved out of the always-visible row and into a tiny inline
+     control just above the Regulars panel block, since that's the
+     only thing it actually affects. Newcomers / Active stay on
+     their own fixed semantic windows (10 min / 24 h). #}
 
   {# ---------------- Starred chatters present ---------------- #}
   {% if starred_active %}
@@ -463,6 +473,24 @@
   {# ---------------- Regulars ---------------- #}
   {% call panel('regulars', 'Regulars', icon='fa-crown',
                 count=regulars|length, subtitle=(window_label ~ ' · top ' ~ regulars|length)) %}
+    {# Window selector — only affects this panel + Lapsed regulars
+       below. The label was confusing when it lived at the top of
+       the page (streamer didn't know what it applied to), so it's
+       now adjacent to the panel it controls. #}
+    <div class="flex items-center gap-2 flex-wrap mb-2 pb-2 border-b border-subtle">
+      <span class="text-[11px] uppercase tracking-wider text-muted">window</span>
+      <select name="window"
+              class="tap bg-surface border border-subtle rounded px-2 text-sm text-primary focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out"
+              hx-get="/insights?view=engagement&partial=1"
+              hx-target="#insights-body"
+              hx-swap="outerHTML"
+              hx-trigger="change">
+        {% for key, _modifier, label in window_options %}
+          <option value="{{ key }}" {% if key == window %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      <span class="text-[11px] text-muted">applies to Regulars + Lapsed</span>
+    </div>
     {% if not regulars %}
       <p class="text-muted italic text-sm">No data yet.</p>
     {% else %}

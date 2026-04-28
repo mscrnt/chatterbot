@@ -81,16 +81,12 @@
   </div>
   {% endif %}
 
-  {# Live transcript strip — rendered HERE (page shell) instead of
-     inside #insights-body so the 60 s body auto-refresh can't clobber
-     it. Strip has its own ticker + view toggle that the streamer
-     expects to survive across outer refreshes. #}
-  {% if view == 'engagement' and transcript_status and (transcript_status.enabled or transcript_chunks or transcript_groups) %}
-    {% with chunks=transcript_chunks, groups=transcript_groups,
-            service_status=transcript_status, view='summary' %}
-      {% include "partials/transcript_strip.html" %}
-    {% endwith %}
-  {% endif %}
+  {# The live transcript strip used to render here (page shell) so
+     the body's HTMX swap couldn't reach it. After Phase B it lives
+     inside #insights-body as a regular panel with `preserve=True`
+     (which adds hx-preserve), so the streamer can reorder /
+     collapse it like every other panel without losing state on
+     SSE-driven refreshes. #}
 
   {# ---------------- view body ---------------- #}
   {% if view == 'engagement' %}

@@ -3,6 +3,7 @@
    the card's CURRENT state so you can see whether it's still pending,
    already addressed, snoozed, or skipped. Persists past the auto-confirm
    timeout so you can review what flipped while you weren't looking. #}
+{% from "partials/_panel.html" import panel %}
 {% set _state_classes = {
     'auto_pending': ('bg-warning/15 text-warning border-warning/40', 'fa-microphone-lines'),
     'addressed':    ('bg-success/15 text-success border-success/40', 'fa-circle-check'),
@@ -10,16 +11,10 @@
     'skipped':      ('bg-muted/15 text-muted border-subtle', 'fa-xmark'),
     'pinned':       ('bg-accent/15 text-accent border-accent/40', 'fa-thumbtack'),
 } %}
-<section class="rounded-xl border border-accent/30 bg-accent/5 p-3">
-  <header class="flex items-baseline justify-between gap-2 mb-2">
-    <h3 class="text-sm font-semibold text-primary inline-flex items-center gap-2">
-      <i class="fa-solid fa-wand-magic-sparkles text-accent"></i>
-      Recent transcript matches
-    </h3>
-    <span class="text-[11px] text-muted">
-      {{ recent_matches | length }} in last hour · LLM-driven
-    </span>
-  </header>
+{% call panel('transcript-matches', 'Recent transcript matches',
+              icon='fa-wand-magic-sparkles',
+              count=recent_matches|length,
+              subtitle='LLM-driven · last hour') %}
   <ul class="space-y-2 max-h-[280px] overflow-y-auto pr-1">
     {% for m in recent_matches %}
       {% set _bc = _state_classes.get(m.state, ('bg-surface text-muted border-subtle', 'fa-circle')) %}
@@ -53,4 +48,4 @@
       </li>
     {% endfor %}
   </ul>
-</section>
+{% endcall %}

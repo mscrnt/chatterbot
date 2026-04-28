@@ -1172,6 +1172,24 @@ Good output:
                                 "noisy/sensitive to label",
                                 len(sorted_dirty[:8]),
                             )
+                        else:
+                            # Light diagnostic so we can spot when the LLM
+                            # is producing labels but the apply step is
+                            # dropping them on the floor (cluster_id
+                            # mismatch, sensitivity flagging, blocklist).
+                            logger.debug(
+                                "engaging-subjects: LLM returned %d subject(s): %s",
+                                len(response_subjects),
+                                [
+                                    {
+                                        "name": s.name[:40],
+                                        "cid": s.cluster_id[:12],
+                                        "sens": s.is_sensitive,
+                                        "drv": len(s.drivers),
+                                    }
+                                    for s in response_subjects[:8]
+                                ],
+                            )
                     except ValidationError as e:
                         logger.warning("engaging-subjects validation failed: %s", e)
                     except Exception:
@@ -1225,6 +1243,20 @@ Good output:
                     "engaging-subjects: %d/%d responses missing cluster_id "
                     "(matched positionally); applied %d total",
                     empty_id_count, len(response_subjects), applied,
+                )
+            if response_subjects and applied == 0:
+                # Bug bait — LLM gave us labels but every single one
+                # got dropped (sensitivity flag / blocklist / cluster
+                # mismatch). Worth a louder log so future regressions
+                # don't silently empty the panel.
+                logger.warning(
+                    "engaging-subjects: %d response(s) returned but 0 applied — "
+                    "all dropped via sensitivity/blocklist/missing-cluster. "
+                    "First response: %r (sens=%s, cid=%r)",
+                    len(response_subjects),
+                    response_subjects[0].name[:80],
+                    response_subjects[0].is_sensitive,
+                    response_subjects[0].cluster_id[:32],
                 )
 
             # Materialize the cache from live clusters (window-filtered).
