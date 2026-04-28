@@ -1,10 +1,12 @@
 {# Primary nav links (left side). Reads `current_path` and `mod_mode_enabled`
    from base context. Labels show always — Live + Settings are rendered
-   separately in base.html as right-aligned icon-only utility buttons. #}
-{% set is_insights = current_path == '/insights' or current_path == '/topics' %}
+   separately in base.html as right-aligned icon-only utility buttons.
+
+   `/` is the Insights home; the chatters list lives at /chatters. #}
+{% set is_insights = current_path == '/insights' or current_path == '/topics' or current_path == '/' %}
 {% set links = [
-  ('/',         'Chatters', 'fa-users',          is_chatters),
   ('/insights', 'Insights', 'fa-lightbulb',      is_insights),
+  ('/chatters', 'Chatters', 'fa-users',          is_chatters),
   ('/stats',    'Stats',    'fa-chart-pie',      current_path == '/stats'),
   ('/events',   'Events',   'fa-coins',          current_path == '/events'),
   ('/search',   'Search',   'fa-wand-magic-sparkles', current_path == '/search'),

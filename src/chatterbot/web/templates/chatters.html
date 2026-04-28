@@ -13,7 +13,7 @@
 
   <div class="flex flex-col sm:flex-row gap-2 sm:items-end">
     <div class="flex-1">
-      {% with endpoint='/', target='#chatters-table', value=q,
+      {% with endpoint='/chatters', target='#chatters-table', value=q,
               include_selector="[name='sort']", placeholder='username…',
               push_url=True %}
         {% include "components/_search.html" %}
@@ -23,7 +23,7 @@
       <select id="sort" name="sort"
               class="w-full sm:w-auto tap bg-surface border border-subtle rounded px-3 text-base text-primary
                      focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out"
-              hx-get="/"
+              hx-get="/chatters"
               hx-trigger="change"
               hx-target="#chatters-table"
               hx-swap="outerHTML"

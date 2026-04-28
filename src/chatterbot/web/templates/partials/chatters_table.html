@@ -112,7 +112,7 @@
     <div class="flex items-center justify-between pt-2 text-sm">
       {% if page > 1 %}
         <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary"
-                hx-get="/?q={{ q | urlencode }}&sort={{ sort }}&page={{ page-1 }}"
+                hx-get="/chatters?q={{ q | urlencode }}&sort={{ sort }}&page={{ page-1 }}"
                 hx-target="#chatters-table" hx-swap="outerHTML"
                 hx-push-url="true">
           <i class="fa-solid fa-chevron-left text-xs"></i> prev
@@ -121,7 +121,7 @@
       <span class="text-muted">page {{ page }} / {{ pages }}</span>
       {% if page < pages %}
         <button class="tap inline-flex items-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary"
-                hx-get="/?q={{ q | urlencode }}&sort={{ sort }}&page={{ page+1 }}"
+                hx-get="/chatters?q={{ q | urlencode }}&sort={{ sort }}&page={{ page+1 }}"
                 hx-target="#chatters-table" hx-swap="outerHTML"
                 hx-push-url="true">
           next <i class="fa-solid fa-chevron-right text-xs"></i>

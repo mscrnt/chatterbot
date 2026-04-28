@@ -185,7 +185,7 @@
       </a>
       {# Primary nav links — inline on lg+, in dropdown on smaller screens. #}
       <div class="flex-1 hidden lg:flex items-center gap-1 overflow-x-auto">
-        {% set is_chatters = current_path == "/" or current_path.startswith("/users") %}
+        {% set is_chatters = current_path.startswith("/chatters") or current_path.startswith("/users") %}
         {% include "components/_nav_link.html" with context %}
       </div>
       {# spacer so the right cluster anchors correctly when the link row is hidden #}
@@ -284,7 +284,7 @@
        Mirrors the lg+ inline layout: primary links, then utility icons,
        then theme toggle + shortcuts. Status pills stay in the top bar
        (their own responsive breakpoints already gate their visibility). #}
-    {% set is_chatters = current_path == "/" or current_path.startswith("/users") %}
+    {% set is_chatters = current_path.startswith("/chatters") or current_path.startswith("/users") %}
     {% set is_insights = current_path == '/insights' or current_path == '/topics' %}
     <div class="lg:hidden border-t border-subtle bg-surface"
          x-show="menuOpen"

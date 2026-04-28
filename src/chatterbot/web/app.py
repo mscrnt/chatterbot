@@ -311,28 +311,33 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     async def index(
         request: Request,
+        view: str = Query("engagement"),
+        partial: int = Query(0),
+        window: str = Query("7d"),
+        status: str = Query("all"),
         q: str = Query(""),
-        sort: str = Query("last_seen"),
-        page: int = Query(1, ge=1),
     ):
-        # When HTMX requests this URL (search keystrokes, sort change,
-        # pagination), return only the table partial — but the URL still
-        # gets pushed via hx-push-url so the back button restores
-        # whatever filter state the streamer was in. A direct browser
-        # load (no HX-Request header) renders the full page.
-        partial = request.headers.get("hx-request", "").lower() == "true"
-        return _render_chatters(request, q, sort, page, partial=partial)
+        # Home is the Insights page. The chatters list moved to
+        # /chatters as a sibling — the streamer hits Insights first and
+        # drills into chatters from there. Existing bookmarks of `/`
+        # land here unchanged.
+        return await insights_page(
+            request, view=view, partial=partial,
+            window=window, status=status, q=q,
+        )
 
     @app.get("/chatters", response_class=HTMLResponse)
-    async def chatters_partial(
+    async def chatters_page(
         request: Request,
         q: str = Query(""),
         sort: str = Query("last_seen"),
         page: int = Query(1, ge=1),
     ):
-        # Kept for the auto-refresh tick (which deliberately doesn't
-        # push URL). New code should hit `/` with HX-Request set.
-        return _render_chatters(request, q, sort, page, partial=True)
+        # Full chatters list. HTMX-partial path covers both the
+        # search-as-you-type / sort / pagination interactions and the
+        # 15s auto-refresh tick on the chatters_table partial.
+        partial = request.headers.get("hx-request", "").lower() == "true"
+        return _render_chatters(request, q, sort, page, partial=partial)
 
     def _render_chatters(
         request: Request, q: str, sort: str, page: int, *, partial: bool
