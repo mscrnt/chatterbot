@@ -26,6 +26,7 @@ import json
 import sqlite3
 import struct
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -399,6 +400,15 @@ class ChatterRepo:
         # connections (lazy-created per thread) reuse the existing tables.
         self._init_conn()  # populates self._tl.conn for *this* thread
         self._init_schema()
+        # In-memory app_settings cache (see _ensure_app_settings_cache).
+        # Background loops hammer get_app_setting() once per tick for
+        # things like watermarks and the engaging-subjects blocklist;
+        # every call hit a 1-row SELECT before. Cache is process-local
+        # and TTL'd so cross-process writes (bot ↔ dashboard) reconcile
+        # within ~60 s.
+        self._app_settings_cache: dict[str, str | None] = {}
+        self._app_settings_cache_loaded_at: float = 0.0
+        self._app_settings_lock = threading.Lock()
 
     def _init_conn(self) -> sqlite3.Connection:
         """Create + configure a SQLite connection for the current thread.
@@ -6416,11 +6426,42 @@ class ChatterRepo:
     # restart of the bot is required to pick up changes; the dashboard surfaces
     # that prompt after every save.
 
-    def get_app_setting(self, key: str) -> str | None:
+    # ============================================================
+    # APP-SETTINGS CACHE — read-through, write-through, TTL'd
+    # ------------------------------------------------------------
+    # Background loops (transcript watermark, engaging-subjects
+    # blocklist, recap session goals, etc.) read from app_settings
+    # once per tick. Without a cache that's one 1-row SELECT per call
+    # — fine in isolation, but with 5+ loops at ~1 Hz it adds up.
+    #
+    # Pattern: lazy-load ALL keys in one SELECT on first access,
+    # serve subsequent reads from a process-local dict. Writes hit
+    # the DB and update the cache in lockstep ("write-through").
+    # 60 s TTL bounds staleness in the bot↔dashboard split-process
+    # case where the OTHER process might write a key we care about.
+    # Within one process, cache and DB stay in sync exactly.
+    # ============================================================
+
+    _APP_SETTINGS_TTL_SECONDS = 60.0
+
+    def _ensure_app_settings_cache(self) -> None:
+        """Reload the cache when stale (or empty). Cheap full-scan
+        — app_settings is small (~tens of rows) and beats N
+        per-key SELECTs on hot read paths."""
+        now = time.time()
+        if now - self._app_settings_cache_loaded_at < self._APP_SETTINGS_TTL_SECONDS:
+            return
         with self._cursor() as cur:
-            cur.execute("SELECT value FROM app_settings WHERE key = ?", (key,))
-            row = cur.fetchone()
-            return row["value"] if row else None
+            cur.execute("SELECT key, value FROM app_settings")
+            rows = cur.fetchall()
+        with self._app_settings_lock:
+            self._app_settings_cache = {r["key"]: r["value"] for r in rows}
+            self._app_settings_cache_loaded_at = now
+
+    def get_app_setting(self, key: str) -> str | None:
+        self._ensure_app_settings_cache()
+        with self._app_settings_lock:
+            return self._app_settings_cache.get(key)
 
     def set_app_setting(self, key: str, value: str) -> None:
         with self._cursor() as cur:
@@ -6433,15 +6474,25 @@ class ChatterRepo:
                 """,
                 (key, value, _now_iso()),
             )
+        # Write-through: keep the cache in sync with the DB so the
+        # next get_app_setting() returns this value without a
+        # round-trip.
+        with self._app_settings_lock:
+            self._app_settings_cache[key] = value
 
     def delete_app_setting(self, key: str) -> None:
         with self._cursor() as cur:
             cur.execute("DELETE FROM app_settings WHERE key = ?", (key,))
+        with self._app_settings_lock:
+            self._app_settings_cache.pop(key, None)
 
     def get_all_app_settings(self) -> dict[str, str]:
-        with self._cursor() as cur:
-            cur.execute("SELECT key, value FROM app_settings")
-            return {r["key"]: r["value"] for r in cur.fetchall()}
+        self._ensure_app_settings_cache()
+        with self._app_settings_lock:
+            return {
+                k: v for k, v in self._app_settings_cache.items()
+                if v is not None
+            }
 
     # ============================ teardown =================================
 
