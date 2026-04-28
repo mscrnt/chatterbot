@@ -1,0 +1,141 @@
+{# Reorder + collapse driver for /insights panels.
+
+   Every container marked `data-insights-panels` becomes draggable
+   (SortableJS) with per-panel collapse toggles. State persists to
+   localStorage so the streamer's preferences survive both reloads
+   and SSE-driven swaps of the body.
+
+   The driver re-applies on `htmx:afterSwap` so the panel container
+   getting replaced (engagement view's 60s body refresh, topics
+   view's hx-trigger="insights:topics from:body" refetch) doesn't
+   reset the streamer's order. SortableJS itself is re-initialised
+   on each swap because the container element is new.
+
+   localStorage keys:
+     chatterbot.insightsPanelOrder      — JSON array of panel ids
+     chatterbot.insightsPanelCollapsed  — JSON array of panel ids #}
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+<script>
+(function () {
+  const ORDER_KEY = 'chatterbot.insightsPanelOrder';
+  const COLLAPSED_KEY = 'chatterbot.insightsPanelCollapsed';
+
+  function readJson(key, fallback) {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : fallback;
+    } catch (e) {
+      return fallback;
+    }
+  }
+  function writeJson(key, val) {
+    try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) {}
+  }
+
+  function panelsIn(container) {
+    return Array.from(container.querySelectorAll(':scope > [data-panel-id]'));
+  }
+
+  function applyOrder(container) {
+    const desired = readJson(ORDER_KEY, []);
+    if (!Array.isArray(desired) || desired.length === 0) return;
+    const panels = panelsIn(container);
+    const byId = new Map(panels.map(p => [p.dataset.panelId, p]));
+    const seen = new Set();
+    const newOrder = [];
+    for (const id of desired) {
+      if (byId.has(id) && !seen.has(id)) {
+        newOrder.push(byId.get(id));
+        seen.add(id);
+      }
+    }
+    // Append any panels not in the saved order at their default
+    // server-side positions (preserves discoverability of new
+    // panels added in code without forcing the streamer to reset).
+    for (const p of panels) {
+      if (!seen.has(p.dataset.panelId)) {
+        newOrder.push(p);
+        seen.add(p.dataset.panelId);
+      }
+    }
+    // Cheap reorder: only re-append when the order actually changed.
+    let dirty = false;
+    for (let i = 0; i < newOrder.length; i++) {
+      if (panels[i] !== newOrder[i]) { dirty = true; break; }
+    }
+    if (dirty) {
+      newOrder.forEach(p => container.appendChild(p));
+    }
+  }
+
+  function applyCollapsed(container) {
+    const collapsed = new Set(readJson(COLLAPSED_KEY, []));
+    panelsIn(container).forEach(p => {
+      const id = p.dataset.panelId;
+      const body = p.querySelector(':scope > .panel-body');
+      const icon = p.querySelector(':scope > header .panel-collapse-toggle i');
+      const isCollapsed = collapsed.has(id);
+      if (body) body.classList.toggle('hidden', isCollapsed);
+      if (icon) {
+        icon.classList.toggle('fa-chevron-down', !isCollapsed);
+        icon.classList.toggle('fa-chevron-right', isCollapsed);
+      }
+    });
+  }
+
+  function wireToggles(container) {
+    panelsIn(container).forEach(p => {
+      const btn = p.querySelector(':scope > header .panel-collapse-toggle');
+      if (!btn || btn._wired) return;
+      btn._wired = true;
+      btn.addEventListener('click', () => {
+        const id = p.dataset.panelId;
+        const collapsed = new Set(readJson(COLLAPSED_KEY, []));
+        if (collapsed.has(id)) collapsed.delete(id);
+        else collapsed.add(id);
+        writeJson(COLLAPSED_KEY, Array.from(collapsed));
+        applyCollapsed(container);
+      });
+    });
+  }
+
+  function wireSortable(container) {
+    if (typeof Sortable === 'undefined') return;
+    if (container._sortable) container._sortable.destroy();
+    container._sortable = Sortable.create(container, {
+      handle: '.panel-drag-handle',
+      animation: 150,
+      // Touch needs a small delay so a vertical scroll over a panel
+      // doesn't immediately start a drag — the streamer can still
+      // long-press the grip glyph to drag.
+      delay: 80,
+      delayOnTouchOnly: true,
+      onEnd: () => {
+        const ids = panelsIn(container).map(p => p.dataset.panelId);
+        writeJson(ORDER_KEY, ids);
+      },
+    });
+  }
+
+  function init(scope) {
+    const containers = (scope || document).querySelectorAll('[data-insights-panels]');
+    containers.forEach(c => {
+      applyOrder(c);
+      applyCollapsed(c);
+      wireToggles(c);
+      wireSortable(c);
+    });
+  }
+
+  // First load.
+  init();
+
+  // Subsequent SSE-driven swaps replace the panel container.
+  document.body.addEventListener('htmx:afterSwap', (e) => {
+    const t = e.target;
+    if (!t) return;
+    if (t.matches && t.matches('[data-insights-panels]')) init(t.parentElement || document);
+    else init(t);
+  });
+})();
+</script>

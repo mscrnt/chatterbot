@@ -79,21 +79,17 @@
 </div>
 {%- endmacro %}
 
-<div id="topics-body" class="space-y-5"
+{% from "partials/_panel.html" import panel %}
+<div id="topics-body" class="space-y-3"
+     data-insights-panels
      hx-get="/insights?view=topics&partial=1&status={{ status }}&q={{ q | urlencode }}"
      hx-trigger="insights:topics from:body, insights-state-changed from:body"
      hx-swap="outerHTML">
 
   {# Latest snapshot pinned at the top — anchor for "right now" #}
   {% if latest and (status in ('all', 'active')) and not q %}
-    <section class="rounded-xl border border-accent/40 bg-accent/5 p-3 sm:p-4">
-      <header class="flex items-baseline justify-between gap-2 mb-2">
-        <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-          <i class="fa-solid fa-fire text-accent"></i> Right now
-          {% with item_ts=latest.ts, acked_at=acked_at %}{% include "components/_new_badge.html" %}{% endwith %}
-        </h2>
-        <span class="text-xs text-muted">snapshot {{ latest.ts | short_ts }}</span>
-      </header>
+    {% call panel('topics-now', 'Right now', icon='fa-fire',
+                  subtitle=('snapshot ' ~ (latest.ts | short_ts))) %}
 
       {% if latest_topics %}
         {% set _cat_tone = {
@@ -138,16 +134,13 @@
       {% else %}
         <pre class="whitespace-pre-wrap text-sm sm:text-base font-sans text-primary leading-relaxed">{{ latest.summary }}</pre>
       {% endif %}
-    </section>
+    {% endcall %}
   {% endif %}
 
   {# Active threads #}
   {% if status in ('all', 'active') %}
-    <section class="space-y-2">
-      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-        <i class="fa-solid fa-circle-dot text-success"></i> Active
-        <span class="text-xs text-muted">last hour · {{ active | length }}</span>
-      </h2>
+    {% call panel('topics-active', 'Active', icon='fa-circle-dot', icon_tone='success',
+                  count=active|length, subtitle='last hour') %}
       {% if not active %}
         <p class="text-muted italic text-sm">Nothing currently active{% if q %} matching “{{ q }}”{% endif %}.</p>
       {% else %}
@@ -157,16 +150,13 @@
         {% endfor %}
       </div>
       {% endif %}
-    </section>
+    {% endcall %}
   {% endif %}
 
   {# Dormant threads — "follow up on this" sweet spot #}
   {% if status in ('all', 'dormant') %}
-    <section class="space-y-2">
-      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-        <i class="fa-solid fa-moon text-warning"></i> Dormant — pull these back?
-        <span class="text-xs text-muted">last 24h · {{ dormant | length }}</span>
-      </h2>
+    {% call panel('topics-dormant', 'Dormant — pull these back?', icon='fa-moon',
+                  icon_tone='warning', count=dormant|length, subtitle='last 24h') %}
       {% if not dormant %}
         <p class="text-muted italic text-sm">Nothing dormant{% if q %} matching “{{ q }}”{% endif %}.</p>
       {% else %}
@@ -176,16 +166,13 @@
         {% endfor %}
       </div>
       {% endif %}
-    </section>
+    {% endcall %}
   {% endif %}
 
   {# Archived threads #}
   {% if status in ('all', 'archived') %}
-    <section class="space-y-2">
-      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-        <i class="fa-solid fa-box-archive text-muted"></i> Archive
-        <span class="text-xs text-muted">older than 24h · {{ archived | length }}</span>
-      </h2>
+    {% call panel('topics-archived', 'Archive', icon='fa-box-archive',
+                  icon_tone='muted', count=archived|length, subtitle='older than 24h') %}
       {% if not archived %}
         <p class="text-muted italic text-sm">No archived threads{% if q %} matching “{{ q }}”{% endif %}.</p>
       {% else %}
@@ -195,23 +182,20 @@
         {% endfor %}
       </div>
       {% endif %}
-    </section>
+    {% endcall %}
   {% endif %}
 
   {# Legacy text-only snapshots (pre-topics_json era) #}
   {% if legacy and not q and status == 'all' %}
-    <section class="space-y-2">
-      <h2 class="font-semibold text-muted inline-flex items-center gap-2 text-sm">
-        <i class="fa-solid fa-clock-rotate-left"></i> Legacy snapshots
-        <span class="text-xs text-muted">pre-clustering era</span>
-      </h2>
+    {% call panel('topics-legacy', 'Legacy snapshots', icon='fa-clock-rotate-left',
+                  icon_tone='muted', subtitle='pre-clustering era') %}
       {% for s in legacy %}
         <article class="rounded-xl border border-subtle bg-surface p-3 sm:p-4">
           <header class="text-xs text-muted mb-2">{{ s.ts | short_ts }}</header>
           <pre class="whitespace-pre-wrap text-sm font-sans text-primary">{{ s.summary }}</pre>
         </article>
       {% endfor %}
-    </section>
+    {% endcall %}
   {% endif %}
 
 </div>

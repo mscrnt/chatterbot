@@ -1,0 +1,57 @@
+{# Reusable insights-panel shell.
+
+   Every section on /insights wraps its body in this macro so it gets:
+     - a stable panel id (data-panel-id) that the reorder driver keys
+       its localStorage state on;
+     - a uniform header with drag-handle + title + collapse toggle;
+     - a body container that the collapse toggle hides via class.
+
+   Usage:
+     {% from "partials/_panel.html" import panel %}
+     {% call panel('starred', 'Your favorites are here',
+                   icon='fa-star', count=starred_active|length) %}
+       …content…
+     {% endcall %}
+
+   The driver in _panels_driver.html attaches to any element marked
+   `data-insights-panels` and applies the streamer's saved order +
+   collapse state on first render and after every HTMX swap. #}
+
+{% macro panel(panel_id, title, icon='fa-circle', count=None,
+               icon_tone='accent', subtitle=None) %}
+<section data-panel-id="{{ panel_id }}"
+         data-panel-title="{{ title }}"
+         class="rounded-xl border border-subtle bg-surface overflow-hidden">
+  <header class="flex items-center gap-2 px-3 py-2 border-b border-subtle bg-surface-raised/40">
+    {# Drag handle — the only place SortableJS will pick up. Keeping
+       it scoped to this grip glyph means clicks on links, buttons,
+       and form fields inside the body never accidentally start a
+       drag. #}
+    <button type="button"
+            class="panel-drag-handle cursor-grab text-muted hover:text-primary px-1"
+            title="Drag to reorder this panel"
+            aria-label="reorder panel">
+      <i class="fa-solid fa-grip-vertical text-xs"></i>
+    </button>
+    <h2 class="text-sm font-semibold text-primary inline-flex items-baseline gap-2 flex-1 min-w-0">
+      <i class="fa-solid {{ icon }} text-{{ icon_tone }} text-xs shrink-0"></i>
+      <span class="truncate">{{ title }}</span>
+      {% if count is not none %}
+        <span class="text-[11px] text-muted shrink-0">({{ count }})</span>
+      {% endif %}
+      {% if subtitle %}
+        <span class="text-[11px] text-muted truncate">· {{ subtitle }}</span>
+      {% endif %}
+    </h2>
+    <button type="button"
+            class="panel-collapse-toggle text-muted hover:text-primary px-2"
+            title="Collapse / expand"
+            aria-label="toggle panel">
+      <i class="fa-solid fa-chevron-down text-xs"></i>
+    </button>
+  </header>
+  <div class="panel-body p-3">
+    {{ caller() }}
+  </div>
+</section>
+{% endmacro %}

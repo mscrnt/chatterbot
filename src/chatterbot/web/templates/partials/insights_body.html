@@ -1,8 +1,14 @@
+{% from "partials/_panel.html" import panel %}
 {# Engagement view: streamer's primary "what's chat doing + what should I
    address" surface. Cards carry per-item state (open / addressed /
    snoozed / pinned / skipped) so the streamer can track what they've
-   already spoken to on stream. The streamer never types in chat. #}
-<div id="insights-body" class="space-y-5"
+   already spoken to on stream. The streamer never types in chat.
+
+   `data-insights-panels` marks this container as a draggable panel
+   host. The driver in _panels_driver.html keys its order + collapse
+   state on each child <section>'s `data-panel-id`. #}
+<div id="insights-body" class="space-y-3"
+     data-insights-panels
      hx-get="/insights?view=engagement&partial=1&window={{ window }}"
      hx-trigger="insights:engagement from:body, messages from:body"
      hx-swap="outerHTML"
@@ -30,14 +36,10 @@
     {% with goals=goals_state %}{% include "partials/goals_panel.html" %}{% endwith %}
   {% endif %}
 
-  {# ---------------- Last stream recap (collapsible) + KPI deltas ---------------- #}
+  {# ---------------- Last stream recap + KPI deltas ---------------- #}
   {% if latest_recap %}
-  <details class="rounded-xl border border-accent/30 bg-accent/5 p-3">
-    <summary class="cursor-pointer inline-flex items-center gap-2 text-sm font-medium text-primary">
-      <i class="fa-solid fa-clipboard-list text-accent"></i>
-      Last stream recap
-      <span class="text-[11px] text-muted ml-1">{{ latest_recap.ended_at | short_ts }}</span>
-    </summary>
+  {% call panel('recap', 'Last stream recap', icon='fa-clipboard-list',
+                subtitle=(latest_recap.ended_at | short_ts)) %}
     {% if recent_recaps and recent_recaps|length > 1 %}
       {# Cross-stream KPI strip: latest values + tiny vs-prior deltas. #}
       {% set _prior = recent_recaps[1] %}
@@ -47,10 +49,10 @@
         ('new',      latest_recap.new_chatters,    _prior.new_chatters),
         ('addr',     latest_recap.addressed_count, _prior.addressed_count),
       ] %}
-      <div class="grid grid-cols-4 gap-2 mt-2 mb-2">
+      <div class="grid grid-cols-4 gap-2 mb-2">
         {% for label, cur, prev in _stats %}
           {% set delta = cur - prev %}
-          <div class="rounded border border-subtle bg-surface px-2 py-1">
+          <div class="rounded border border-subtle bg-surface-raised px-2 py-1">
             <p class="text-[9px] uppercase tracking-wider text-muted">{{ label }}</p>
             <p class="text-primary text-base font-semibold leading-none tabular-nums">{{ cur }}</p>
             <p class="text-[10px] {% if delta > 0 %}text-success{% elif delta < 0 %}text-danger{% else %}text-muted{% endif %}">
@@ -60,41 +62,37 @@
         {% endfor %}
       </div>
     {% endif %}
-    <pre class="whitespace-pre-wrap text-sm text-primary leading-relaxed mt-2 font-sans">{{ latest_recap.summary }}</pre>
-  </details>
+    <pre class="whitespace-pre-wrap text-sm text-primary leading-relaxed font-sans">{{ latest_recap.summary }}</pre>
+  {% endcall %}
   {% endif %}
 
   {# ---------------- Activity pulse sparkline ---------------- #}
   {% set _pulse_total = pulse | sum(attribute=1) if pulse else 0 %}
   {% set _pulse_max = pulse | map(attribute=1) | max if pulse else 0 %}
   {% set _last5_total = pulse[-5:] | sum(attribute=1) if pulse and pulse|length >= 5 else _pulse_total %}
-  <section class="rounded-xl border border-subtle bg-surface p-3 flex items-center gap-3">
-    <div class="text-[11px] text-muted shrink-0">
-      <p class="uppercase tracking-wider">activity</p>
-      <p class="text-primary text-base font-semibold leading-none">
-        {{ _last5_total }}<span class="text-[10px] text-muted font-normal">/5m</span>
-      </p>
-      <p class="text-muted">{{ _pulse_total }} in last hour</p>
+  {% call panel('activity', 'Activity', icon='fa-chart-line',
+                subtitle=(_last5_total ~ '/5m · ' ~ _pulse_total ~ '/h')) %}
+    <div class="flex items-center gap-3">
+      {% if _pulse_max > 0 %}
+        <svg viewBox="0 0 240 32" preserveAspectRatio="none"
+             class="flex-1 h-8" aria-label="messages per minute, last 60">
+          {% for slot, c in pulse %}
+            {% set _x = loop.index0 * (240 / (pulse | length)) %}
+            {% set _h = (c / _pulse_max) * 30 %}
+            {% set _y = 32 - _h %}
+            {% set _w = (240 / (pulse | length)) - 1 %}
+            <rect x="{{ _x }}" y="{{ _y }}" width="{{ _w }}" height="{{ _h }}"
+                  fill="rgb(var(--c-primary))"
+                  opacity="{{ 0.3 + (loop.index0 / (pulse | length)) * 0.7 }}"></rect>
+          {% endfor %}
+        </svg>
+      {% else %}
+        <p class="flex-1 text-xs text-muted italic text-center">
+          quiet — no messages in the last hour
+        </p>
+      {% endif %}
     </div>
-    {% if _pulse_max > 0 %}
-      <svg viewBox="0 0 240 32" preserveAspectRatio="none"
-           class="flex-1 h-8" aria-label="messages per minute, last 60">
-        {% for slot, c in pulse %}
-          {% set _x = loop.index0 * (240 / (pulse | length)) %}
-          {% set _h = (c / _pulse_max) * 30 %}
-          {% set _y = 32 - _h %}
-          {% set _w = (240 / (pulse | length)) - 1 %}
-          <rect x="{{ _x }}" y="{{ _y }}" width="{{ _w }}" height="{{ _h }}"
-                fill="rgb(var(--c-primary))"
-                opacity="{{ 0.3 + (loop.index0 / (pulse | length)) * 0.7 }}"></rect>
-        {% endfor %}
-      </svg>
-    {% else %}
-      <p class="flex-1 text-xs text-muted italic text-center">
-        quiet — no messages in the last hour
-      </p>
-    {% endif %}
-  </section>
+  {% endcall %}
 
   {# ---------------- Window selector ---------------- #}
   <div class="flex items-center gap-2 flex-wrap">
@@ -116,13 +114,8 @@
 
   {# ---------------- Starred chatters present ---------------- #}
   {% if starred_active %}
-  <section class="space-y-2">
-    <header>
-      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-        <i class="fa-solid fa-star text-warning"></i> Your favorites are here
-        <span class="text-[11px] text-muted">({{ starred_active | length }})</span>
-      </h2>
-    </header>
+  {% call panel('starred', 'Your favorites are here', icon='fa-star',
+                icon_tone='warning', count=starred_active|length) %}
     <div class="flex flex-wrap gap-2">
       {% for u in starred_active %}
         <button type="button"
@@ -136,7 +129,7 @@
         </button>
       {% endfor %}
     </div>
-  </section>
+  {% endcall %}
   {% endif %}
 
   {# Helper macro: per-row dismissal gate. A row is hidden when its
@@ -178,10 +171,12 @@
     {# Default tab: whichever surface has more entries. Streamer's
        localStorage choice (if any) wins via x-init. #}
     {% set _default_tab = 'mentions' if (_visible_mentions | length) >= (_visible_lurkers | length) and _visible_mentions else 'lurkers' %}
-    <section class="space-y-2"
-             x-data="{ tab: '{{ _default_tab }}' }"
-             x-init="(() => { const t = localStorage.getItem('chatterbot.insightIndividualsTab'); if (t === 'mentions' || t === 'lurkers') tab = t; })()">
-      <header class="flex items-center gap-1 border-b border-subtle">
+    {% call panel('individuals', 'Talking to you / Lurkers',
+                  icon='fa-comment-dots', icon_tone='warning',
+                  count=(_visible_mentions|length + _visible_lurkers|length)) %}
+    <div x-data="{ tab: '{{ _default_tab }}' }"
+         x-init="(() => { const t = localStorage.getItem('chatterbot.insightIndividualsTab'); if (t === 'mentions' || t === 'lurkers') tab = t; })()">
+      <header class="flex items-center gap-1 border-b border-subtle mb-2">
         {% set _tab_base = 'tap inline-flex items-center gap-2 px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-all duration-150 ease-out' %}
         {% if _visible_mentions %}
         <button type="button"
@@ -301,7 +296,8 @@
         {% endif %}
       </div>
       {% endif %}
-    </section>
+    </div>
+    {% endcall %}
   {% endif %}
 
   {# ---------------- What to say next (high-impact subjects) ----------------
@@ -326,17 +322,9 @@
      and surfaces participants. Each thread has a per-card action row
      so you can mark hallucinated ones as 'skip'. #}
   {% if live_threads %}
-  <section class="space-y-2">
-    <header class="flex items-baseline justify-between gap-2">
-      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-        <i class="fa-solid fa-comments text-accent"></i> Live conversations
-        <span class="text-[11px] text-muted font-normal">grounded in actual chat — click skip if Qwen's drunk</span>
-      </h2>
-      <a href="/insights?view=topics"
-         class="text-[11px] text-muted hover:text-primary hover:underline">
-        all threads →
-      </a>
-    </header>
+  {% call panel('live-threads', 'Live conversations', icon='fa-comments',
+                count=live_threads|length,
+                subtitle='grounded in actual chat — click skip if Qwen\'s drunk') %}
     <ul class="divide-y divide-subtle rounded-xl border border-subtle bg-surface overflow-hidden">
       {% for t in live_threads %}
         {% set _ts = (live_thread_states.get(t.id|string) if live_thread_states else None) %}
@@ -381,7 +369,7 @@
         {% endif %}
       {% endfor %}
     </ul>
-  </section>
+  {% endcall %}
   {% endif %}
 
   {# ---------------- Quiet cohorts ---------------- #}
@@ -402,13 +390,8 @@
 
   {# ---------------- Anniversaries today ---------------- #}
   {% if anniversaries %}
-  <section class="space-y-2">
-    <header>
-      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-        <i class="fa-solid fa-cake-candles text-accent"></i> Anniversaries today
-        <span class="text-[11px] text-muted">({{ anniversaries | length }})</span>
-      </h2>
-    </header>
+  {% call panel('anniversaries', 'Anniversaries today', icon='fa-cake-candles',
+                count=anniversaries|length) %}
     <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
       {% for u, milestone in anniversaries %}
         {% set _s = (anniv_states.get(u.twitch_id) if anniv_states else None) %}
@@ -440,17 +423,12 @@
         {% endif %}
       {% endfor %}
     </div>
-  </section>
+  {% endcall %}
   {% endif %}
 
   {# ---------------- Newcomers today ---------------- #}
-  <section class="space-y-2">
-    <header>
-      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-        <i class="fa-solid fa-user-plus text-accent"></i> New today
-        <span class="text-[11px] text-muted">({{ newcomers | length }})</span>
-      </h2>
-    </header>
+  {% call panel('newcomers', 'New today', icon='fa-user-plus',
+                count=newcomers|length) %}
     {% if not newcomers %}
       <p class="text-muted italic text-sm">No first-timers in the last 24h.</p>
     {% else %}
@@ -480,16 +458,11 @@
         {% endfor %}
       </ul>
     {% endif %}
-  </section>
+  {% endcall %}
 
   {# ---------------- Regulars ---------------- #}
-  <section class="space-y-2">
-    <header>
-      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-        <i class="fa-solid fa-crown text-accent"></i> Regulars
-        <span class="text-[11px] text-muted">{{ window_label }} · top {{ regulars | length }}</span>
-      </h2>
-    </header>
+  {% call panel('regulars', 'Regulars', icon='fa-crown',
+                count=regulars|length, subtitle=(window_label ~ ' · top ' ~ regulars|length)) %}
     {% if not regulars %}
       <p class="text-muted italic text-sm">No data yet.</p>
     {% else %}
@@ -524,16 +497,12 @@
         {% endfor %}
       </ul>
     {% endif %}
-  </section>
+  {% endcall %}
 
   {# ---------------- Lapsed regulars ---------------- #}
-  <section class="space-y-2">
-    <header>
-      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-        <i class="fa-solid fa-user-clock text-accent"></i> Lapsed regulars
-        <span class="text-[11px] text-muted">active {{ window_label }} · quiet last 7d</span>
-      </h2>
-    </header>
+  {% call panel('lapsed', 'Lapsed regulars', icon='fa-user-clock',
+                count=lapsed|length,
+                subtitle=('active ' ~ window_label ~ ' · quiet last 7d')) %}
     {% if not lapsed %}
       <p class="text-muted italic text-sm">Nobody's lapsed — keep it up.</p>
     {% else %}
@@ -566,5 +535,5 @@
         {% endfor %}
       </ul>
     {% endif %}
-  </section>
+  {% endcall %}
 </div>

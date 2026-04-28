@@ -12,14 +12,11 @@
    Each row shows the thread + its recap + the count of currently-
    active chatters who've historically driven it + the names of those
    chatters (clickable). Click the row to open the thread modal. #}
+{% from "partials/_panel.html" import panel %}
 {% if high_impact_subjects %}
-<section class="space-y-2">
-  <header class="flex items-baseline justify-between gap-2">
-    <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-      <i class="fa-solid fa-bullseye text-accent"></i> What to say next
-      <span class="text-[11px] text-muted font-normal">subjects that engage the most chatters in the room right now</span>
-    </h2>
-  </header>
+{% call panel('high-impact', 'What to say next', icon='fa-bullseye',
+              count=high_impact_subjects|length,
+              subtitle='subjects that engage the most chatters in the room') %}
   <ul class="divide-y divide-subtle rounded-xl border border-accent/30 bg-accent/5 overflow-hidden">
     {% for h in high_impact_subjects %}
       {% set t = h.thread %}
@@ -65,5 +62,5 @@
       </li>
     {% endfor %}
   </ul>
-</section>
+{% endcall %}
 {% endif %}

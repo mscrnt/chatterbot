@@ -14,20 +14,14 @@
 
    Sensitive subjects (religion / politics / controversy) are stripped
    at the prompt + cache layer; nothing here surfaces them. #}
+{% from "partials/_panel.html" import panel %}
 {% set _subjects_age = engaging_subjects_age_seconds %}
 {% set _has_subjects = engaging_subjects and engaging_subjects | length > 0 %}
 {% if _has_subjects or engaging_subjects_error or _subjects_age is not none %}
-<section class="space-y-2">
-  <header class="flex items-baseline justify-between gap-2">
-    <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-      <i class="fa-solid fa-fire text-accent"></i> Engaging subjects
-      <span class="text-[11px] text-muted font-normal">click a row to expand · "dismiss" tells the LLM to drop it from future passes</span>
-    </h2>
-    <span class="text-[11px] text-muted">
-      {% if _subjects_age is not none %}refreshed {{ _subjects_age }}s ago{% else %}warming up…{% endif %}
-    </span>
-  </header>
-
+{% set _subj_subtitle = ('refreshed ' ~ _subjects_age ~ 's ago') if _subjects_age is not none else 'warming up…' %}
+{% call panel('engaging', 'Engaging subjects', icon='fa-fire',
+              count=(engaging_subjects|length if _has_subjects else None),
+              subtitle=_subj_subtitle) %}
   {% if engaging_subjects_error %}
     <p class="text-xs text-warning italic">
       <i class="fa-solid fa-triangle-exclamation"></i>
@@ -96,5 +90,5 @@
       {% endfor %}
     </ul>
   {% endif %}
-</section>
+{% endcall %}
 {% endif %}

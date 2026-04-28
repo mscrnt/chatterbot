@@ -98,5 +98,20 @@
   {% else %}
     {% include "partials/topics_body.html" %}
   {% endif %}
+
+  {# Panel order + collapse footer. The driver below applies the
+     streamer's saved order/collapsed state to any container marked
+     `data-insights-panels`, so this reset shortcut covers every
+     panel on the page in one click. #}
+  <div class="flex justify-end pt-2">
+    <button type="button"
+            class="tap text-[11px] text-muted hover:text-primary inline-flex items-center gap-1 px-2 py-1"
+            onclick="if(confirm('Reset panel order + collapse state to defaults?')){localStorage.removeItem('chatterbot.insightsPanelOrder');localStorage.removeItem('chatterbot.insightsPanelCollapsed');location.reload();}"
+            title="Restore default panel order and expand all">
+      <i class="fa-solid fa-rotate-left text-[10px]"></i>
+      reset panel layout
+    </button>
+  </div>
 </div>
+{% include "partials/_panels_driver.html" %}
 {% endblock %}

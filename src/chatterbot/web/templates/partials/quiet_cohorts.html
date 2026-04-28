@@ -8,18 +8,11 @@
    the same way they do on the Live Conversations panel and the
    Topics tab. Skipping here also hides this thread from those other
    surfaces — single source of truth. #}
+{% from "partials/_panel.html" import panel %}
 {% if quiet_cohorts %}
-<section class="space-y-2">
-  <header class="flex items-baseline justify-between gap-2">
-    <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-      <i class="fa-solid fa-users-slash text-warning"></i> Quiet cohorts
-      <span class="text-[11px] text-muted font-normal">groups that have stopped talking — pivot back to bring them in</span>
-    </h2>
-    <a href="/insights?view=topics&status=dormant"
-       class="text-[11px] text-muted hover:text-primary hover:underline">
-      all dormant →
-    </a>
-  </header>
+{% call panel('quiet-cohorts', 'Quiet cohorts', icon='fa-users-slash',
+              icon_tone='warning', count=quiet_cohorts|length,
+              subtitle='groups that have stopped talking') %}
   <ul class="divide-y divide-subtle rounded-xl border border-subtle bg-surface overflow-hidden">
     {% for c in quiet_cohorts %}
       {% set t = c.thread %}
@@ -79,5 +72,5 @@
       {% endif %}
     {% endfor %}
   </ul>
-</section>
+{% endcall %}
 {% endif %}
