@@ -1,21 +1,45 @@
 {# Stream goals — set, track, clear. Self-contained: every form posts
    to /insights/goals and the panel re-renders. Goals reset when the
    streamer hits the explicit clear button (and ideally on stream-end
-   transition, future). #}
-<div id="goals-panel" class="rounded-xl border border-subtle bg-surface p-3">
+   transition, future).
+
+   Dismiss state is per-streamer + persisted in localStorage. When
+   hidden, a tiny "show stream goals" pill renders in place so the
+   streamer can bring it back. #}
+<div id="goals-panel"
+     x-data="{ hidden: localStorage.getItem('chatterbot.goalsHidden') === '1' }">
+  {# Hidden state — one-line opt-in to bring the panel back. #}
+  <div x-show="hidden" x-cloak class="flex justify-end">
+    <button type="button"
+            class="tap text-[11px] text-muted hover:text-primary inline-flex items-center gap-1 px-2 py-0.5"
+            @click="hidden = false; localStorage.removeItem('chatterbot.goalsHidden')"
+            title="show stream goals panel">
+      <i class="fa-solid fa-bullseye text-[10px]"></i> show stream goals
+    </button>
+  </div>
+  {# Visible state — full panel. #}
+  <div x-show="!hidden" x-cloak class="rounded-xl border border-subtle bg-surface p-3">
   <header class="flex items-baseline justify-between gap-2 mb-2">
     <h3 class="text-sm font-semibold text-primary inline-flex items-center gap-2">
       <i class="fa-solid fa-bullseye text-accent"></i> Stream goals
     </h3>
-    {% if goals.targets %}
-      <form hx-post="/insights/goals" hx-target="#goals-panel" hx-swap="outerHTML"
-            class="inline-flex">
-        <input type="hidden" name="kind" value="clear">
-        <button class="text-[11px] text-muted hover:text-danger" title="reset all goals">
-          clear
-        </button>
-      </form>
-    {% endif %}
+    <div class="inline-flex items-center gap-2">
+      {% if goals.targets %}
+        <form hx-post="/insights/goals" hx-target="#goals-panel" hx-swap="outerHTML"
+              class="inline-flex">
+          <input type="hidden" name="kind" value="clear">
+          <button class="text-[11px] text-muted hover:text-danger" title="reset all goals">
+            clear
+          </button>
+        </form>
+      {% endif %}
+      <button type="button"
+              class="text-[11px] text-muted hover:text-primary"
+              @click="hidden = true; localStorage.setItem('chatterbot.goalsHidden', '1')"
+              title="hide stream goals — preference saved locally">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+    </div>
   </header>
 
   {% if goals.targets %}
@@ -66,4 +90,5 @@
       </button>
     </form>
   </div>
-</div>
+  </div>{# /visible-state wrapper #}
+</div>{# /goals-panel root with dismiss state #}

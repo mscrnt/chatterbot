@@ -205,6 +205,12 @@
         {% endif %}
       </header>
 
+      {# Default visible cap — render up to N rows, queue the rest
+         behind a "show N more" expander. Fetched server-side as a
+         wider list (route bumps to 30) so the streamer can walk the
+         full queue without round-tripping. #}
+      {% set _individuals_visible = 8 %}
+
       {# Talking-to-you pane — direct mentions. Click a row to open
          the context modal (transcript + profile + per-chatter
          engaging subjects + help text). The username stays clickable
@@ -212,11 +218,13 @@
          control is keyed by user_id so acknowledging once hides every
          mention from that chatter. #}
       {% if _visible_mentions %}
-      <div x-show="tab === 'mentions'" x-cloak>
+      <div x-show="tab === 'mentions'" x-cloak
+           x-data="{ expanded: localStorage.getItem('chatterbot.mentionsExpanded') === '1' }">
         <p class="text-[11px] text-muted mb-1 px-1">questions / @-mentions of you in the last window — click a row for context</p>
         <ul class="divide-y divide-subtle rounded-xl border border-warning/30 bg-warning/5 overflow-hidden">
           {% for m, _s in _visible_mentions %}
             <li class="insight-card-root px-3 py-2 text-sm flex items-baseline gap-2 hover:bg-warning/10 cursor-pointer transition-all duration-150 ease-out"
+                {% if loop.index0 >= _individuals_visible %}x-show="expanded" x-cloak{% endif %}
                 hx-get="/modals/insight/direct_mention/{{ m.user_id }}?meta={{ m.content[:200] | urlencode }}&focus={{ m.id }}"
                 hx-target="#modal-root"
                 hx-swap="innerHTML"
@@ -236,6 +244,17 @@
             </li>
           {% endfor %}
         </ul>
+        {% if _visible_mentions | length > _individuals_visible %}
+        <div class="flex justify-center pt-1">
+          <button type="button"
+                  class="tap text-[11px] text-muted hover:text-primary px-2 py-1 inline-flex items-center gap-1"
+                  @click="expanded = !expanded; localStorage.setItem('chatterbot.mentionsExpanded', expanded ? '1' : '0')">
+            <i class="fa-solid" :class="expanded ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
+            <span x-show="!expanded">show {{ _visible_mentions | length - _individuals_visible }} more in queue</span>
+            <span x-show="expanded" x-cloak>show less</span>
+          </button>
+        </div>
+        {% endif %}
       </div>
       {% endif %}
 
@@ -244,11 +263,13 @@
          modal; the username link still navigates straight to /users/
          via stopPropagation as a power-user shortcut. #}
       {% if _visible_lurkers %}
-      <div x-show="tab === 'lurkers'" x-cloak>
+      <div x-show="tab === 'lurkers'" x-cloak
+           x-data="{ expanded: localStorage.getItem('chatterbot.lurkersExpanded') === '1' }">
         <p class="text-[11px] text-muted mb-1 px-1">here now, not addressed lately — click a row for context</p>
         <ul class="divide-y divide-subtle rounded-xl border border-warning/30 bg-warning/5 overflow-hidden">
           {% for u, _s in _visible_lurkers %}
             <li class="insight-card-root px-3 py-2 text-sm flex items-center gap-3 hover:bg-warning/10 cursor-pointer transition-all duration-150 ease-out"
+                {% if loop.index0 >= _individuals_visible %}x-show="expanded" x-cloak{% endif %}
                 hx-get="/modals/insight/neglected_lurker/{{ u.twitch_id }}"
                 hx-target="#modal-root"
                 hx-swap="innerHTML"
@@ -267,6 +288,17 @@
             </li>
           {% endfor %}
         </ul>
+        {% if _visible_lurkers | length > _individuals_visible %}
+        <div class="flex justify-center pt-1">
+          <button type="button"
+                  class="tap text-[11px] text-muted hover:text-primary px-2 py-1 inline-flex items-center gap-1"
+                  @click="expanded = !expanded; localStorage.setItem('chatterbot.lurkersExpanded', expanded ? '1' : '0')">
+            <i class="fa-solid" :class="expanded ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
+            <span x-show="!expanded">show {{ _visible_lurkers | length - _individuals_visible }} more in queue</span>
+            <span x-show="expanded" x-cloak>show less</span>
+          </button>
+        </div>
+        {% endif %}
       </div>
       {% endif %}
     </section>

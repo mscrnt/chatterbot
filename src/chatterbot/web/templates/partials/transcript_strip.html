@@ -65,6 +65,12 @@
   {% set _row_text = "text-primary leading-snug flex-1 break-words" %}
   {% set _row_trail = "text-[10px] text-muted tabular-nums shrink-0" %}
 
+  {# Default visible row count — keep the strip from dominating the
+     viewport. The remaining rows ride behind a "show N more" toggle.
+     Persists in localStorage so the streamer's preference sticks
+     across page loads. #}
+  {% set _strip_visible = 5 %}
+
   {% if not groups and not chunks %}
     <p class="text-xs text-muted italic">
       Nothing heard yet. Drop
@@ -73,59 +79,85 @@
     </p>
   {% elif groups %}
     {# Summary view — one LLM-summarised row per ~60 s window. #}
-    <ul class="space-y-1 text-sm">
-      {% for g in groups %}
-        <li>
-          <button type="button"
-                  class="{{ _row_btn }}"
-                  hx-get="/modals/transcript-group/{{ g.id }}"
-                  hx-target="#modal-root"
-                  hx-swap="innerHTML"
-                  title="Open with the underlying utterances + screenshots">
-            <span class="{{ _row_ts }}">{{ g.start_ts | short_ts }}</span>
-            <i class="fa-solid fa-microphone-lines text-muted text-[10px] shrink-0"></i>
-            <span class="{{ _row_text }}">{{ g.summary }}</span>
-            <span class="{{ _row_trail }}">
-              {{ g.last_chunk_id - g.first_chunk_id + 1 }} lines
-            </span>
-          </button>
-        </li>
-      {% endfor %}
-    </ul>
+    <div x-data="{ expanded: localStorage.getItem('chatterbot.transcriptExpanded') === '1' }">
+      <ul class="space-y-1 text-sm">
+        {% for g in groups %}
+          <li {% if loop.index0 >= _strip_visible %}x-show="expanded" x-cloak{% endif %}>
+            <button type="button"
+                    class="{{ _row_btn }}"
+                    hx-get="/modals/transcript-group/{{ g.id }}"
+                    hx-target="#modal-root"
+                    hx-swap="innerHTML"
+                    title="Open with the underlying utterances + screenshots">
+              <span class="{{ _row_ts }}">{{ g.start_ts | short_ts }}</span>
+              <i class="fa-solid fa-microphone-lines text-muted text-[10px] shrink-0"></i>
+              <span class="{{ _row_text }}">{{ g.summary }}</span>
+              <span class="{{ _row_trail }}">
+                {{ g.last_chunk_id - g.first_chunk_id + 1 }} lines
+              </span>
+            </button>
+          </li>
+        {% endfor %}
+      </ul>
+      {% if groups | length > _strip_visible %}
+      <div class="flex justify-center pt-1">
+        <button type="button"
+                class="tap text-[10px] text-muted hover:text-primary px-2 py-0.5 inline-flex items-center gap-1"
+                @click="expanded = !expanded; localStorage.setItem('chatterbot.transcriptExpanded', expanded ? '1' : '0')">
+          <i class="fa-solid" :class="expanded ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
+          <span x-show="!expanded">show {{ groups | length - _strip_visible }} more</span>
+          <span x-show="expanded" x-cloak>show less</span>
+        </button>
+      </div>
+      {% endif %}
+    </div>
   {% else %}
     {# Full-log view — every raw whisper utterance, sim-icon lead. #}
     {% set _thr = 0.55 %}
-    <ul class="space-y-1 text-sm">
-      {% for c in chunks %}
-        {% set _sim = c.similarity %}
-        {% set _hit = _sim is not none and _sim >= _thr %}
-        {% set _close = _sim is not none and _sim >= 0.30 and not _hit %}
-        <li>
-          <button type="button"
-                  class="{{ _row_btn }}"
-                  hx-get="/modals/transcript/{{ c.id }}"
-                  hx-target="#modal-root"
-                  hx-swap="innerHTML"
-                  title="Open with surrounding context + matched card">
-            <span class="{{ _row_ts }}">{{ c.ts | short_ts }}</span>
-            {% if _hit %}
-              <i class="fa-solid fa-check-circle text-success text-[10px] shrink-0"></i>
-            {% elif _close %}
-              <i class="fa-solid fa-circle-notch text-warning text-[10px] shrink-0"></i>
-            {% elif _sim is not none %}
-              <i class="fa-solid fa-circle text-muted text-[10px] shrink-0"></i>
-            {% else %}
-              <i class="fa-solid fa-circle text-subtle text-[10px] shrink-0"></i>
-            {% endif %}
-            <span class="{{ _row_text }}">{{ c.text }}</span>
-            {% if _sim is not none %}
-              <span class="{{ _row_trail }}">{{ '%.2f'|format(_sim) }}</span>
-            {% else %}
-              <span class="{{ _row_trail }}">—</span>
-            {% endif %}
-          </button>
-        </li>
-      {% endfor %}
-    </ul>
+    <div x-data="{ expanded: localStorage.getItem('chatterbot.transcriptExpanded') === '1' }">
+      <ul class="space-y-1 text-sm">
+        {% for c in chunks %}
+          {% set _sim = c.similarity %}
+          {% set _hit = _sim is not none and _sim >= _thr %}
+          {% set _close = _sim is not none and _sim >= 0.30 and not _hit %}
+          <li {% if loop.index0 >= _strip_visible %}x-show="expanded" x-cloak{% endif %}>
+            <button type="button"
+                    class="{{ _row_btn }}"
+                    hx-get="/modals/transcript/{{ c.id }}"
+                    hx-target="#modal-root"
+                    hx-swap="innerHTML"
+                    title="Open with surrounding context + matched card">
+              <span class="{{ _row_ts }}">{{ c.ts | short_ts }}</span>
+              {% if _hit %}
+                <i class="fa-solid fa-check-circle text-success text-[10px] shrink-0"></i>
+              {% elif _close %}
+                <i class="fa-solid fa-circle-notch text-warning text-[10px] shrink-0"></i>
+              {% elif _sim is not none %}
+                <i class="fa-solid fa-circle text-muted text-[10px] shrink-0"></i>
+              {% else %}
+                <i class="fa-solid fa-circle text-subtle text-[10px] shrink-0"></i>
+              {% endif %}
+              <span class="{{ _row_text }}">{{ c.text }}</span>
+              {% if _sim is not none %}
+                <span class="{{ _row_trail }}">{{ '%.2f'|format(_sim) }}</span>
+              {% else %}
+                <span class="{{ _row_trail }}">—</span>
+              {% endif %}
+            </button>
+          </li>
+        {% endfor %}
+      </ul>
+      {% if chunks | length > _strip_visible %}
+      <div class="flex justify-center pt-1">
+        <button type="button"
+                class="tap text-[10px] text-muted hover:text-primary px-2 py-0.5 inline-flex items-center gap-1"
+                @click="expanded = !expanded; localStorage.setItem('chatterbot.transcriptExpanded', expanded ? '1' : '0')">
+          <i class="fa-solid" :class="expanded ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
+          <span x-show="!expanded">show {{ chunks | length - _strip_visible }} more</span>
+          <span x-show="expanded" x-cloak>show less</span>
+        </button>
+      </div>
+      {% endif %}
+    </div>
   {% endif %}
 </div>

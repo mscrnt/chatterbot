@@ -1709,16 +1709,23 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             # Activity pulse for the sparkline at the top.
             "pulse": repo.messages_per_minute(60),
             # Direct mentions (recent questions / @-style addresses).
-            "direct_mentions": repo.recent_direct_mentions(limit=8),
+            # Pull a wider candidate list than we display by default —
+            # the template reveals 8, surfaces "show N more" so the
+            # streamer can audit the full queue without an extra round
+            # trip.
+            "direct_mentions": repo.recent_direct_mentions(limit=30),
             # Most recent end-of-stream recap, if any.
             "latest_recap": (repo.list_stream_recaps(limit=1) or [None])[0],
             # Recap deltas — last 5 recaps for the cross-stream KPI strip.
             "recent_recaps": repo.list_stream_recaps(limit=5),
             # Streamer-personal favorites currently in chat.
             "starred_active": repo.list_starred_active(within_minutes=30, limit=12),
-            # Active-now regulars the streamer hasn't engaged with recently.
+            # Active-now regulars the streamer hasn't engaged with
+            # recently. Same expansion pattern as direct_mentions —
+            # template renders 8, surfaces "show N more" to walk the
+            # rest of the queue.
             "neglected_lurkers": repo.list_neglected_lurkers(
-                active_within_minutes=30, neglected_for_days=7, limit=8,
+                active_within_minutes=30, neglected_for_days=7, limit=30,
             ),
             # Per-stream goals + computed progress.
             "goals_state": _build_goals_state(),
