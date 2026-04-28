@@ -134,34 +134,69 @@ class TwitchService:
         token = self.settings.twitch_oauth_token.removeprefix("oauth:").strip()
         if not token:
             return False
+        login = self.settings.twitch_channel.strip()
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
                 r = await client.get(
                     "https://id.twitch.tv/oauth2/validate",
                     headers={"Authorization": f"OAuth {token}"},
                 )
-            if r.status_code != 200:
-                logger.warning(
-                    "twitch: token validate returned %d — viewer-count + thumbnail disabled",
-                    r.status_code,
-                )
-                self._status = TwitchStatus(
-                    enabled=True, error=f"token validate {r.status_code}",
-                    refreshed_at=time.time(),
-                )
-                return False
-            data = r.json()
-            cid = (data or {}).get("client_id")
-            if not cid:
-                logger.warning("twitch: no client_id in validate response")
-                return False
-            self._client_id = cid
-            # Cache the broadcaster_id (the same `user_id` the validate
-            # response returns) so /helix/channels can be queried by id
-            # without a per-poll lookup. Helix /channels requires
-            # broadcaster_id, not login.
-            self._broadcaster_id = (data or {}).get("user_id") or None
-            logger.info("twitch: validated as %s (client_id ok)", data.get("login"))
+                if r.status_code != 200:
+                    logger.warning(
+                        "twitch: token validate returned %d — viewer-count + thumbnail disabled",
+                        r.status_code,
+                    )
+                    self._status = TwitchStatus(
+                        enabled=True, error=f"token validate {r.status_code}",
+                        refreshed_at=time.time(),
+                    )
+                    return False
+                data = r.json()
+                cid = (data or {}).get("client_id")
+                if not cid:
+                    logger.warning("twitch: no client_id in validate response")
+                    return False
+                self._client_id = cid
+                token_owner_login = (data or {}).get("login") or "?"
+
+                # Resolve the *watched* channel's broadcaster_id. The
+                # validate response only carries the token-owner's id,
+                # which is a different user when the streamer is using
+                # their personal token to read someone else's chat.
+                # /helix/channels needs the channel's id, not the
+                # token's, or content_classification_labels comes back
+                # for the wrong account.
+                self._broadcaster_id = None
+                if login:
+                    try:
+                        r2 = await client.get(
+                            "https://api.twitch.tv/helix/users",
+                            headers={
+                                "Authorization": f"Bearer {token}",
+                                "Client-Id": cid,
+                            },
+                            params={"login": login},
+                        )
+                        r2.raise_for_status()
+                        users = (r2.json() or {}).get("data") or []
+                        if users:
+                            self._broadcaster_id = users[0].get("id") or None
+                    except Exception:
+                        # Non-fatal: we just won't get content
+                        # classification labels. Game / title / tags
+                        # all still come from /helix/streams.
+                        logger.exception(
+                            "twitch: helix /users lookup for %r failed", login,
+                        )
+
+            # One log line that makes the relationship obvious — the
+            # `validated as X` phrasing was confusing when the token
+            # owner and watched channel are different people.
+            logger.info(
+                "twitch: token owner=%s, watching=%s (client_id ok, broadcaster_id=%s)",
+                token_owner_login, login or "—",
+                self._broadcaster_id or "unresolved",
+            )
             return True
         except Exception as e:
             logger.exception("twitch: token validate raised")
