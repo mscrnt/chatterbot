@@ -1453,6 +1453,16 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 status_filter="active", query="", limit=12,
             ),
             "live_thread_states": repo.get_insight_states("thread"),
+            # Quiet cohorts — clusters of chatters who shared a topic
+            # thread but have all gone silent. Streamer can pivot back
+            # to a topic to re-engage that group of people. Same skip/
+            # addressed state machine as live threads (kind='thread').
+            "quiet_cohorts": repo.list_quiet_thread_cohorts(
+                silence_minutes=int(getattr(settings, "quiet_cohort_silence_minutes", 15)),
+                lookback_hours=int(getattr(settings, "quiet_cohort_lookback_hours", 24)),
+                min_drivers=int(getattr(settings, "quiet_cohort_min_drivers", 2)),
+                limit=int(getattr(settings, "quiet_cohort_limit", 6)),
+            ),
         }
 
     def _build_topics_ctx(status: str, q: str) -> dict:

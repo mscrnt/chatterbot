@@ -4399,6 +4399,117 @@ class ChatterRepo:
             )
             return int(cur.fetchone()["c"])
 
+    def list_quiet_thread_cohorts(
+        self,
+        *,
+        silence_minutes: int = 15,
+        lookback_hours: int = 24,
+        min_drivers: int = 2,
+        limit: int = 8,
+    ) -> list[dict]:
+        """Topic threads whose driver chatters have all gone quiet.
+
+        Detects "lapsed cohorts" — groups of chatters who shared an
+        interest in a clustered conversation but have stopped speaking.
+        The streamer can use this surface to decide whether to pivot
+        back to a topic that would re-engage that group.
+
+        Returns dicts with:
+          thread          — TopicThread (with recap if populated)
+          drivers         — list of {name, last_seen} dicts
+          driver_count    — resolved driver count (matched to users.name)
+          cohort_last_ts  — when the most-recent driver spoke
+          minutes_quiet   — minutes since cohort_last_ts
+
+        Sort: largest cohorts first, then longest-silent. The biggest
+        "missing crowd" floats to the top.
+
+        Limitations:
+          - Driver name → user lookup is by current users.name only.
+            Renamed chatters (history in user_aliases) won't resolve;
+            their cohort weight is reduced. Acceptable for now.
+          - Only considers active+dormant threads (within `lookback_hours`).
+            Archived threads are intentionally skipped — they're done.
+        """
+        sql = f"""
+            SELECT t.id, t.title, t.first_ts, t.last_ts, t.category,
+                   t.recap, t.recap_updated_at,
+                   (SELECT COUNT(*) FROM topic_thread_members
+                    WHERE thread_id = t.id) AS mc,
+                   {self._STATUS_CASE} AS status,
+                   MAX(u.last_seen) AS cohort_last_ts,
+                   COUNT(DISTINCT u.twitch_id) AS resolved_drivers
+            FROM topic_threads t
+            JOIN topic_thread_members m ON m.thread_id = t.id
+            JOIN json_each(m.drivers) AS j
+            JOIN users u ON LOWER(u.name) = LOWER(j.value)
+            WHERE datetime(t.last_ts) >= datetime('now', ?)
+            GROUP BY t.id
+            HAVING datetime(MAX(u.last_seen)) < datetime('now', ?)
+               AND COUNT(DISTINCT u.twitch_id) >= ?
+            ORDER BY resolved_drivers DESC, cohort_last_ts ASC
+            LIMIT ?
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                sql,
+                (
+                    f"-{int(lookback_hours)} hours",
+                    f"-{int(silence_minutes)} minutes",
+                    int(min_drivers),
+                    int(limit),
+                ),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+
+        # Compute minutes_quiet + resolve driver list (releasing the
+        # cursor lock between rows so re-entrant queries don't deadlock).
+        from datetime import datetime as _dt, timezone as _tz
+        now_utc = _dt.now(_tz.utc)
+        out: list[dict] = []
+        for row in rows:
+            tid = int(row["id"])
+            driver_names = self._collect_thread_drivers(tid)
+            # Resolve each name → users.last_seen (skip unresolved).
+            driver_info: list[dict] = []
+            with self._cursor() as cur:
+                for name in driver_names:
+                    cur.execute(
+                        "SELECT last_seen FROM users WHERE LOWER(name) = LOWER(?)",
+                        (name,),
+                    )
+                    r = cur.fetchone()
+                    if r:
+                        driver_info.append({"name": name, "last_seen": r["last_seen"]})
+            try:
+                cohort_ts = (row["cohort_last_ts"] or "").replace(" ", "T")
+                last = _dt.fromisoformat(cohort_ts)
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=_tz.utc)
+                minutes_quiet = max(0, int((now_utc - last).total_seconds() / 60))
+            except (TypeError, ValueError):
+                minutes_quiet = 0
+            thread = TopicThread(
+                id=tid,
+                title=row["title"],
+                first_ts=row["first_ts"],
+                last_ts=row["last_ts"],
+                drivers=driver_names,
+                member_count=int(row["mc"]),
+                status=row["status"],
+                category=row["category"],
+                recap=row["recap"],
+                recap_updated_at=row["recap_updated_at"],
+            )
+            out.append({
+                "thread": thread,
+                "drivers": driver_info,
+                "driver_count": int(row["resolved_drivers"]),
+                "cohort_last_ts": row["cohort_last_ts"],
+                "minutes_quiet": minutes_quiet,
+            })
+        return out
+
     def _collect_thread_drivers(self, thread_id: int) -> list[str]:
         """Union of all driver names across the thread's members, preserving
         first-seen order for a stable display."""

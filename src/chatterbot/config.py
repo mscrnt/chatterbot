@@ -65,6 +65,10 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "screenshot_jpeg_quality",
     "screenshot_width",
     "screenshot_grid_max",
+    "quiet_cohort_silence_minutes",
+    "quiet_cohort_lookback_hours",
+    "quiet_cohort_min_drivers",
+    "quiet_cohort_limit",
 )
 
 # Subset that should be rendered as password inputs. Blank submissions for
@@ -239,6 +243,19 @@ class Settings(BaseSettings):
     # many shots.
     screenshot_grid_max: int = 4
 
+    # Quiet-cohort detection on the engagement view. Surfaces topic
+    # threads whose driver chatters have all gone silent — clusters
+    # of people the streamer can pivot back toward to re-engage.
+    # `silence_minutes`: how long every driver in the thread must
+    # have been silent before the thread shows as quiet.
+    # `lookback_hours`: only consider threads that were active in this
+    # window; archived ones don't count.
+    # `min_drivers`: don't surface single-person "cohorts."
+    quiet_cohort_silence_minutes: int = 15
+    quiet_cohort_lookback_hours: int = 24
+    quiet_cohort_min_drivers: int = 2
+    quiet_cohort_limit: int = 6
+
     # Moderation mode — opt-in. When enabled, the bot batches recent
     # messages through a strict-rubric LLM classifier and persists
     # flagged ones as incidents for streamer review. Advisory only —
@@ -291,6 +308,8 @@ def _coerce(key: str, value: str) -> Any:
         "youtube_min_poll_seconds", "youtube_max_poll_seconds",
         "screenshot_interval_seconds", "screenshot_max_age_hours",
         "screenshot_jpeg_quality", "screenshot_width", "screenshot_grid_max",
+        "quiet_cohort_silence_minutes", "quiet_cohort_lookback_hours",
+        "quiet_cohort_min_drivers", "quiet_cohort_limit",
     ):
         try:
             return int(value)
@@ -310,6 +329,10 @@ def _coerce(key: str, value: str) -> Any:
                 "screenshot_jpeg_quality": 60,
                 "screenshot_width": 480,
                 "screenshot_grid_max": 4,
+                "quiet_cohort_silence_minutes": 15,
+                "quiet_cohort_lookback_hours": 24,
+                "quiet_cohort_min_drivers": 2,
+                "quiet_cohort_limit": 6,
             }[key]
     if key in (
         "streamelements_enabled", "mod_mode_enabled",

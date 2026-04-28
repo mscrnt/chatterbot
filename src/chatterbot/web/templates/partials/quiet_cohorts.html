@@ -1,0 +1,83 @@
+{# Quiet cohorts panel. Surfaces topic threads whose driver chatters
+   have all gone silent — clusters of viewers the streamer might
+   re-engage by pivoting back to that topic. Pure observational; no
+   "you should pivot to X" prescription. The streamer reads the data
+   and decides. Sort: largest cohorts first, then longest-silent.
+
+   Reuses kind='thread' insight state, so skip/snooze/addressed work
+   the same way they do on the Live Conversations panel and the
+   Topics tab. Skipping here also hides this thread from those other
+   surfaces — single source of truth. #}
+{% if quiet_cohorts %}
+<section class="space-y-2">
+  <header class="flex items-baseline justify-between gap-2">
+    <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+      <i class="fa-solid fa-users-slash text-warning"></i> Quiet cohorts
+      <span class="text-[11px] text-muted font-normal">groups that have stopped talking — pivot back to bring them in</span>
+    </h2>
+    <a href="/insights?view=topics&status=dormant"
+       class="text-[11px] text-muted hover:text-primary hover:underline">
+      all dormant →
+    </a>
+  </header>
+  <ul class="divide-y divide-subtle rounded-xl border border-subtle bg-surface overflow-hidden">
+    {% for c in quiet_cohorts %}
+      {% set t = c.thread %}
+      {% set _ts = (live_thread_states.get(t.id|string) if live_thread_states else None) %}
+      {% if not _ts or _ts.state not in ('skipped', 'addressed') %}
+        {% set _is_pending = _ts and _ts.state == 'auto_pending' %}
+        <li class="insight-card-root px-3 py-3 flex flex-col gap-2
+                   {% if _is_pending %}bg-warning/5 ring-1 ring-warning/30{% endif %}
+                   hover:bg-surface-raised transition-all duration-150 ease-out">
+          <button type="button"
+                  class="w-full text-left min-w-0"
+                  hx-get="/modals/thread/{{ t.id }}"
+                  hx-target="#modal-root"
+                  hx-swap="innerHTML"
+                  title="Open with snapshots + drivers">
+            <div class="flex items-baseline gap-2 flex-wrap">
+              <span class="font-medium text-primary text-sm sm:text-base">{{ t.title }}</span>
+              {% if t.category and t.category != 'other' %}
+                <span class="text-[10px] uppercase tracking-wide text-muted">{{ t.category }}</span>
+              {% endif %}
+              <span class="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] uppercase tracking-wide rounded-full bg-warning/15 text-warning border border-warning/30">
+                <i class="fa-solid fa-clock text-[9px]"></i>
+                silent {{ c.minutes_quiet }}m
+              </span>
+              <span class="text-[10px] text-muted">
+                {{ c.driver_count }} chatter{{ '' if c.driver_count == 1 else 's' }}
+              </span>
+              {% if t.member_count > 1 %}
+                <span class="text-[10px] text-accent">↻ {{ t.member_count }}</span>
+              {% endif %}
+            </div>
+            {% if t.recap %}
+              <p class="text-[12px] text-primary mt-1 leading-snug">{{ t.recap }}</p>
+            {% endif %}
+            {% if c.drivers %}
+              <p class="text-[11px] text-muted mt-1 inline-flex items-center gap-1 flex-wrap">
+                <i class="fa-solid fa-users text-[9px]"></i>
+                {% for d in c.drivers %}
+                  <span class="inline-flex items-center gap-1">
+                    <a href="/users/{{ d.name | urlencode }}"
+                       class="hover:text-primary hover:underline"
+                       onclick="event.stopPropagation()">
+                      {{ d.name }}
+                    </a>{% if not loop.last %}<span>·</span>{% endif %}
+                  </span>
+                {% endfor %}
+              </p>
+            {% endif %}
+          </button>
+          <div class="shrink-0 self-end">
+            {% with kind='thread', item_key=t.id|string,
+                    state=(_ts.state if _ts else None) %}
+              {% include "components/_insight_actions.html" %}
+            {% endwith %}
+          </div>
+        </li>
+      {% endif %}
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}

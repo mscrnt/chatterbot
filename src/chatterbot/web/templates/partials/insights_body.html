@@ -256,6 +256,13 @@
   </section>
   {% endif %}
 
+  {# ---------------- Quiet cohorts ---------------- #}
+  {# Clusters of chatters who all drove the same topic thread but have
+     gone silent — observational only. The streamer can decide whether
+     to pivot back to that topic to re-engage them. Same skip/addressed
+     state machine as live threads. #}
+  {% include "partials/quiet_cohorts.html" %}
+
   {# Talking-points section removed per streamer feedback —
      the LLM-generated per-chatter conversation hooks were
      hallucinating facts (e.g. inventing an FF8 remake from one
