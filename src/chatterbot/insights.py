@@ -198,15 +198,27 @@ class InsightsService:
                 )
                 return
 
+            # Batch-fetch notes + recent messages for every active
+            # chatter in two queries instead of 2N. Previously each
+            # of ~20 chatters triggered two round-trips to the DB on
+            # every 3-min refresh — collapsed here using the
+            # canonical batch helpers in repo.py.
+            user_ids = [u.twitch_id for u in active]
+            notes_by_user, msgs_by_user = await asyncio.gather(
+                asyncio.to_thread(self.repo.get_notes_for_users, user_ids),
+                asyncio.to_thread(
+                    self.repo.get_recent_messages_for_users,
+                    user_ids,
+                    per_user_limit=self.RECENT_MESSAGES_PER_USER,
+                ),
+            )
+
             # Build a numbered prompt block.
             blocks: list[str] = []
             id_by_index: dict[int, tuple[str, str]] = {}
             for i, user in enumerate(active, start=1):
-                notes = await asyncio.to_thread(self.repo.get_notes, user.twitch_id)
-                msgs = await asyncio.to_thread(
-                    self.repo.get_messages, user.twitch_id,
-                    limit=self.RECENT_MESSAGES_PER_USER,
-                )
+                notes = notes_by_user.get(user.twitch_id, [])
+                msgs = msgs_by_user.get(user.twitch_id, [])
                 note_lines = (
                     "\n      - " + "\n      - ".join(n.text for n in notes)
                     if notes else " (none)"

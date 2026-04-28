@@ -92,7 +92,12 @@ class HelixSyncService:
         return bool(s.twitch_oauth_token and s.twitch_channel)
 
     async def run(self) -> None:
-        """Top-level loop. No-op when not configured."""
+        """Top-level loop. No-op when not configured.
+
+        Holds a single `httpx.AsyncClient` for the entire loop
+        lifetime — connection-pooled keep-alive saves the TCP /
+        TLS handshake on every tick. Old behavior opened a fresh
+        client per tick which paid handshake on each call."""
         if not self.configured:
             return
         # Stagger boot vs other Helix-touching services.
@@ -100,24 +105,23 @@ class HelixSyncService:
         if not await self._init():
             return
         last = {"vips": 0.0, "mods": 0.0, "subs": 0.0, "followers": 0.0}
-        # Force first-tick run for everything we have scope for so the
-        # streamer sees fresh data right away on bot start.
         try:
-            while True:
-                # Auto-pause off-stream — Helix data doesn't change much
-                # between streams and we'd rather save the rate-limit.
-                if self.obs is not None and self.obs.status.is_streamer_offline():
-                    await asyncio.sleep(self.POLL_TICK_SECONDS)
-                    continue
+            async with httpx.AsyncClient(
+                timeout=10.0,
+                headers={
+                    "Authorization": f"Bearer {self._token()}",
+                    "Client-Id": self._client_id or "",
+                },
+            ) as client:
+                while True:
+                    # Auto-pause off-stream — Helix data doesn't change
+                    # much between streams and we'd rather save the
+                    # rate-limit budget.
+                    if self.obs is not None and self.obs.status.is_streamer_offline():
+                        await asyncio.sleep(self.POLL_TICK_SECONDS)
+                        continue
 
-                now = time.time()
-                async with httpx.AsyncClient(
-                    timeout=10.0,
-                    headers={
-                        "Authorization": f"Bearer {self._token()}",
-                        "Client-Id": self._client_id or "",
-                    },
-                ) as client:
+                    now = time.time()
                     if self._has_vip_scope() and now - last["vips"] >= self.VIP_INTERVAL:
                         await self._sync_vips(client)
                         last["vips"] = now
@@ -130,7 +134,7 @@ class HelixSyncService:
                     if self._has_followers_scope() and now - last["followers"] >= self.FOLLOWERS_INTERVAL:
                         await self._sync_followers(client)
                         last["followers"] = now
-                await asyncio.sleep(self.POLL_TICK_SECONDS)
+                    await asyncio.sleep(self.POLL_TICK_SECONDS)
         except asyncio.CancelledError:
             raise
         except Exception:

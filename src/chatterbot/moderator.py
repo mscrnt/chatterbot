@@ -81,10 +81,18 @@ class Moderator:
         interval_seconds = max(60, self.settings.mod_review_interval_minutes * 60)
         max_msgs = self.settings.mod_review_max_messages
         # Don't fire immediately on boot; let the bot accumulate some chat first.
+        # Watermark guard — same pattern as insights.refresh_loop. If no new
+        # messages have arrived since the last batch, skip the LLM call
+        # entirely. Saves a wake-up + classifier eval cycle on idle chat.
+        last_processed_id = 0
         while True:
             try:
                 await asyncio.sleep(interval_seconds)
+                latest = await asyncio.to_thread(self.repo.latest_message_id)
+                if latest <= last_processed_id:
+                    continue  # no new chat → no new work
                 await self._review_batch(max_msgs)
+                last_processed_id = latest
             except asyncio.CancelledError:
                 raise
             except Exception:

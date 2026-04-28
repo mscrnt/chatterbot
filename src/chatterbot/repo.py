@@ -3911,6 +3911,160 @@ class ChatterRepo:
                 followed_at=r["followed_at"] if "followed_at" in r.keys() else None,
             )
 
+    # ============================================================
+    # CANONICAL BATCH HELPERS
+    # ------------------------------------------------------------
+    # The following three functions are the **gold-standard pattern**
+    # for fetching repo data by user_id when the caller has more than
+    # one user in hand. Use them — never write `for uid in ids:
+    # repo.get_user(uid)` style loops. Each batch helper:
+    #
+    #   - Issues ONE SQL statement with a parameterised IN-list, not N.
+    #   - Returns a `dict[user_id, ...]` so callers can reorder freely
+    #     and skip the missing keys without extra branches.
+    #   - Trims the SELECT to only what the dataclass needs.
+    #
+    # When you find yourself adding a new "for uid in ids: repo.X(uid)"
+    # call site, add a `repo.X_for_users(ids)` sibling here instead and
+    # link to this comment from its docstring. The N+1 → 1 win
+    # compounds: cache-friendly SQL, fewer Python round-trips, fewer
+    # SQLite GIL-released waits.
+    # ============================================================
+
+    def get_users_by_ids(self, ids: list[str] | set[str]) -> dict[str, User]:
+        """Fetch many users in one query. See "Canonical batch helpers"
+        comment above. Empty input → empty dict; missing ids are
+        silently absent from the result (caller checks with `.get`).
+
+        Used by the live-chat SSE rendering and any other place that
+        needs to attach user metadata to a batch of messages."""
+        ids = list(set(ids))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        with self._cursor() as cur:
+            cur.execute(
+                f"SELECT twitch_id, name, first_seen, last_seen, opt_out, "
+                f"sub_tier, sub_months, is_mod, is_vip, is_founder, "
+                f"source, merged_into, "
+                f"pronouns, location, demeanor, interests, profile_updated_at, "
+                f"is_starred, followed_at "
+                f"FROM users WHERE twitch_id IN ({placeholders})",
+                ids,
+            )
+            out: dict[str, User] = {}
+            for r in cur.fetchall():
+                interests_raw = r["interests"]
+                interests: list[str] | None = None
+                if interests_raw:
+                    try:
+                        parsed = json.loads(interests_raw)
+                        if isinstance(parsed, list):
+                            interests = [str(x) for x in parsed if x]
+                    except (TypeError, ValueError):
+                        interests = None
+                out[r["twitch_id"]] = User(
+                    twitch_id=r["twitch_id"],
+                    name=r["name"],
+                    first_seen=r["first_seen"],
+                    last_seen=r["last_seen"],
+                    opt_out=bool(r["opt_out"]),
+                    sub_tier=r["sub_tier"],
+                    sub_months=int(r["sub_months"] or 0),
+                    is_mod=bool(r["is_mod"]),
+                    is_vip=bool(r["is_vip"]),
+                    is_founder=bool(r["is_founder"]),
+                    source=r["source"] or "twitch",
+                    merged_into=r["merged_into"],
+                    pronouns=r["pronouns"],
+                    location=r["location"],
+                    demeanor=r["demeanor"],
+                    interests=interests,
+                    profile_updated_at=r["profile_updated_at"],
+                    is_starred=bool(r["is_starred"]),
+                    followed_at=r["followed_at"] if "followed_at" in r.keys() else None,
+                )
+            return out
+
+    def get_notes_for_users(
+        self, ids: list[str] | set[str],
+    ) -> dict[str, list[Note]]:
+        """Fetch every note for a batch of users in one query.
+        Returns `{user_id: [Note, ...]}` newest-first per user. See
+        "Canonical batch helpers" above. Used by the talking-points
+        refresh; each active chatter contributes a notes section to
+        the prompt and we previously paid one DB round-trip per
+        chatter."""
+        ids = list(set(ids))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        with self._cursor() as cur:
+            cur.execute(
+                f"SELECT id, user_id, ts, text, origin FROM notes "
+                f"WHERE user_id IN ({placeholders}) ORDER BY ts DESC",
+                ids,
+            )
+            out: dict[str, list[Note]] = {uid: [] for uid in ids}
+            for r in cur.fetchall():
+                out.setdefault(r["user_id"], []).append(Note(
+                    id=int(r["id"]), user_id=r["user_id"], ts=r["ts"],
+                    text=r["text"], origin=r["origin"] or "manual",
+                ))
+            return out
+
+    def get_recent_messages_for_users(
+        self, ids: list[str] | set[str], *, per_user_limit: int = 10,
+    ) -> dict[str, list[Message]]:
+        """Fetch the most recent N non-emote, non-spam messages per
+        user for a batch of users — in ONE query using a window
+        function, not N. Returns `{user_id: [Message, ...]}` newest-
+        first per user. See "Canonical batch helpers" above.
+
+        Used by the talking-points refresh, which needs each active
+        chatter's recent context to ground the LLM's hook line."""
+        ids = list(set(ids))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        # ROW_NUMBER over (PARTITION BY user_id ORDER BY id DESC) is
+        # the classic SQLite pattern for "top N per group". Beats
+        # N separate LIMIT queries by orders of magnitude.
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id, user_id, name, source, ts, content,
+                       reply_parent_login, reply_parent_body
+                FROM (
+                    SELECT m.id, m.user_id, u.name, u.source,
+                           m.ts, m.content,
+                           m.reply_parent_login, m.reply_parent_body,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY m.user_id
+                               ORDER BY m.id DESC
+                           ) AS rn
+                    FROM messages m
+                    JOIN users u ON u.twitch_id = m.user_id
+                    WHERE m.user_id IN ({placeholders})
+                      AND m.is_emote_only = 0
+                      AND m.spam_score < 0.5
+                )
+                WHERE rn <= ?
+                ORDER BY user_id, id DESC
+                """,
+                (*ids, int(per_user_limit)),
+            )
+            out: dict[str, list[Message]] = {uid: [] for uid in ids}
+            for r in cur.fetchall():
+                out.setdefault(r["user_id"], []).append(Message(
+                    id=int(r["id"]), user_id=r["user_id"], name=r["name"],
+                    ts=r["ts"], content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
+                    source=r["source"] or "twitch",
+                ))
+            return out
+
     def get_user_aliases(self, user_id: str) -> list[Alias]:
         """All names this user has been observed under, newest-active first."""
         with self._cursor() as cur:
