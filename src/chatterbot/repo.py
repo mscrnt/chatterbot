@@ -1484,6 +1484,50 @@ class ChatterRepo:
                 for r in cur.fetchall()
             ]
 
+    def recent_messages_with_embeddings(
+        self, *, limit: int = 250, within_minutes: int = 20,
+    ) -> list[tuple[Message, list[float]]]:
+        """Recent non-emote messages within the lookback window that
+        ALSO have an embedding in vec_messages, paired with the vector.
+        Drives the cluster-first engaging-subjects extractor — we only
+        cluster messages we have embeddings for; messages still in the
+        embedding queue are skipped on this pass and picked up next
+        time. Returns (Message, vec) oldest-first."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.id, m.user_id, u.name, u.source, m.ts, m.content,
+                       m.reply_parent_login, m.reply_parent_body,
+                       v.embedding
+                FROM messages m
+                JOIN users u ON u.twitch_id = m.user_id
+                JOIN vec_messages v ON v.message_id = m.id
+                WHERE u.opt_out = 0
+                  AND m.is_emote_only = 0
+                  AND datetime(m.ts) >= datetime('now', ?)
+                ORDER BY m.id DESC
+                LIMIT ?
+                """,
+                (f"-{int(within_minutes)} minutes", int(limit)),
+            )
+            rows = cur.fetchall()
+        out: list[tuple[Message, list[float]]] = []
+        for r in rows:
+            msg = Message(
+                id=int(r["id"]), user_id=r["user_id"], name=r["name"],
+                source=r["source"] or "twitch",
+                ts=r["ts"], content=r["content"],
+                reply_parent_login=r["reply_parent_login"],
+                reply_parent_body=r["reply_parent_body"],
+            )
+            try:
+                vec = _blob_to_vec(r["embedding"])
+            except Exception:
+                continue
+            out.append((msg, vec))
+        out.reverse()
+        return out
+
     def recent_messages(
         self, *, limit: int = 250, within_minutes: int = 20,
     ) -> list[Message]:
@@ -2384,6 +2428,40 @@ class ChatterRepo:
                 for r in cur.fetchall()
             ]
 
+    def recent_transcripts(
+        self, *, within_minutes: int = 20, limit: int = 80,
+    ) -> list[TranscriptChunk]:
+        """Streamer-voice utterances within the lookback window, oldest
+        first. Used by the engaging-subjects extractor to ground chat
+        subjects against what the streamer has actually been saying out
+        loud — so the LLM can tell "chat reacting to the streamer" from
+        "chat-driven subject"."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, ts, duration_ms, text,
+                       matched_kind, matched_item_key, similarity
+                FROM transcript_chunks
+                WHERE datetime(ts) >= datetime('now', ?)
+                ORDER BY id DESC LIMIT ?
+                """,
+                (f"-{int(within_minutes)} minutes", int(limit)),
+            )
+            rows = cur.fetchall()
+        out = [
+            TranscriptChunk(
+                id=int(r["id"]), ts=r["ts"],
+                duration_ms=int(r["duration_ms"] or 0),
+                text=r["text"],
+                matched_kind=r["matched_kind"],
+                matched_item_key=r["matched_item_key"],
+                similarity=float(r["similarity"]) if r["similarity"] is not None else None,
+            )
+            for r in rows
+        ]
+        out.reverse()
+        return out
+
     # ============================ Stream recap ============================
 
     def add_stream_recap(
@@ -2515,31 +2593,62 @@ class ChatterRepo:
 
     # ============================ Direct mentions =========================
 
+    # First N chars of the channel handle become a "possible mention"
+    # match — covers chatters who shortcut the name, e.g. typing
+    # `pcplay` for `pcplaysgames`. Set to 6 by default; degrades to
+    # exact-match for handles shorter than this (so `xqc` doesn't
+    # become a 3-char prefix that hits half the dictionary).
+    _MENTION_PREFIX_LEN = 6
+    _MIN_PREFIX_HANDLE_LEN = 4  # below this, prefix-match is too noisy
+
     def recent_direct_mentions(
         self, *, limit: int = 8, lookback_minutes: int = 30,
     ) -> list[Message]:
-        """Recent messages that look like the chatter is addressing the
-        streamer directly — a question, an @-mention of the channel name,
-        or a 'streamer-name' keyword. Used by the Engagement page to
-        surface 'people are talking to YOU' above general talking points.
+        """Recent messages where the chatter is *demonstrably* addressing
+        the streamer. Three signals — all word-boundary-aware so we
+        don't false-positive on substrings:
 
-        Heuristic, not LLM — the streamer's own login is in settings, so
-        we look for: '?' anywhere, '@<channel>' anywhere, or messages
-        that start with the channel handle. Skips emote-only.
+          1. `@<channel>` or bare `<channel>` at a word boundary:
+             `@pcplaysgames` and `pcplaysgames is cool` both match;
+             `@pcplaysgames123`, `xpcplaysgames`, `dudeplaysgames` do
+             not.
+          2. First-N-chars prefix at a word boundary: `pcplay` /
+             `pcplays` / `pcplaysgames` all match for channel
+             `pcplaysgames`. Common when chatters shortcut the name.
+             Will false-positive on real words sharing the prefix
+             (e.g. `pcplaying`); the modal's help banner frames this
+             as "possible mention". For handles shorter than
+             `_MIN_PREFIX_HANDLE_LEN`, prefix mode is disabled and we
+             require an exact match.
+          3. Twitch IRCv3 reply tag pointing at the streamer: when a
+             chatter clicks "Reply" on the streamer's own message,
+             `reply_parent_login` lands on the row. Strongest signal.
+
+        Drops the old `?`-anywhere heuristic — it flooded the tab with
+        random "wait what?" reactions. Without a configured
+        `twitch_channel` setting, returns [].
         """
+        import re
         twitch_channel = (self.get_app_setting("twitch_channel") or "").strip().lower()
+        if not twitch_channel:
+            return []
+
+        # Prefix used for fuzzy matching. Short handles get exact-match
+        # mode (no suffix expansion); long handles allow `[a-zA-Z0-9_]*`
+        # after the first N chars so chatters who shortcut the name
+        # still register.
+        fuzzy = len(twitch_channel) >= self._MIN_PREFIX_HANDLE_LEN
+        prefix = (
+            twitch_channel[:min(self._MENTION_PREFIX_LEN, len(twitch_channel))]
+            if fuzzy else twitch_channel
+        )
+
+        # SQL prefilter: any row containing the prefix as a substring
+        # OR a reply tag matching the streamer. Word-boundary precision
+        # happens in Python because SQLite LIKE doesn't do `\b`.
         with self._cursor() as cur:
-            params: list[Any] = []
-            channel_clause = ""
-            if twitch_channel:
-                # `@channelname` or `channelname,` or just the bare token.
-                channel_clause = (
-                    " OR LOWER(m.content) LIKE ?"
-                    " OR LOWER(m.content) LIKE ?"
-                )
-                params.extend([f"%@{twitch_channel}%", f"%{twitch_channel}%"])
             cur.execute(
-                f"""
+                """
                 SELECT m.id, m.user_id, u.name, u.source, m.ts, m.content,
                        m.reply_parent_login, m.reply_parent_body
                 FROM messages m
@@ -2547,22 +2656,53 @@ class ChatterRepo:
                 WHERE m.is_emote_only = 0
                   AND u.opt_out = 0
                   AND m.ts >= datetime('now', ?)
-                  AND (m.content LIKE '%?%'{channel_clause})
+                  AND (
+                       LOWER(m.content) LIKE ?
+                    OR LOWER(IFNULL(m.reply_parent_login, '')) = ?
+                  )
                 ORDER BY m.id DESC
                 LIMIT ?
                 """,
-                (f"-{int(lookback_minutes)} minutes", *params, int(limit)),
+                (
+                    f"-{int(lookback_minutes)} minutes",
+                    f"%{prefix}%",
+                    twitch_channel,
+                    # Pull a generous candidate set — post-filter shrinks it.
+                    int(limit) * 4,
+                ),
             )
-            return [
-                Message(
+            rows = cur.fetchall()
+
+        # Word-boundary post-filter. Twitch usernames are alnum +
+        # underscore; we hand-roll the boundary instead of `\b` because
+        # `\b` doesn't break on `_`. In fuzzy mode the trailing
+        # `[a-zA-Z0-9_]*` lets the prefix expand into the rest of the
+        # handle so `pcplay` / `pcplays` / `pcplaysgames` all match for
+        # channel `pcplaysgames`. In exact mode (short handles) we
+        # require the match to end right at the handle boundary so
+        # `xqcL` / `xqcow` don't false-positive on `xqc`.
+        suffix_re = r"[a-zA-Z0-9_]*" if fuzzy else r""
+        mention_re = re.compile(
+            rf"(?:^|[^a-zA-Z0-9_])"        # left word boundary
+            rf"@?{re.escape(prefix)}{suffix_re}"
+            rf"(?![a-zA-Z0-9_])",          # right word boundary
+            re.IGNORECASE,
+        )
+        out: list[Message] = []
+        for r in rows:
+            reply_login = (r["reply_parent_login"] or "").strip().lower()
+            content = r["content"] or ""
+            if reply_login == twitch_channel or mention_re.search(content):
+                out.append(Message(
                     id=int(r["id"]), user_id=r["user_id"], name=r["name"],
-                    ts=r["ts"], content=r["content"],
+                    ts=r["ts"], content=content,
                     reply_parent_login=r["reply_parent_login"],
                     reply_parent_body=r["reply_parent_body"],
                     source=r["source"] or "twitch",
-                )
-                for r in cur.fetchall()
-            ]
+                ))
+                if len(out) >= int(limit):
+                    break
+        return out
 
     # ============================ Activity / arrival signals ===============
 

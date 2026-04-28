@@ -906,6 +906,9 @@ Reply with `summary` = the line (or empty string).
         )
 
         try:
+            # think=True — group summary runs after a window of audio
+            # has elapsed (not realtime) and the streamer reads it on
+            # the dashboard, so accuracy beats latency.
             from .llm.schemas import TranscriptGroupSummaryResponse
             response = await self.llm.generate_structured(
                 prompt=prompt,
@@ -913,6 +916,7 @@ Reply with `summary` = the line (or empty string).
                 response_model=TranscriptGroupSummaryResponse,
                 num_ctx=self.GROUP_SUMMARY_NUM_CTX,
                 images=[grid_b64] if grid_b64 else None,
+                think=True,
             )
         except Exception:
             logger.exception("transcript: group summary call failed")

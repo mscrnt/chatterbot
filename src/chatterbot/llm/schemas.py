@@ -290,6 +290,11 @@ class EngagingSubject(BaseModel):
     is_sensitive: bool = False
     brief: str = Field(default="", max_length=400)
     angles: list[str] = Field(default_factory=list, max_length=4)
+    # Echoed-back identifier from the input prompt so we can match the
+    # LLM's labels to the persistent cluster they belong to. Empty when
+    # the LLM doesn't know about persistent clustering (legacy / one-off
+    # extraction without prior state).
+    cluster_id: str = Field(default="", max_length=64)
 
 
 class EngagingSubjectsResponse(BaseModel):

@@ -114,6 +114,29 @@ _KIND_PROMPTS: dict[str, str] = {
         "calling out their absence — that reads as guilt-tripping.\n\n"
         + _OUTPUT_RULES
     ),
+    "direct_mention": (
+        _AUDIENCE_BLOCK + "\n"
+        "INPUT: a chatter who just @-mentioned the streamer or asked the "
+        "streamer a direct question. Their recent messages (`[id]`) are "
+        "interleaved with chat-wide context lines (`[ctx id] otherUser:`).\n\n"
+        "TASK: 1 sentence framing what they're actually asking / saying to the "
+        "streamer (no embellishment — just the literal ask). Then 1 short "
+        "sentence on whether this is a quick acknowledgment, a real question "
+        "that needs a beat, or just banter — so the streamer knows the right "
+        "energy to bring.\n\n"
+        + _OUTPUT_RULES
+    ),
+    "neglected_lurker": (
+        _AUDIENCE_BLOCK + "\n"
+        "INPUT: a chatter active in chat right now but the streamer hasn't "
+        "acknowledged them recently. Their recent messages (`[id]`) interleaved "
+        "with chat-wide context lines (`[ctx id] otherUser:`).\n\n"
+        "TASK: 1 sentence on what this person is currently engaged with in "
+        "chat (specific moment, ongoing thread). Then 1 short sentence: a "
+        "low-key way to acknowledge them that doesn't feel like a forced "
+        "shout-out — leans on something they actually said.\n\n"
+        + _OUTPUT_RULES
+    ),
 }
 
 
@@ -132,6 +155,10 @@ KIND_DISPLAY: dict[str, dict[str, str]] = {
                       "meta_label": "window"},
     "lapsed":        {"title": "Lapsed regular", "icon": "fa-user-clock",
                       "meta_label": "last seen"},
+    "direct_mention": {"title": "Talking to you", "icon": "fa-comment-dots",
+                       "meta_label": "their message"},
+    "neglected_lurker": {"title": "Here, not addressed", "icon": "fa-user-clock",
+                         "meta_label": "context"},
 }
 
 VALID_KINDS = frozenset(_KIND_PROMPTS.keys())

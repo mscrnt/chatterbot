@@ -247,10 +247,14 @@ class Summarizer:
             )
 
             try:
+                # think=True: notes need to be cited correctly and survive
+                # the hallucination guard. Extra latency is fine — this
+                # runs off the message hot path.
                 response = await self.llm.generate_structured(
                     prompt=prompt,
                     system_prompt=NOTE_EXTRACTION_SYSTEM,
                     response_model=NoteExtractionResponse,
+                    think=True,
                 )
             except ValidationError:
                 logger.exception("note extraction validation failed for %s", user_id)
@@ -295,10 +299,13 @@ class Summarizer:
             # Failures here are non-fatal; the notes pass already wrote.
             profile_summary = "no fields"
             try:
+                # think=True for the same reason as the notes pass — a
+                # mislabeled pronoun/location sticks around for sessions.
                 profile = await self.llm.generate_structured(
                     prompt=prompt,
                     system_prompt=PROFILE_EXTRACTION_SYSTEM,
                     response_model=ProfileExtractionResponse,
+                    think=True,
                 )
                 await asyncio.to_thread(
                     self.repo.update_user_profile, user_id,
@@ -486,8 +493,11 @@ RULES:
         )
         text = ""
         try:
+            # think=True — post-stream debrief is the slowest, most
+            # accuracy-critical generation in the project. It runs once
+            # per stream and the streamer reads it carefully.
             async for chunk in self.llm.stream_generate(
-                prompt=prompt, system_prompt=self.RECAP_SYSTEM
+                prompt=prompt, system_prompt=self.RECAP_SYSTEM, think=True,
             ):
                 text += chunk
         except Exception:
@@ -649,10 +659,14 @@ RULES:
         formatted = "\n".join(f"{name}: {content}" for _, name, content in rows)
 
         try:
+            # think=True — channel-wide topic snapshots feed into thread
+            # clustering, so getting the labels right matters more than
+            # finishing fast.
             response = await self.llm.generate_structured(
                 prompt=f"Recent chat (oldest first):\n{formatted}",
                 system_prompt=TOPICS_SYSTEM,
                 response_model=TopicsResponse,
+                think=True,
             )
         except ValidationError:
             logger.exception("topics extraction validation failed")

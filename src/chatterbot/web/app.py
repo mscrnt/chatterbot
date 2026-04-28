@@ -114,6 +114,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         base_url=settings.ollama_base_url,
         model=settings.ollama_model,
         embed_model=settings.ollama_embed_model,
+        max_concurrent_generations=settings.ollama_max_concurrent_generations,
     )
 
     # Expose runtime settings flags to every template (nav uses these).
@@ -723,6 +724,10 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             f"NOTES:\n{bullet}"
         )
         try:
+            # think=True — streamer clicked "suggest merge" and is
+            # waiting; getting a faithful paraphrase right beats getting
+            # a fast one wrong (the suggestion replaces a textarea full
+            # of work).
             suggestion = await llm.generate(
                 prompt=prompt,
                 system_prompt=(
@@ -730,6 +735,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                     "summary. Stay grounded in the notes' content. No "
                     "advice, no extrapolation — just the merged paraphrase."
                 ),
+                think=True,
             )
         except Exception:
             logger.exception("merge_notes_suggest: llm.generate failed")
@@ -1773,6 +1779,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         kind: str,
         twitch_id: str,
         meta: str = Query("", max_length=2000),
+        focus: int | None = Query(None),
     ):
         from .insight_rag import KIND_DISPLAY, VALID_KINDS
 
@@ -1782,6 +1789,13 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         if not user:
             raise HTTPException(404, "user not found")
         rows, focal_ids = repo.recent_user_messages_with_context(twitch_id)
+        # `focus` is the message id the streamer clicked from the row —
+        # add it to the focal set so the modal highlights that exact
+        # line. Necessary for direct-mention rows where the row IS one
+        # specific message; without this, the modal just shows "all
+        # recent messages" with nothing to anchor to.
+        if focus is not None:
+            focal_ids = set(focal_ids) | {int(focus)}
         # Subjects this chatter has driven across topic_threads —
         # ranked by drive count + recency. Replaces the previous
         # LLM-streamed "what to say" prescription with an

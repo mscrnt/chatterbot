@@ -10,6 +10,27 @@
    the subjects this chatter has demonstrably engaged with, ranked
    by drive count + recency. The streamer reads the list, picks a
    subject, comes up with their own line. #}
+
+{# Kind-specific help banner. Lives at the top so the streamer
+   doesn't have to remember what each tab means — the modal itself
+   reminds them what signal they're acting on. Keep these short. #}
+{% set _help_text = {
+  'direct_mention':   'They @-mentioned you or asked something directly. Read the line, decide if it needs a real beat or just a quick acknowledgment.',
+  'neglected_lurker': 'Active in chat right now but you haven''t addressed them recently. Their transcript is below — find an organic moment, not a forced shout-out.',
+  'adhoc':            'Quick context surface — what this chatter has been engaging with so you can pivot a line their way.',
+  'talking_point':    'A talking point the dashboard surfaced about this chatter. Confirm against their messages before you riff.',
+  'anniversary':      'They hit a milestone today. Acknowledge it the way THIS chatter likes — banter-heavy, lurker, hype, etc.',
+  'newcomer':         'Brand-new viewer in the last 24h. Welcome them based on what they actually said, not a generic line.',
+  'regular':          'An established regular active right now. Use the fact that they have history with the channel.',
+  'lapsed':           'Used to show up regularly, hasn''t lately. Re-engage on something they cared about — don''t guilt-trip the absence.',
+}.get(kind, '') %}
+{% if _help_text %}
+<div class="rounded-lg border border-warning/30 bg-warning/5 p-2.5 mb-3 flex items-start gap-2">
+  <i class="fa-solid fa-circle-info text-warning text-[12px] mt-0.5 shrink-0"></i>
+  <p class="text-[12px] text-primary leading-snug">{{ _help_text }}</p>
+</div>
+{% endif %}
+
 <div class="space-y-4 text-sm">
   {# 1. Kind-specific framing — talking point text, anniversary
        milestone, newcomer first-seen, regular window, lapsed

@@ -76,6 +76,10 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "high_impact_lookback_days",
     "high_impact_min_overlap",
     "high_impact_limit",
+    "engaging_subjects_min_cluster_size",
+    "engaging_subjects_notes_per_driver",
+    "engaging_subjects_max_drivers_with_notes",
+    "streamer_facts_path",
 )
 
 # Subset that should be rendered as password inputs. Blank submissions for
@@ -116,6 +120,12 @@ class Settings(BaseSettings):
     # Useful when the moderation classifier (high-frequency, cheap calls) should
     # ride a smaller / faster model than note extraction (rare, quality-critical).
     ollama_mod_model: str = ""
+    # How many generation calls run concurrently against Ollama. Single-slot
+    # by default — Ollama serialises on the GPU anyway, and a fair semaphore
+    # at the client surface gives background loops a proper FIFO queue
+    # rather than blocking randomly inside the network. Embeddings always
+    # bypass this cap.
+    ollama_max_concurrent_generations: int = 1
 
     # OBS (read-only status: live state + current scene). Disabled by default.
     obs_enabled: bool = False
@@ -281,6 +291,25 @@ class Settings(BaseSettings):
     high_impact_min_overlap: int = 2
     high_impact_limit: int = 6
 
+    # Engaging-subjects extractor: pre-cluster messages by embedding
+    # cosine similarity before sending to the LLM. Each cluster gets
+    # one subject in the output. Threshold tuning:
+    #   - higher (0.65+) → tighter clusters, more separate subjects
+    #   - lower (0.45-)  → looser clusters, more merging
+    # Tiny clusters (< min_cluster_size) are dropped as noise.
+    # Set cluster_threshold=0 to disable clustering and fall back
+    # to the single-pass extractor.
+    engaging_subjects_cluster_threshold: float = 0.55
+    engaging_subjects_min_cluster_size: int = 3
+    # Per-driver context: how many recent notes (per chatter) to inject
+    # into the prompt as "who they are" hints. 0 disables.
+    engaging_subjects_notes_per_driver: int = 2
+    engaging_subjects_max_drivers_with_notes: int = 8
+    # Streamer-authored facts file. Loaded if present and prepended
+    # to extraction prompts as channel context. Lets the streamer
+    # correct hallucinations at source ("there is no FF8 remake").
+    streamer_facts_path: str = "data/streamer_facts.md"
+
     # Moderation mode — opt-in. When enabled, the bot batches recent
     # messages through a strict-rubric LLM classifier and persists
     # flagged ones as incidents for streamer review. Advisory only —
@@ -315,6 +344,11 @@ def _coerce(key: str, value: str) -> Any:
             return float(value)
         except (TypeError, ValueError):
             return 0.55
+    if key == "engaging_subjects_cluster_threshold":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.55
     if key == "whisper_unnamed_match_threshold":
         try:
             return float(value)
@@ -342,6 +376,9 @@ def _coerce(key: str, value: str) -> Any:
         "high_impact_lookback_days",
         "high_impact_min_overlap",
         "high_impact_limit",
+        "engaging_subjects_min_cluster_size",
+        "engaging_subjects_notes_per_driver",
+        "engaging_subjects_max_drivers_with_notes",
     ):
         try:
             return int(value)
@@ -372,6 +409,9 @@ def _coerce(key: str, value: str) -> Any:
                 "high_impact_lookback_days": 14,
                 "high_impact_min_overlap": 2,
                 "high_impact_limit": 6,
+                "engaging_subjects_min_cluster_size": 3,
+                "engaging_subjects_notes_per_driver": 2,
+                "engaging_subjects_max_drivers_with_notes": 8,
             }[key]
     if key in (
         "streamelements_enabled", "mod_mode_enabled",

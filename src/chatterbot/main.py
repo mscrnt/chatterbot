@@ -65,6 +65,7 @@ async def run_bot(settings: Settings) -> None:
         base_url=settings.ollama_base_url,
         model=settings.ollama_model,
         embed_model=settings.ollama_embed_model,
+        max_concurrent_generations=settings.ollama_max_concurrent_generations,
     )
 
     if not await llm.health_check():
@@ -247,6 +248,7 @@ def main() -> None:
             base_url=settings.ollama_base_url,
             model=settings.ollama_model,
             embed_model=settings.ollama_embed_model,
+            max_concurrent_generations=settings.ollama_max_concurrent_generations,
         )
         try:
             run_tui(repo, settings, llm=llm)

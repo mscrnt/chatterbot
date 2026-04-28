@@ -205,21 +205,29 @@
         {% endif %}
       </header>
 
-      {# Talking-to-you pane — direct mentions, dismiss keyed by
-         user_id so acknowledging once hides every mention from
-         that chatter. #}
+      {# Talking-to-you pane — direct mentions. Click a row to open
+         the context modal (transcript + profile + per-chatter
+         engaging subjects + help text). The username stays clickable
+         as a shortcut to /users/ via stopPropagation; the dismiss
+         control is keyed by user_id so acknowledging once hides every
+         mention from that chatter. #}
       {% if _visible_mentions %}
       <div x-show="tab === 'mentions'" x-cloak>
-        <p class="text-[11px] text-muted mb-1 px-1">questions / @-mentions of you in the last window</p>
+        <p class="text-[11px] text-muted mb-1 px-1">questions / @-mentions of you in the last window — click a row for context</p>
         <ul class="divide-y divide-subtle rounded-xl border border-warning/30 bg-warning/5 overflow-hidden">
           {% for m, _s in _visible_mentions %}
-            <li class="insight-card-root px-3 py-2 text-sm flex items-baseline gap-2 hover:bg-warning/10">
+            <li class="insight-card-root px-3 py-2 text-sm flex items-baseline gap-2 hover:bg-warning/10 cursor-pointer transition-all duration-150 ease-out"
+                hx-get="/modals/insight/direct_mention/{{ m.user_id }}?meta={{ m.content[:200] | urlencode }}&focus={{ m.id }}"
+                hx-target="#modal-root"
+                hx-swap="innerHTML"
+                title="Open context modal — transcript, profile, and what they're engaged with">
               <span class="text-[10px] text-muted shrink-0">{{ m.ts | short_ts }}</span>
               {% with source=m.source %}{% include "components/_source_mark.html" %}{% endwith %}
               <a href="/users/{{ m.user_id }}?focus={{ m.id }}"
+                 onclick="event.stopPropagation()"
                  class="text-accent hover:underline font-medium shrink-0">{{ m.name }}</a>
               <span class="text-primary break-words flex-1">{{ m.content }}</span>
-              <div class="shrink-0">
+              <div class="shrink-0" onclick="event.stopPropagation()">
                 {% with kind='direct_mention', item_key=m.user_id,
                         state=(_s.state if _s else None) %}
                   {% include "components/_insight_actions.html" %}
@@ -232,26 +240,25 @@
       {% endif %}
 
       {# Active-but-not-engaged pane — chatters here now without
-         recent acknowledgment. Each row links to subjects-they-
-         engage-with via the "engaged by" button. #}
+         recent acknowledgment. Click the row to open the context
+         modal; the username link still navigates straight to /users/
+         via stopPropagation as a power-user shortcut. #}
       {% if _visible_lurkers %}
       <div x-show="tab === 'lurkers'" x-cloak>
-        <p class="text-[11px] text-muted mb-1 px-1">here now, not addressed lately</p>
+        <p class="text-[11px] text-muted mb-1 px-1">here now, not addressed lately — click a row for context</p>
         <ul class="divide-y divide-subtle rounded-xl border border-warning/30 bg-warning/5 overflow-hidden">
           {% for u, _s in _visible_lurkers %}
-            <li class="insight-card-root px-3 py-2 text-sm flex items-center gap-3 hover:bg-warning/10">
+            <li class="insight-card-root px-3 py-2 text-sm flex items-center gap-3 hover:bg-warning/10 cursor-pointer transition-all duration-150 ease-out"
+                hx-get="/modals/insight/neglected_lurker/{{ u.twitch_id }}"
+                hx-target="#modal-root"
+                hx-swap="innerHTML"
+                title="Open context modal — transcript, profile, and what they're engaged with">
               {% with name=u.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
-              <a href="/users/{{ u.twitch_id }}" class="text-primary font-medium hover:underline">{{ u.name }}</a>
+              <a href="/users/{{ u.twitch_id }}"
+                 onclick="event.stopPropagation()"
+                 class="text-primary font-medium hover:underline">{{ u.name }}</a>
               <span class="text-[11px] text-muted">last spoke {{ u.last_seen | short_ts }}</span>
-              <div class="ml-auto flex items-center gap-2">
-                <button type="button"
-                        class="tap inline-flex items-center justify-center gap-1 px-2 rounded bg-warning/15 hover:bg-warning/25 text-warning text-xs"
-                        hx-get="/modals/insight/adhoc/{{ u.twitch_id }}"
-                        hx-target="#modal-root"
-                        hx-swap="innerHTML"
-                        title="Subjects this chatter engages with">
-                  <i class="fa-solid fa-bookmark text-[10px]"></i> engaged by
-                </button>
+              <div class="ml-auto flex items-center gap-2" onclick="event.stopPropagation()">
                 {% with kind='neglected_lurker', item_key=u.twitch_id,
                         state=(_s.state if _s else None) %}
                   {% include "components/_insight_actions.html" %}
