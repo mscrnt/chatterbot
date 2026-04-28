@@ -600,8 +600,13 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         ),
         (
             "youtube", "YouTube", "fa-brands fa-youtube",
-            "Stub — listener wired, no API polling yet. Configure to reserve credentials.",
-            ("youtube_enabled", "youtube_api_key", "youtube_channel_id"),
+            "Live-chat ingestion via YouTube Data API v3. Read-only API key. "
+            "Adaptive polling keeps quota usage in check on long streams; "
+            "raise the minimum poll interval if you stream past 6h.",
+            (
+                "youtube_enabled", "youtube_api_key", "youtube_channel_id",
+                "youtube_min_poll_seconds", "youtube_max_poll_seconds",
+            ),
         ),
         (
             "discord", "Discord", "fa-brands fa-discord",

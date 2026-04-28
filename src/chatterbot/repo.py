@@ -1433,7 +1433,42 @@ class ChatterRepo:
             )
             return int(cur.lastrowid)
 
-    # ============================ Events (StreamElements) =================
+    # ============================ Events (StreamElements + YouTube) =======
+
+    def record_event_for_user_id(
+        self,
+        user_id: str,
+        display_name: str,
+        event_type: str,
+        *,
+        amount: float | None = None,
+        currency: str | None = None,
+        message: str | None = None,
+        raw: dict[str, Any] | None = None,
+    ) -> int:
+        """Direct event insert by user_id. Used by cross-platform listeners
+        (e.g. YouTube super-chats / memberships) that already know the
+        canonical user_id. The streamelements path uses `record_event` and
+        looks up by name — that doesn't work cross-platform because a
+        YouTube display name could collide with a Twitch chatter's name."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO events(user_id, twitch_name, type, amount, currency, message, ts, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    display_name,
+                    event_type,
+                    amount,
+                    currency,
+                    message,
+                    _now_iso(),
+                    json.dumps(raw) if raw is not None else None,
+                ),
+            )
+            return int(cur.lastrowid)
 
     def record_event(
         self,

@@ -22,11 +22,30 @@ We minimize search.list:
   - When chat returns "stream offline", we wait OFFLINE_RECHECK_SECONDS
     (default 300s = 5 min) before re-searching.
   - When chat is live we never call search; we just keep paging the chat
-    using the next pageToken at the server-suggested pollingIntervalMillis.
+    using the next pageToken at an adaptive interval.
 
-Six-hour-stream cost: 1 search + 1 videos + ~720 chat polls/hr * 6 = ~21,600
-units, which exceeds the daily quota. The streamer should request a quota
-bump in Google Cloud Console for sustained YouTube ingestion.
+Adaptive poll cadence keeps active polling under quota:
+  - `youtube_min_poll_seconds` (default 10) — minimum interval. We never
+    poll faster than this, even if the server suggests a smaller value.
+  - `youtube_max_poll_seconds` (default 30) — cap on the backoff window.
+  - Empty polls double the current interval (capped at max). Non-empty
+    polls reset to the minimum. The server's `pollingIntervalMillis`
+    is also honored as a floor.
+
+A 6-hour stream with mixed activity (some chatter, some quiet stretches)
+typically lands at ~7,000 quota units with the defaults — comfortably
+under the free tier. Worst-case all-active 6-hour stream at 10s polls:
+360/hr × 6 × 5 = 10,800 units, still within striking distance of the
+free quota; raise to 15-20 s minimum for guaranteed headroom.
+
+Event types we persist beyond chat:
+  - superChatEvent       → events(type='superchat', amount, currency, message)
+  - superStickerEvent    → events(type='superchat', amount, currency, message)
+  - newSponsorEvent      → events(type='member',    sub_tier='1000')
+  - memberMilestoneChat  → events(type='member',    sub_months from API)
+
+This puts YouTube tips + memberships on the dashboard's events feed
+alongside Twitch / StreamElements activity.
 
 Auth
 ----
@@ -73,8 +92,11 @@ class YouTubeListener:
 
     SOURCE = "youtube"
     OFFLINE_RECHECK_SECONDS = 300
-    DEFAULT_POLL_MS = 5000
     AUTO_PAUSE_RECHECK_SECONDS = 30
+    # Transient-error backoff: when the API returns 5xx, sleep this long
+    # before retrying. Short enough that we recover from a blip, long
+    # enough that we don't hammer a struggling endpoint.
+    TRANSIENT_RETRY_SECONDS = 30
 
     def __init__(
         self,
@@ -96,6 +118,11 @@ class YouTubeListener:
         self._page_token: str | None = None
         self._last_logged_error: str | None = None
         self._was_auto_paused: bool = False
+        # Adaptive poll interval — starts at min, doubles on empty polls
+        # up to max, resets on activity.
+        self._current_poll_seconds: float = float(
+            getattr(settings, "youtube_min_poll_seconds", 10)
+        )
 
     @property
     def configured(self) -> bool:
@@ -168,21 +195,33 @@ class YouTubeListener:
             raise
 
     async def _discover_live_chat(self) -> bool:
-        """Find the channel's currently-live broadcast and its chat id."""
+        """Find the channel's currently-live broadcast and its chat id.
+        Treats network blips and 5xx responses as "try again later"
+        rather than "stream offline" — the latter would needlessly burn
+        a search.list re-discovery 5 minutes from now."""
         api_key = self.settings.youtube_api_key
         channel_id = self.settings.youtube_channel_id.strip()
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(
-                f"{YT_API}/search",
-                params={
-                    "part": "id",
-                    "channelId": channel_id,
-                    "eventType": "live",
-                    "type": "video",
-                    "maxResults": 1,
-                    "key": api_key,
-                },
-            )
+            try:
+                r = await client.get(
+                    f"{YT_API}/search",
+                    params={
+                        "part": "id",
+                        "channelId": channel_id,
+                        "eventType": "live",
+                        "type": "video",
+                        "maxResults": 1,
+                        "key": api_key,
+                    },
+                )
+            except httpx.RequestError as e:
+                self._log_error(f"search.list network: {type(e).__name__}: {e}")
+                return False
+            if 500 <= r.status_code < 600:
+                self._log_error(
+                    f"search.list 5xx ({r.status_code}) — will retry next cycle"
+                )
+                return False
             if r.status_code != 200:
                 self._log_error(
                     f"search.list returned {r.status_code}: {r.text[:200]}"
@@ -195,14 +234,23 @@ class YouTubeListener:
             if not video_id:
                 return False
 
-            r = await client.get(
-                f"{YT_API}/videos",
-                params={
-                    "part": "liveStreamingDetails",
-                    "id": video_id,
-                    "key": api_key,
-                },
-            )
+            try:
+                r = await client.get(
+                    f"{YT_API}/videos",
+                    params={
+                        "part": "liveStreamingDetails",
+                        "id": video_id,
+                        "key": api_key,
+                    },
+                )
+            except httpx.RequestError as e:
+                self._log_error(f"videos.list network: {type(e).__name__}: {e}")
+                return False
+            if 500 <= r.status_code < 600:
+                self._log_error(
+                    f"videos.list 5xx ({r.status_code}) — will retry next cycle"
+                )
+                return False
             if r.status_code != 200:
                 self._log_error(
                     f"videos.list returned {r.status_code}: {r.text[:200]}"
@@ -228,11 +276,18 @@ class YouTubeListener:
 
     async def _poll_chat_until_offline(self) -> None:
         """Page through liveChatMessages until the API tells us the chat
-        ended (no more messages, or 403/404)."""
+        ended (no more messages, or 403/404). Adaptive backoff between
+        polls keeps daily quota usage in check on long streams."""
         api_key = self.settings.youtube_api_key
         chat_id = self.status.live_chat_id
         if not chat_id:
             return
+        min_s = max(1, int(getattr(self.settings, "youtube_min_poll_seconds", 10)))
+        max_s = max(min_s, int(getattr(self.settings, "youtube_max_poll_seconds", 30)))
+        # Reset to min at the start of every chat session so backoff
+        # state doesn't leak across reconnects.
+        self._current_poll_seconds = float(min_s)
+
         async with httpx.AsyncClient(timeout=10.0) as client:
             while True:
                 params: dict[str, Any] = {
@@ -243,59 +298,89 @@ class YouTubeListener:
                 }
                 if self._page_token:
                     params["pageToken"] = self._page_token
-                r = await client.get(
-                    f"{YT_API}/liveChat/messages", params=params
-                )
+                try:
+                    r = await client.get(
+                        f"{YT_API}/liveChat/messages", params=params
+                    )
+                except httpx.RequestError as e:
+                    # Network blip / DNS / timeout — back off + retry.
+                    self._log_error(f"liveChatMessages network: {type(e).__name__}: {e}")
+                    await asyncio.sleep(self.TRANSIENT_RETRY_SECONDS)
+                    continue
                 if r.status_code in (403, 404):
                     logger.info(
                         "youtube: chat ended (%d) — going offline",
                         r.status_code,
                     )
                     return
+                if 500 <= r.status_code < 600:
+                    self._log_error(
+                        f"liveChatMessages 5xx ({r.status_code}): {r.text[:200]} "
+                        f"— backing off {self.TRANSIENT_RETRY_SECONDS}s"
+                    )
+                    await asyncio.sleep(self.TRANSIENT_RETRY_SECONDS)
+                    continue
+                if r.status_code == 429:
+                    # Rate-limited: jam the poll cadence to max for this
+                    # cycle and try again. The server is telling us we're
+                    # going too fast (rare with our adaptive defaults).
+                    self._log_error("liveChatMessages 429 — quota / rate-limit hit")
+                    self._current_poll_seconds = float(max_s)
+                    await asyncio.sleep(max_s)
+                    continue
                 if r.status_code != 200:
                     self._log_error(
                         f"liveChatMessages returned {r.status_code}: {r.text[:200]}"
                     )
-                    await asyncio.sleep(self.DEFAULT_POLL_MS / 1000)
+                    await asyncio.sleep(self._current_poll_seconds)
                     continue
+
                 payload = r.json()
                 self._page_token = payload.get("nextPageToken")
-                interval_ms = int(
-                    payload.get("pollingIntervalMillis") or self.DEFAULT_POLL_MS
+                items = payload.get("items") or []
+                # Server-suggested interval acts as a floor we must
+                # honor — YouTube tells us "don't poll faster than X".
+                server_floor_s = max(
+                    1.0, int(payload.get("pollingIntervalMillis") or 0) / 1000
                 )
-                for item in payload.get("items") or []:
+
+                for item in items:
                     try:
                         await self._persist(item)
                     except Exception:
                         logger.exception(
                             "youtube: failed to persist message"
                         )
-                await asyncio.sleep(max(1.0, interval_ms / 1000))
+
+                # Adaptive backoff: empty polls double the interval
+                # (capped at max); non-empty polls reset to min. Always
+                # at least the server-suggested floor.
+                if items:
+                    self._current_poll_seconds = float(min_s)
+                else:
+                    self._current_poll_seconds = min(
+                        float(max_s), self._current_poll_seconds * 2,
+                    )
+                sleep_s = max(self._current_poll_seconds, server_floor_s)
+                await asyncio.sleep(sleep_s)
 
     async def _persist(self, item: dict) -> None:
         snippet = item.get("snippet") or {}
         author = item.get("authorDetails") or {}
         message_type = snippet.get("type")
-        # YouTube emits non-text events too (memberships, super-chats, etc).
-        # Persist only textMessageEvent for the chat log; super-chats could
-        # later route into events, but that's a separate feature.
-        if message_type != "textMessageEvent":
-            return
-        text_payload = snippet.get("textMessageDetails") or {}
-        content = (text_payload.get("messageText") or "").strip()
         author_channel_id = author.get("channelId") or snippet.get("authorChannelId")
         display_name = author.get("displayName") or "?"
-        if not author_channel_id or not content:
+        if not author_channel_id:
             return
         user_id = self.make_user_id(author_channel_id)
 
+        # Always upsert the user + badge state, regardless of message
+        # type — super-chats and memberships also need the sender on
+        # the chatters list so the events feed can link to their profile.
         is_mod = bool(author.get("isChatModerator"))
         is_owner = bool(author.get("isChatOwner"))
-        # YouTube channel members ≈ Twitch subs. We mark them as a "subscriber"
-        # tier 1000 so the dashboard's existing sub-pill code lights up.
         is_member = bool(author.get("isChatSponsor"))
         sub_tier = "1000" if is_member else None
-
         await asyncio.to_thread(
             self.repo.upsert_user, user_id, display_name, source=self.SOURCE
         )
@@ -308,6 +393,30 @@ class YouTubeListener:
         if await asyncio.to_thread(self.repo.is_opted_out, user_id):
             return
 
+        # Route by message type. Most are chat; the donation /
+        # membership types go to the events table so they show up in
+        # the dashboard's events feed alongside Twitch / SE activity.
+        if message_type == "textMessageEvent":
+            await self._persist_text_message(user_id, display_name, snippet, item)
+        elif message_type == "superChatEvent":
+            await self._persist_super_chat(user_id, display_name, snippet, item)
+        elif message_type == "superStickerEvent":
+            await self._persist_super_sticker(user_id, display_name, snippet, item)
+        elif message_type == "newSponsorEvent":
+            await self._persist_new_member(user_id, display_name, snippet, item)
+        elif message_type == "memberMilestoneChatEvent":
+            await self._persist_member_milestone(user_id, display_name, snippet, item)
+        # Other types (messageDeletedEvent, userBannedEvent, chatEndedEvent)
+        # are intentionally ignored — they're moderation artifacts the
+        # dashboard doesn't surface.
+
+    async def _persist_text_message(
+        self, user_id: str, display_name: str, snippet: dict, raw: dict,
+    ) -> None:
+        text_payload = snippet.get("textMessageDetails") or {}
+        content = (text_payload.get("messageText") or "").strip()
+        if not content:
+            return
         try:
             fired = await asyncio.to_thread(
                 self.repo.fire_pending_reminders, user_id
@@ -328,6 +437,111 @@ class YouTubeListener:
             await self.summarizer.maybe_summarize_user(user_id, unsummarized)
         except Exception:
             logger.exception("youtube: summarizer trigger failed")
+
+    @staticmethod
+    def _parse_amount(details: dict) -> tuple[float | None, str | None]:
+        """super-chat / super-sticker amounts come back two ways:
+        `amountMicros` (string of micros) + `currency` (ISO-4217), and
+        a pre-formatted `amountDisplayString` like "$5.00". We prefer
+        the precise micros parse; fall back to displayString if missing."""
+        currency = details.get("currency")
+        micros = details.get("amountMicros")
+        if micros:
+            try:
+                return float(int(micros)) / 1_000_000.0, currency
+            except (TypeError, ValueError):
+                pass
+        # Fallback parse from "$5.00", "€2.50", etc. — strip non-digit
+        # / non-dot prefix.
+        disp = (details.get("amountDisplayString") or "").strip()
+        if disp:
+            digits = "".join(c for c in disp if c.isdigit() or c == ".")
+            try:
+                return float(digits), currency
+            except ValueError:
+                pass
+        return None, currency
+
+    async def _persist_super_chat(
+        self, user_id: str, display_name: str, snippet: dict, raw: dict,
+    ) -> None:
+        details = snippet.get("superChatDetails") or {}
+        amount, currency = self._parse_amount(details)
+        message = (details.get("userComment") or "").strip() or None
+        await asyncio.to_thread(
+            self.repo.record_event_for_user_id,
+            user_id, display_name, "superchat",
+            amount=amount, currency=currency, message=message, raw=raw,
+        )
+        logger.info(
+            "youtube: super-chat from %s — %s %s",
+            display_name, amount, currency or "",
+        )
+
+    async def _persist_super_sticker(
+        self, user_id: str, display_name: str, snippet: dict, raw: dict,
+    ) -> None:
+        details = snippet.get("superStickerDetails") or {}
+        amount, currency = self._parse_amount(details)
+        sticker_meta = details.get("superStickerMetadata") or {}
+        # Stickers don't have a userComment field; use the alt-text /
+        # sticker name so the events log has SOMETHING readable.
+        message = sticker_meta.get("altText") or sticker_meta.get("stickerId") or None
+        await asyncio.to_thread(
+            self.repo.record_event_for_user_id,
+            user_id, display_name, "superchat",
+            amount=amount, currency=currency, message=message, raw=raw,
+        )
+        logger.info(
+            "youtube: super-sticker from %s — %s %s",
+            display_name, amount, currency or "",
+        )
+
+    async def _persist_new_member(
+        self, user_id: str, display_name: str, snippet: dict, raw: dict,
+    ) -> None:
+        details = snippet.get("newSponsorDetails") or {}
+        tier = details.get("memberLevelName") or "member"
+        await asyncio.to_thread(
+            self.repo.record_event_for_user_id,
+            user_id, display_name, "member",
+            amount=None, currency=None,
+            message=f"new member ({tier})", raw=raw,
+        )
+        logger.info("youtube: new member %s (tier=%s)", display_name, tier)
+
+    async def _persist_member_milestone(
+        self, user_id: str, display_name: str, snippet: dict, raw: dict,
+    ) -> None:
+        details = snippet.get("memberMilestoneChatDetails") or {}
+        months = details.get("memberMonth")
+        comment = (details.get("userComment") or "").strip()
+        tier = details.get("memberLevelName") or "member"
+        message = (
+            f"{months}-month milestone ({tier})"
+            + (f": {comment}" if comment else "")
+        )
+        try:
+            months_int = int(months) if months else 0
+        except (TypeError, ValueError):
+            months_int = 0
+        # Bump the badge sub_months too so the user-detail page shows
+        # months alongside the member tier.
+        if months_int:
+            await asyncio.to_thread(
+                self.repo.update_user_badges, user_id,
+                sub_tier="1000", sub_months=months_int,
+                is_mod=False, is_vip=False, is_founder=False,
+            )
+        await asyncio.to_thread(
+            self.repo.record_event_for_user_id,
+            user_id, display_name, "member",
+            amount=float(months_int) if months_int else None,
+            currency=None, message=message, raw=raw,
+        )
+        logger.info(
+            "youtube: member milestone %s — %s months", display_name, months,
+        )
 
     def _log_error(self, msg: str) -> None:
         """Log once per distinct error spelling — avoids log floods when the

@@ -39,6 +39,8 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "youtube_enabled",
     "youtube_api_key",
     "youtube_channel_id",
+    "youtube_min_poll_seconds",
+    "youtube_max_poll_seconds",
     "discord_enabled",
     "discord_bot_token",
     "discord_channel_ids",
@@ -106,10 +108,19 @@ class Settings(BaseSettings):
     streamelements_jwt: str = ""
     streamelements_channel_id: str = ""
 
-    # YouTube — STUB. The listener exists but no API polling is wired yet.
+    # YouTube live-chat ingestion via the YouTube Data API v3.
+    # Read-only API-key auth. The listener pages liveChatMessages and
+    # persists into messages + events alongside Twitch.
     youtube_enabled: bool = False
     youtube_api_key: str = ""
     youtube_channel_id: str = ""
+    # Adaptive poll cadence to keep daily quota within the free 10,000
+    # units. Empty polls double the interval (capped at max); non-empty
+    # polls reset to the minimum. The listener also honors the server's
+    # pollingIntervalMillis as a floor. Default min=10s / max=30s puts
+    # a 6-hour active stream under ~10K units.
+    youtube_min_poll_seconds: int = 10
+    youtube_max_poll_seconds: int = 30
 
     # Discord — STUB. The listener exists but no gateway connection yet.
     discord_enabled: bool = False
@@ -239,6 +250,7 @@ def _coerce(key: str, value: str) -> Any:
     if key in (
         "whisper_llm_match_interval_seconds", "whisper_llm_match_min_chunks",
         "whisper_auto_confirm_seconds",
+        "youtube_min_poll_seconds", "youtube_max_poll_seconds",
     ):
         try:
             return int(value)
@@ -247,6 +259,8 @@ def _coerce(key: str, value: str) -> Any:
                 "whisper_llm_match_interval_seconds": 90,
                 "whisper_llm_match_min_chunks": 3,
                 "whisper_auto_confirm_seconds": 300,
+                "youtube_min_poll_seconds": 10,
+                "youtube_max_poll_seconds": 30,
             }[key]
     if key in (
         "streamelements_enabled", "mod_mode_enabled",

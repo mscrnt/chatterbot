@@ -300,17 +300,24 @@ Off by default. Each is independently toggled in **/settings** or via env.
     * **Standalone client.** Run `obs_scripts/audio_client.py` directly
       from a terminal. Same pipeline, single device, useful when OBS isn't
       involved. `--loopback` for WASAPI loopback on Windows.
-- **YouTube ingestion** — STUB. Module exists at
-  `src/chatterbot/youtube.py` with the wiring contract; no API polling yet.
+- **YouTube ingestion** — `YOUTUBE_ENABLED=true` + API key + channel ID.
+  Polls `liveChatMessages` and persists chat into `messages` and
+  super-chats / new-members / member-milestones into `events`.
+  Adaptive backoff (configurable `youtube_min_poll_seconds` /
+  `youtube_max_poll_seconds`, defaults 10/30) keeps a 6-hour active
+  stream around 7-10K quota units per day — within the free tier.
+  Raise the minimum poll interval if you stream past 6 hours, or
+  request a quota bump in Google Cloud Console. OBS-aware: skips the
+  100-unit `search.list` discovery while OBS reports offline.
 - **Discord ingestion** — STUB. Module exists at
   `src/chatterbot/discord_bot.py` with the wiring contract; no gateway
   connection yet.
 
-The two stubs let you reserve credentials in `/settings` today; when each is
-implemented, ingested users are persisted with `source='youtube'` /
-`source='discord'` and namespaced ids (`yt:UCxxx` / `dc:1234567890`). The
-**Merge** button on a chatter's page folds them into the canonical Twitch
-profile.
+Cross-platform users land in the same chatters table with
+`source='youtube'` / `source='discord'` and namespaced ids
+(`yt:UCxxx` / `dc:1234567890`) so collisions with Twitch user IDs are
+impossible. The **Merge** button on a chatter's page folds them into
+the canonical profile.
 
 ### Backfilling Twitch badges
 
@@ -340,7 +347,7 @@ chatterbot/
 │   ├── bot.py                     # TwitchIO listener (write-only)
 │   ├── twitch.py                  # Helix viewer count + thumbnail poller
 │   ├── obs.py                     # OBS WebSocket status poller (opt-in)
-│   ├── youtube.py                 # YouTube live-chat listener (STUB)
+│   ├── youtube.py                 # YouTube live-chat listener (data-API v3, adaptive polling)
 │   ├── discord_bot.py             # Discord listener (STUB)
 │   ├── streamelements.py          # SE realtime socket.io listener
 │   ├── summarizer.py              # per-user + topics LLM loops
