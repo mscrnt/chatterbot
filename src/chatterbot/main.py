@@ -61,12 +61,11 @@ async def run_bot(settings: Settings) -> None:
     _write_pid_file()
 
     repo = ChatterRepo(settings.db_path, embed_dim=settings.ollama_embed_dim)
-    llm = OllamaClient(
-        base_url=settings.ollama_base_url,
-        model=settings.ollama_model,
-        embed_model=settings.ollama_embed_model,
-        max_concurrent_generations=settings.ollama_max_concurrent_generations,
-    )
+    # `make_llm_client` returns the configured provider (Ollama by
+    # default, Claude / OpenAI via `LLM_PROVIDER` setting). Embeddings
+    # always go to a local Ollama regardless of provider.
+    from .llm.providers import make_llm_client
+    llm = make_llm_client(settings)
 
     if not await llm.health_check():
         logger.warning(
@@ -244,12 +243,8 @@ def main() -> None:
         repo = ChatterRepo(settings.db_path, embed_dim=settings.ollama_embed_dim)
         # Optional LLM client so manual notes added via the TUI can be embedded
         # for RAG. Failures inside the TUI are non-fatal — note still saves.
-        llm = OllamaClient(
-            base_url=settings.ollama_base_url,
-            model=settings.ollama_model,
-            embed_model=settings.ollama_embed_model,
-            max_concurrent_generations=settings.ollama_max_concurrent_generations,
-        )
+        from .llm.providers import make_llm_client
+        llm = make_llm_client(settings)
         try:
             run_tui(repo, settings, llm=llm)
         finally:

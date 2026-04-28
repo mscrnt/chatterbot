@@ -111,12 +111,10 @@ TEMPLATES.env.filters["from_json"] = _from_json
 
 def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
-    llm = OllamaClient(
-        base_url=settings.ollama_base_url,
-        model=settings.ollama_model,
-        embed_model=settings.ollama_embed_model,
-        max_concurrent_generations=settings.ollama_max_concurrent_generations,
-    )
+    # `make_llm_client` selects Ollama / Anthropic / OpenAI per
+    # settings.llm_provider. Embeddings always go to local Ollama.
+    from ..llm.providers import make_llm_client
+    llm = make_llm_client(settings)
 
     # Expose runtime settings flags to every template (nav uses these).
     TEMPLATES.env.globals["mod_mode_enabled"] = bool(settings.mod_mode_enabled)

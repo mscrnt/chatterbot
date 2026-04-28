@@ -127,6 +127,31 @@ class Settings(BaseSettings):
     # bypass this cap.
     ollama_max_concurrent_generations: int = 1
 
+    # ---------- LLM provider selection ----------
+    # Which backend handles generation calls (notes, recaps,
+    # engaging-subjects, etc.). Embeddings ALWAYS run on Ollama
+    # regardless — vec_messages / vec_threads are locked to
+    # nomic-embed-text's 768-dim geometry.
+    #   ollama     — local, default. Free, slow on CPU, fast on GPU.
+    #   anthropic  — Claude. Requires anthropic_api_key.
+    #   openai     — OpenAI. Requires openai_api_key.
+    llm_provider: str = "ollama"
+
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-opus-4-7"
+    # Token budget when think=True is passed (extended-thinking
+    # mode). Generation calls that opt in get this much room for
+    # the reasoning trace before the answer counts against
+    # max_tokens.
+    anthropic_thinking_budget_tokens: int = 4096
+
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o"
+    # Used only when think=True is passed and the caller doesn't
+    # override the model. Empty falls back to `openai_model`.
+    openai_reasoning_model: str = ""
+    openai_organization: str = ""
+
     # Cross-process notification bus. The bot fires HTTP POSTs to
     # `dashboard_internal_url + /internal/notify` whenever something
     # changes (new chat message, new event, etc.) so the dashboard's
