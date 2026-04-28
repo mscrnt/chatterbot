@@ -1077,6 +1077,12 @@ Good output:
             # gets called when there's a genuinely new or substantially
             # grown cluster to label.
             response_subjects: list = []
+            # Track the order in which we send clusters to the LLM so
+            # we can match responses back positionally when the model
+            # forgets to echo `cluster_id` (Qwen sometimes drops the
+            # field even though the schema lists it as optional with
+            # default "").
+            sent_cluster_ids: list[str] = []
             if dirty_ids:
                 cluster_blocks: list[str] = []
                 # Sort by current window driver count desc so the LLM
@@ -1116,6 +1122,7 @@ Good output:
                         f"  CLUSTER {cid}{name_hint} ({len(block_msgs)} msgs):\n"
                         + "\n".join(lines)
                     )
+                    sent_cluster_ids.append(cid)
 
                 if cluster_blocks:
                     prompt = (
@@ -1158,16 +1165,37 @@ Good output:
                             num_ctx=self.SUBJECTS_NUM_CTX,
                         )
                         response_subjects = response.subjects
+                        if not response_subjects:
+                            logger.info(
+                                "engaging-subjects: LLM returned 0 subjects "
+                                "for %d dirty cluster(s) — chat may be too "
+                                "noisy/sensitive to label",
+                                len(sorted_dirty[:8]),
+                            )
                     except ValidationError as e:
                         logger.warning("engaging-subjects validation failed: %s", e)
                     except Exception:
                         logger.exception("engaging-subjects LLM call failed")
 
             # Apply LLM labels back onto the persistent clusters.
+            # Match each response subject to a cluster:
+            #   1. Prefer the echoed `cluster_id` field — most reliable.
+            #   2. Fall back to positional matching against
+            #      `sent_cluster_ids` when cluster_id is missing/empty.
+            #      Qwen's structured output sometimes drops the field
+            #      even though the schema includes it; positional is a
+            #      strong second since the LLM tends to return subjects
+            #      in input order.
             block_set_slug = {(b.get("slug") or "").lower() for b in blocklist}
             block_set_name = {(b.get("name") or "").lower() for b in blocklist}
-            for s in response_subjects:
+            applied = 0
+            empty_id_count = 0
+            for idx, s in enumerate(response_subjects):
                 cid = (s.cluster_id or "").strip()
+                if not cid:
+                    empty_id_count += 1
+                    if idx < len(sent_cluster_ids):
+                        cid = sent_cluster_ids[idx]
                 if not cid or cid not in self._clusters:
                     continue
                 if s.is_sensitive:
@@ -1191,6 +1219,13 @@ Good output:
                 ][:3]
                 c.is_sensitive = False
                 c.n_at_last_label = c.n
+                applied += 1
+            if response_subjects and empty_id_count:
+                logger.info(
+                    "engaging-subjects: %d/%d responses missing cluster_id "
+                    "(matched positionally); applied %d total",
+                    empty_id_count, len(response_subjects), applied,
+                )
 
             # Materialize the cache from live clusters (window-filtered).
             import hashlib as _h
