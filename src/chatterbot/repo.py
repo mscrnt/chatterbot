@@ -5770,20 +5770,38 @@ class ChatterRepo:
     )
 
     def stats_top_words(
-        self, *, limit: int = 100, min_count: int = 3
+        self,
+        *,
+        limit: int = 100,
+        min_count: int = 3,
+        lookback_days: int | None = 30,
     ) -> list[tuple[str, int]]:
         """Naive top-words for the Stats tab word cloud. Strips URLs and
         @mentions, lowercases, drops stopwords + chat filler, requires
         3-20 char alphabetic tokens. Skips messages flagged as emote-only
-        so 'bawkCrazy' style hype spam doesn't dominate."""
+        so 'bawkCrazy' style hype spam doesn't dominate.
+
+        Bounded to the last `lookback_days` by default (30 d) — the word
+        cloud is more useful as "what's chat been on lately" than as
+        a lifetime average, and bounding the scan keeps the cost flat
+        as the DB grows. Pass `lookback_days=None` for the lifetime
+        view."""
         import re as _re
         from collections import Counter as _Counter
         url_re = _re.compile(r"https?://\S+", _re.IGNORECASE)
         mention_re = _re.compile(r"@\S+")
         word_re = _re.compile(r"\b[a-z]{3,20}\b")
         counter: _Counter[str] = _Counter()
+        sql = (
+            "SELECT content FROM messages "
+            "WHERE is_emote_only = 0 AND spam_score < 0.5"
+        )
+        params: tuple = ()
+        if lookback_days is not None and lookback_days > 0:
+            sql += " AND ts >= datetime('now', ?)"
+            params = (f"-{int(lookback_days)} days",)
         with self._cursor() as cur:
-            cur.execute("SELECT content FROM messages WHERE is_emote_only = 0 AND spam_score < 0.5")
+            cur.execute(sql, params)
             for r in cur.fetchall():
                 text = (r["content"] or "").lower()
                 text = url_re.sub("", text)
@@ -5795,18 +5813,28 @@ class ChatterRepo:
         return [(w, c) for w, c in counter.most_common(limit) if c >= min_count]
 
     def stats_top_words_transcripts(
-        self, *, limit: int = 100, min_count: int = 2
+        self,
+        *,
+        limit: int = 100,
+        min_count: int = 2,
+        lookback_days: int | None = 30,
     ) -> list[tuple[str, int]]:
-        """Top-words across whisper transcripts — same tokenisation as chat,
-        but min_count defaults lower since transcript volume is much
-        smaller than chat volume on most streams."""
+        """Top-words across whisper transcripts — same tokenisation as
+        chat, but min_count defaults lower since transcript volume is
+        much smaller than chat volume on most streams. Bounded to the
+        last `lookback_days` for the same reason as `stats_top_words`."""
         import re as _re
         from collections import Counter as _Counter
         word_re = _re.compile(r"\b[a-z]{3,20}\b")
         counter: _Counter[str] = _Counter()
+        sql = "SELECT text FROM transcript_chunks"
+        params: tuple = ()
+        if lookback_days is not None and lookback_days > 0:
+            sql += " WHERE ts >= datetime('now', ?)"
+            params = (f"-{int(lookback_days)} days",)
         try:
             with self._cursor() as cur:
-                cur.execute("SELECT text FROM transcript_chunks")
+                cur.execute(sql, params)
                 for r in cur.fetchall():
                     text = (r["text"] or "").lower()
                     for w in word_re.findall(text):

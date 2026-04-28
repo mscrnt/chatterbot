@@ -40,6 +40,7 @@ from fastapi import (
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
+    JSONResponse,
     RedirectResponse,
     Response,
     StreamingResponse,
@@ -1436,11 +1437,15 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         # event loop frees up while SQLite (WAL-mode, parallel-read
         # safe) services them on the thread pool. Wall-clock collapses
         # from sum-of-queries (~95 ms) to slowest-single-query (~50 ms).
+        # Word-cloud queries are NOT in this batch — they're scanning
+        # the full message body and have their own /stats/wordcloud
+        # endpoint with a longer (5-min) cache, lazy-loaded by the
+        # template after page render.
         (
             totals, ev, per_day, per_hour, top_chatters, top_supporters,
             new_per_week, transcripts, transcripts_per_day, longest_utterance,
             avg_len, longest, chatty_hour, busiest_day, oldest,
-            top_words, top_words_voice, sessions,
+            sessions,
         ) = await asyncio.gather(
             asyncio.to_thread(repo.stats_totals),
             asyncio.to_thread(repo.stats_event_totals),
@@ -1457,8 +1462,6 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             asyncio.to_thread(repo.stats_most_chatty_hour),
             asyncio.to_thread(repo.stats_busiest_day),
             asyncio.to_thread(repo.stats_oldest_chatter),
-            asyncio.to_thread(repo.stats_top_words, limit=120, min_count=2),
-            asyncio.to_thread(repo.stats_top_words_transcripts, limit=120, min_count=2),
             asyncio.to_thread(repo.stream_sessions, gap_minutes=30, limit=12),
             return_exceptions=False,
         )
@@ -1546,8 +1549,10 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "new_per_week_values": [n for _, n in new_per_week],
             "facts": random_facts,
             "longest": longest,
-            "word_cloud": [[w, c] for w, c in top_words],
-            "word_cloud_voice": [[w, c] for w, c in top_words_voice],
+            # word_cloud + word_cloud_voice removed — lazy-loaded via
+            # /stats/wordcloud now. Template flips a boolean instead
+            # so the cloud section renders with a placeholder + fetch.
+            "wordcloud_enabled": True,
             "sessions": sessions,
             "transcripts": transcripts,
             "transcripts_per_day_labels": [d for d, _ in transcripts_per_day],
@@ -1562,6 +1567,63 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         _stats_cache["ts"] = _t.time()
         _stats_cache["match_threshold"] = match_threshold
         return TEMPLATES.TemplateResponse(request, "stats.html", ctx)
+
+    # The word cloud is the most expensive query on /stats — it scans
+    # every message body in the lookback window and tokenises in
+    # Python. Pulling it onto its own endpoint with a longer cache
+    # lets /stats render fast and lets the cloud lazy-load on the
+    # client. 5 min TTL: word frequencies don't shift minute-to-minute.
+    _WORDCLOUD_TTL_SECONDS = 5 * 60
+    _wordcloud_cache: dict[str, object] = {
+        "ts": 0.0, "lookback": None, "payload": None,
+    }
+
+    @app.get("/stats/wordcloud")
+    async def stats_wordcloud(
+        lookback: int = Query(30, ge=0, le=3650),
+    ):
+        """Lazy-loaded word-cloud payload for /stats. Bounded to the
+        last `lookback` days by default (30) — bounding the scan keeps
+        the cost flat as the message log grows. Pass `?lookback=0`
+        for the lifetime view.
+
+        Cached for 5 min in process memory keyed on the lookback
+        window. Returns JSON: `{"chat": [[word, count], ...],
+        "voice": [[word, count], ...]}`."""
+        import time as _t
+        cache_key = int(lookback)
+        cached_payload = _wordcloud_cache.get("payload")
+        cached_age = _t.time() - float(_wordcloud_cache.get("ts") or 0)
+        cached_lookback = _wordcloud_cache.get("lookback")
+        if (
+            cached_payload is not None
+            and cached_age < _WORDCLOUD_TTL_SECONDS
+            and cached_lookback == cache_key
+        ):
+            return JSONResponse(cached_payload, headers={"Cache-Control": "no-store"})
+
+        # `lookback=0` means "lifetime" — pass None down to the repo
+        # so the WHERE clause is omitted entirely.
+        repo_lookback = None if cache_key == 0 else cache_key
+        chat_words, voice_words = await asyncio.gather(
+            asyncio.to_thread(
+                repo.stats_top_words,
+                limit=120, min_count=2, lookback_days=repo_lookback,
+            ),
+            asyncio.to_thread(
+                repo.stats_top_words_transcripts,
+                limit=120, min_count=2, lookback_days=repo_lookback,
+            ),
+        )
+        payload = {
+            "chat": [[w, c] for w, c in chat_words],
+            "voice": [[w, c] for w, c in voice_words],
+            "lookback_days": cache_key,
+        }
+        _wordcloud_cache["payload"] = payload
+        _wordcloud_cache["ts"] = _t.time()
+        _wordcloud_cache["lookback"] = cache_key
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
     # ---------------- insights (engagement helper) ----------------
 

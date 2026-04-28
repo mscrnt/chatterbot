@@ -154,43 +154,43 @@
     {% endif %}
   </section>
 
-  {# Word cloud — tabbed: chat (default) and voice transcripts. The voice
-     tab only renders if whisper has produced any tokenisable text. #}
-  {% if word_cloud or word_cloud_voice %}
-  <section class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 shadow-sm">
+  {# Word cloud — lazy-loaded after page render via /stats/wordcloud.
+     Pulling the queries off the /stats sync gather drops ~20 ms on
+     small DBs and keeps the page render flat as the message log
+     grows (the chat scan is O(messages-in-window)). The 5-min cache
+     on the endpoint covers most repeat hits with one query. #}
+  {% if wordcloud_enabled %}
+  <section id="wordcloud-section"
+           class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 shadow-sm">
     <div class="flex items-baseline justify-between gap-2 mb-2 flex-wrap">
       <h3 class="text-sm font-semibold inline-flex items-center gap-2">
         <i class="fa-solid fa-cloud text-accent"></i> Word cloud
+        <span id="wordcloud-status" class="text-[11px] text-muted italic ml-1">loading…</span>
       </h3>
       <div role="tablist" aria-label="Word cloud source"
-           class="inline-flex rounded-lg border border-subtle overflow-hidden text-xs">
-        {% if word_cloud %}
+           class="inline-flex rounded-lg border border-subtle overflow-hidden text-xs"
+           data-wc-tabs hidden>
         <button type="button" role="tab" data-wc-tab="chat"
                 class="wc-tab px-3 py-1 bg-accent/15 text-primary"
                 aria-selected="true">
           <i class="fa-solid fa-comment text-[10px] mr-1"></i>chat
-          <span class="text-muted ml-1">{{ word_cloud | length }}</span>
+          <span class="text-muted ml-1" data-wc-count="chat">0</span>
         </button>
-        {% endif %}
-        {% if word_cloud_voice %}
         <button type="button" role="tab" data-wc-tab="voice"
                 class="wc-tab px-3 py-1 hover:bg-surface-raised text-muted"
-                aria-selected="false">
+                aria-selected="false" data-wc-tab-voice hidden>
           <i class="fa-solid fa-microphone text-[10px] mr-1"></i>voice
-          <span class="text-muted ml-1">{{ word_cloud_voice | length }}</span>
+          <span class="text-muted ml-1" data-wc-count="voice">0</span>
         </button>
-        {% endif %}
       </div>
     </div>
     <div id="wordcloud-chat-host"
-         class="wc-pane relative w-full {% if not word_cloud %}hidden{% endif %}"
+         class="wc-pane relative w-full"
          style="height: 360px;" data-wc-pane="chat"></div>
     <div id="wordcloud-voice-host"
          class="wc-pane relative w-full hidden"
          style="height: 360px;" data-wc-pane="voice"></div>
-    {% if not word_cloud %}
-    <p class="text-xs text-muted italic">No chat words yet.</p>
-    {% endif %}
+    <p id="wordcloud-empty" class="text-xs text-muted italic hidden">No chat words yet.</p>
   </section>
   {% endif %}
 
@@ -374,17 +374,21 @@
   });
   {% endif %}
 
-  // Word cloud (wordcloud2.js). Tabbed between chat + voice — render
-  // each on first selection so we don't pay the layout cost twice up
-  // front. Tab buttons toggle .hidden on the corresponding host.
+  // Word cloud (wordcloud2.js). Lazy-loaded — fetch the payload from
+  // /stats/wordcloud (5-min cached server-side, last-30-day window)
+  // after the rest of /stats has rendered. Each tab renders on first
+  // selection so we don't pay the wordcloud2.js layout cost twice
+  // up front.
   (function () {
     if (typeof WordCloud !== 'function') return;
+    const section = document.getElementById('wordcloud-section');
+    if (!section) return;
+    const status = document.getElementById('wordcloud-status');
+    const empty = document.getElementById('wordcloud-empty');
+    const tabs = section.querySelector('[data-wc-tabs]');
     const palette = ['#9146FF', '#10B981', '#F59E0B', '#A266FF', '#7A2BFF'];
-    const lists = {
-      chat:  {{ word_cloud | tojson }},
-      voice: {{ word_cloud_voice | tojson }},
-    };
     const rendered = {chat: false, voice: false};
+    let lists = {chat: [], voice: []};
 
     function renderInto(host, list) {
       const cnv = document.createElement('canvas');
@@ -429,9 +433,30 @@
       btn.addEventListener('click', () => showTab(btn.dataset.wcTab));
     });
 
-    // Render the default tab (chat if present, else voice).
-    if (lists.chat && lists.chat.length) showTab('chat');
-    else if (lists.voice && lists.voice.length) showTab('voice');
+    fetch('/stats/wordcloud', {headers: {'Accept': 'application/json'}})
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(payload => {
+        lists = {chat: payload.chat || [], voice: payload.voice || []};
+        if (status) status.remove();
+        // Wire counts; reveal whichever tab(s) have data.
+        const chatCount = section.querySelector('[data-wc-count="chat"]');
+        const voiceCount = section.querySelector('[data-wc-count="voice"]');
+        if (chatCount) chatCount.textContent = lists.chat.length;
+        if (voiceCount) voiceCount.textContent = lists.voice.length;
+        const voiceTabBtn = section.querySelector('[data-wc-tab-voice]');
+        if (voiceTabBtn && lists.voice.length) voiceTabBtn.removeAttribute('hidden');
+        if (lists.chat.length || lists.voice.length) {
+          if (tabs) tabs.removeAttribute('hidden');
+          if (lists.chat.length) showTab('chat');
+          else showTab('voice');
+        } else if (empty) {
+          empty.classList.remove('hidden');
+        }
+      })
+      .catch(err => {
+        if (status) status.textContent = 'failed to load';
+        console.warn('wordcloud fetch failed', err);
+      });
   })();
 
   // Support breakdown (donut). Tips → $, bits → $/100 (1 bit ≈ $0.01),
