@@ -1,7 +1,11 @@
+{# Chat-window order: oldest at top, newest at bottom. The repo
+   query returns newest-first (efficient — uses descending id index),
+   so we reverse here for rendering. The SSE driver appends new rows
+   to the bottom and trims from the top to keep the feed bounded. #}
 {% if not messages %}
   <p class="text-muted italic px-1 py-2 text-xs">No messages yet.</p>
 {% else %}
-  {% for m in messages %}
+  {% for m in messages | reverse %}
     {% set _signal = (arrival_signals or {}).get(m.user_id) %}
     {% set _starred = starred is defined and starred and m.user_id in starred %}
     {% set _callback = (callbacks or {}).get(m.user_id) %}

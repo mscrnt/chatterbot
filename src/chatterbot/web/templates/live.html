@@ -8,12 +8,18 @@
     </h1>
     <span class="text-xs text-muted">last {{ limit }} · live</span>
   </header>
-  {# Initial render is server-side; the SSE stream below pushes new rows. #}
+  {# Chat-window flow: oldest at top, newest at bottom, container
+     scrolls. The SSE driver auto-scrolls to follow new arrivals
+     when the streamer is already at the bottom; if they've scrolled
+     up to read history, new rows still land at the bottom but the
+     scrollbar stays put. #}
   <div id="live-feed"
        data-live-feed
        data-live-limit="{{ limit }}"
        data-live-since="{{ messages[0].id if messages else 0 }}"
-       class="rounded-xl border border-subtle bg-surface px-3 py-2 text-sm space-y-0.5 shadow-sm">
+       class="rounded-xl border border-subtle bg-surface px-3 py-2 text-sm space-y-0.5 shadow-sm
+              overflow-y-auto"
+       style="max-height: calc(100vh - 12rem);">
     {% include "partials/live_rows.html" %}
   </div>
 </div>

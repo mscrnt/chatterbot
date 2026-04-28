@@ -105,10 +105,16 @@
         if you want raw utterances right now.
       </div>
     {% else %}
+      {# Chat-window order: oldest at top, newest at bottom. The repo
+         query returns newest-first so we reverse the loop here.
+         show-more hides the OLDEST rows (loop.revindex0 from the
+         tail) so the visible default is always the most-recent N. #}
       <div x-data="{ expanded: localStorage.getItem('chatterbot.transcriptExpanded') === '1' }">
-        <ul class="space-y-1 text-sm">
-          {% for g in groups %}
-            <li {% if loop.index0 >= _strip_visible %}x-show="expanded" x-cloak{% endif %}>
+        <ul data-transcript-feed
+            class="space-y-1 text-sm overflow-y-auto"
+            style="max-height: 22rem;">
+          {% for g in groups | reverse %}
+            <li {% if loop.revindex0 >= _strip_visible %}x-show="expanded" x-cloak{% endif %}>
               <button type="button"
                       class="{{ _row_btn }}"
                       hx-get="/modals/transcript-group/{{ g.id }}"
@@ -149,12 +155,14 @@
     {% else %}
       {% set _thr = 0.55 %}
       <div x-data="{ expanded: localStorage.getItem('chatterbot.transcriptExpanded') === '1' }">
-        <ul class="space-y-1 text-sm">
-          {% for c in chunks %}
+        <ul data-transcript-feed
+            class="space-y-1 text-sm overflow-y-auto"
+            style="max-height: 22rem;">
+          {% for c in chunks | reverse %}
             {% set _sim = c.similarity %}
             {% set _hit = _sim is not none and _sim >= _thr %}
             {% set _close = _sim is not none and _sim >= 0.30 and not _hit %}
-            <li {% if loop.index0 >= _strip_visible %}x-show="expanded" x-cloak{% endif %}>
+            <li {% if loop.revindex0 >= _strip_visible %}x-show="expanded" x-cloak{% endif %}>
               <button type="button"
                       class="{{ _row_btn }}"
                       hx-get="/modals/transcript/{{ c.id }}"
@@ -195,4 +203,15 @@
       </div>
     {% endif %}
   {% endif %}
+
+  {# Auto-scroll the strip's row container to the bottom on each
+     refresh (chat-window flow). Each refetch runs this script anew
+     because the strip's hx-swap=outerHTML replaces the whole
+     <div id="transcript-strip">. #}
+  <script>
+    (function () {
+      const feeds = document.querySelectorAll('#transcript-strip [data-transcript-feed]');
+      requestAnimationFrame(() => feeds.forEach(f => { f.scrollTop = f.scrollHeight; }));
+    })();
+  </script>
 </div>

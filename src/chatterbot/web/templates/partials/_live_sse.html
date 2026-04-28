@@ -1,7 +1,11 @@
-{# Live-chat SSE driver. Replaces the old `hx-trigger="every 2s"`
-   poll with a single EventSource connection per page open. The
-   server pushes only NEW message rows, which we prepend to any
-   element marked `data-live-feed`, then trim past `data-live-limit`.
+{# Live-chat SSE driver. Chat-window flow: oldest rows at the top of
+   the container, newest at the bottom (matches every other chat
+   client the streamer uses). The server's SSE payload is the live
+   partial — already newest-first — which we reverse to append in
+   chronological order. New rows always land at the bottom; the
+   container auto-scrolls to follow them when the streamer is
+   already pinned to the bottom, but does NOT yank them out of
+   reading position when they've scrolled up to read history.
 
    Initial render is server-side (HTMX one-shot for the sidebar, the
    page template itself for /live). The SSE stream takes over from
@@ -14,6 +18,20 @@
   const containers = document.querySelectorAll('[data-live-feed]');
   if (!containers.length) return;
 
+  // Pixels of slack from the bottom edge that still counts as
+  // "pinned to bottom". A few pixels lets row-height antialiasing
+  // not break the auto-follow.
+  const PIN_THRESHOLD = 24;
+
+  function isPinnedToBottom(el) {
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+    return dist <= PIN_THRESHOLD;
+  }
+
+  function scrollToBottom(el) {
+    el.scrollTop = el.scrollHeight;
+  }
+
   function attach(container) {
     if (container._liveSseAttached) return;
     container._liveSseAttached = true;
@@ -23,6 +41,10 @@
     let url = '/live/stream?limit=' + encodeURIComponent(limit);
     if (since > 0) url += '&since=' + encodeURIComponent(since);
 
+    // Initial scroll: land on the bottom so the streamer sees the
+    // newest message first, just like opening any chat client.
+    requestAnimationFrame(() => scrollToBottom(container));
+
     let es;
     let backoff = 1000;
 
@@ -30,23 +52,26 @@
       es = new EventSource(url);
       es.addEventListener('watermark', () => { backoff = 1000; });
       es.addEventListener('rows', (e) => {
-        // Server sent SSE-encoded data with literal `\n` escapes for
-        // multi-line payloads (see _sse() in app.py). Reverse that.
         const html = e.data.replace(/\\n/g, '\n');
         const tmp = document.createElement('div');
         tmp.innerHTML = html;
         // Drop any "no messages yet" empty-state placeholder.
         container.querySelectorAll('p.italic').forEach(p => p.remove());
-        // Prepend new rows in their natural newest-first order, so
-        // multiple rows in one event keep their internal ordering.
-        const newRows = Array.from(tmp.children);
-        for (let i = newRows.length - 1; i >= 0; i--) {
-          container.prepend(newRows[i]);
+        // Server sends newest-first inside the rows event; we want
+        // chronological order at the bottom of the list. Reverse so
+        // the OLDEST of the new batch lands first, then progressively
+        // newer rows append below it.
+        const newRows = Array.from(tmp.children).reverse();
+        const wasPinned = isPinnedToBottom(container);
+        for (const row of newRows) {
+          container.appendChild(row);
         }
-        // Trim from the bottom so the feed stays bounded.
+        // Trim from the TOP — oldest rows fall off the back of the
+        // feed once we exceed the cap.
         while (container.children.length > limit) {
-          container.removeChild(container.lastElementChild);
+          container.removeChild(container.firstElementChild);
         }
+        if (wasPinned) scrollToBottom(container);
       });
       es.onerror = () => {
         // Browser auto-reconnects on EventSource error, but we close
@@ -63,6 +88,8 @@
     if (container.getAttribute('hx-get')) {
       container.addEventListener('htmx:afterSwap', function once() {
         container.removeEventListener('htmx:afterSwap', once);
+        // After the initial HTMX render, scroll to bottom + connect.
+        requestAnimationFrame(() => scrollToBottom(container));
         connect();
       }, { once: true });
     } else {
