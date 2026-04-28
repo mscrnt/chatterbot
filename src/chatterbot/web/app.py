@@ -614,6 +614,155 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         repo.delete_note(note_id)
         return Response(status_code=200)
 
+    @app.get("/modals/notes/merge", response_class=HTMLResponse)
+    async def modal_merge_notes(
+        request: Request,
+        ids: str = Query("", max_length=1000),
+        twitch_id: str = Query("", max_length=64),
+    ):
+        """Merge-multiple-notes modal. `ids` is a comma-separated list
+        of note ids the streamer selected; `twitch_id` is the user
+        whose notes those are. We sanity-check ownership server-side
+        so a malicious URL can't merge across users."""
+        if not ids or not twitch_id:
+            raise HTTPException(400, "missing ids or twitch_id")
+        try:
+            id_list = [int(x.strip()) for x in ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(400, "invalid ids")
+        if len(id_list) < 2:
+            raise HTTPException(400, "need at least 2 notes to merge")
+        if not repo.get_user(twitch_id):
+            raise HTTPException(404, "user not found")
+        # Pull each note + verify all belong to twitch_id.
+        notes = []
+        for nid in id_list:
+            n = repo.get_note(nid)
+            if n is None or n.user_id != twitch_id:
+                raise HTTPException(
+                    400, f"note {nid} does not belong to {twitch_id}"
+                )
+            notes.append(n)
+        # Pre-fill with concatenation. Streamer can clear and
+        # write-from-scratch or click "suggest" for an LLM proposal.
+        prefill = "\n\n".join(n.text for n in notes)
+        return TEMPLATES.TemplateResponse(
+            request, "modals/_merge_notes.html",
+            {
+                "notes": notes,
+                "twitch_id": twitch_id,
+                "ids_csv": ",".join(str(n.id) for n in notes),
+                "prefill": prefill,
+            },
+        )
+
+    @app.post("/notes/merge/suggest", response_class=HTMLResponse)
+    async def merge_notes_suggest(
+        request: Request,
+        ids: Annotated[str, Form()],
+        twitch_id: Annotated[str, Form()],
+    ):
+        """Single-shot LLM suggestion for the merged umbrella note.
+        Returns a tiny partial that swaps into the textarea via
+        hx-target. The streamer can edit before saving."""
+        try:
+            id_list = [int(x.strip()) for x in ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(400, "invalid ids")
+        if len(id_list) < 2 or not repo.get_user(twitch_id):
+            raise HTTPException(400, "need ≥2 notes from a real user")
+        notes = []
+        for nid in id_list:
+            n = repo.get_note(nid)
+            if n is None or n.user_id != twitch_id:
+                raise HTTPException(400, "note ownership mismatch")
+            notes.append(n)
+        bullet = "\n".join(f"- {n.text}" for n in notes)
+        prompt = (
+            f"Merge these {len(notes)} notes about a single chatter into ONE "
+            "umbrella note that captures the shared subject. Keep it under "
+            "300 characters. Stay observational — paraphrase what was said, "
+            "don't add facts the notes don't contain. Output the umbrella "
+            "note as a single line, no quotes, no preamble.\n\n"
+            f"NOTES:\n{bullet}"
+        )
+        try:
+            suggestion = await llm.generate(
+                prompt=prompt,
+                system_prompt=(
+                    "You consolidate per-chatter notes into an umbrella "
+                    "summary. Stay grounded in the notes' content. No "
+                    "advice, no extrapolation — just the merged paraphrase."
+                ),
+            )
+        except Exception:
+            logger.exception("merge_notes_suggest: llm.generate failed")
+            return Response(
+                status_code=200,
+                content="<textarea name='text' rows='5' "
+                "class='w-full tap bg-canvas border border-subtle rounded "
+                "px-3 py-2 text-base text-primary focus:outline-none "
+                "focus:ring-2 focus:ring-accent' "
+                "id='merge-text-field'>(LLM suggestion failed — type the "
+                "umbrella note yourself)</textarea>",
+                media_type="text/html",
+            )
+        suggestion = (suggestion or "").strip()[:500]
+        # Return the textarea with the suggested text. hx-swap='outerHTML'
+        # replaces the existing textarea in place.
+        return TEMPLATES.TemplateResponse(
+            request, "partials/merge_textarea.html",
+            {"prefill": suggestion},
+        )
+
+    @app.post("/notes/merge", response_class=HTMLResponse)
+    async def merge_notes_endpoint(
+        request: Request,
+        ids: Annotated[str, Form()],
+        twitch_id: Annotated[str, Form()],
+        text: Annotated[str, Form()],
+    ):
+        """Apply a merge: combine selected notes into one new umbrella
+        note. Originals are deleted, sources unioned. Returns the
+        refreshed notes list partial so the page picks up the change
+        immediately."""
+        try:
+            id_list = [int(x.strip()) for x in ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(400, "invalid ids")
+        if len(id_list) < 2:
+            raise HTTPException(400, "need at least 2 notes to merge")
+        if not repo.get_user(twitch_id):
+            raise HTTPException(404, "user not found")
+        # Verify ownership before mutating.
+        for nid in id_list:
+            n = repo.get_note(nid)
+            if n is None or n.user_id != twitch_id:
+                raise HTTPException(
+                    400, f"note {nid} does not belong to {twitch_id}"
+                )
+        # Embed the umbrella text for RAG; non-fatal if it fails.
+        embedding: list[float] | None
+        try:
+            embedding = await llm.embed(text[:500])
+        except Exception:
+            logger.exception("merge_notes: embed failed; saving without vector")
+            embedding = None
+        new_id = await asyncio.to_thread(
+            repo.merge_notes, id_list, text[:500], embedding=embedding,
+        )
+        if new_id is None:
+            raise HTTPException(400, "merge produced no note (empty text?)")
+        # Re-render the notes list partial so the user page picks up
+        # the new merged note + the deletion of originals.
+        ctx = _notes_partial_ctx(twitch_id, q="", origin="all", page=1)
+        resp = TEMPLATES.TemplateResponse(
+            request, "partials/notes_list.html", ctx,
+        )
+        # Trigger client-side close of the modal once the response lands.
+        resp.headers["HX-Trigger"] = "merge-notes-done"
+        return resp
+
     # ---------------- settings (Twitch + StreamElements creds) ----------------
     # Plaintext credentials in SQLite. Fine for a single-user local tool bound
     # to 127.0.0.1; flagged to the user on the page.

@@ -3933,6 +3933,106 @@ class ChatterRepo:
             cur.execute("DELETE FROM vec_notes WHERE note_id = ?", (note_id,))
             cur.execute("DELETE FROM notes WHERE id = ?", (note_id,))
 
+    def merge_notes(
+        self,
+        note_ids: list[int],
+        merged_text: str,
+        *,
+        embedding: list[float] | None = None,
+    ) -> int | None:
+        """Combine multiple notes into one umbrella note. The new note's
+        `source_message_ids` is the union of every original's sources.
+        Originals are deleted (DB + vec_notes). Returns the new note's
+        id, or None if `note_ids` was empty.
+
+        All notes must belong to the same user — caller is responsible
+        for verifying ownership before invoking.
+        """
+        if not note_ids:
+            return None
+        clean_text = (merged_text or "").strip()
+        if not clean_text:
+            return None
+        ids_set = list(dict.fromkeys(int(i) for i in note_ids))  # dedup, preserve order
+        placeholders = ",".join("?" for _ in ids_set)
+
+        with self._cursor() as cur:
+            # Look up the user_id from any of the originals (they should
+            # all match — caller's responsibility).
+            cur.execute(
+                f"SELECT DISTINCT user_id FROM notes WHERE id IN ({placeholders})",
+                ids_set,
+            )
+            rows = cur.fetchall()
+            if not rows:
+                return None
+            user_ids = {r["user_id"] for r in rows}
+            if len(user_ids) > 1:
+                raise ValueError(
+                    f"merge_notes: notes span multiple users {user_ids}"
+                )
+            user_id = rows[0]["user_id"]
+
+            # Union the source_message_ids across the originals.
+            cur.execute(
+                f"""
+                SELECT DISTINCT message_id FROM note_sources
+                WHERE note_id IN ({placeholders})
+                """,
+                ids_set,
+            )
+            source_msg_ids = [int(r["message_id"]) for r in cur.fetchall()]
+
+            # Insert the merged note. origin='manual' since the streamer
+            # curated the merged text; we don't want the hallucination
+            # guard to drop it for lacking citations even if the union
+            # ends up empty.
+            cur.execute(
+                """
+                INSERT INTO notes(user_id, ts, text, embedding, origin)
+                VALUES (?, ?, ?, ?, 'manual')
+                """,
+                (
+                    user_id, _now_iso(), clean_text,
+                    _vec_to_blob(embedding) if embedding else None,
+                ),
+            )
+            new_id = int(cur.lastrowid)
+
+            # Re-attach the unioned sources to the new note.
+            for mid in source_msg_ids:
+                cur.execute(
+                    "INSERT OR IGNORE INTO note_sources(note_id, message_id) "
+                    "VALUES (?, ?)",
+                    (new_id, mid),
+                )
+
+            # Delete originals (vec + notes + their note_sources).
+            cur.execute(
+                f"DELETE FROM vec_notes WHERE note_id IN ({placeholders})",
+                ids_set,
+            )
+            cur.execute(
+                f"DELETE FROM note_sources WHERE note_id IN ({placeholders})",
+                ids_set,
+            )
+            cur.execute(
+                f"DELETE FROM notes WHERE id IN ({placeholders})",
+                ids_set,
+            )
+
+            # If we have an embedding, write to vec_notes for RAG search.
+            if embedding:
+                try:
+                    cur.execute(
+                        "INSERT INTO vec_notes(note_id, embedding) VALUES (?, ?)",
+                        (new_id, _vec_to_blob(embedding)),
+                    )
+                except Exception:
+                    pass
+
+        return new_id
+
     def get_messages(
         self,
         user_id: str,

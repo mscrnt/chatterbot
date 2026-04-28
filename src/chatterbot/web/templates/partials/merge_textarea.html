@@ -1,0 +1,8 @@
+{# Just the textarea, isolated so the "suggest" button can hx-swap
+   it cleanly without touching the rest of the modal form. #}
+<textarea id="merge-text-field"
+          name="text"
+          rows="5"
+          maxlength="500"
+          required
+          class="w-full tap bg-canvas border border-subtle rounded px-3 py-2 text-base text-primary leading-relaxed focus:outline-none focus:ring-2 focus:ring-accent">{{ prefill }}</textarea>

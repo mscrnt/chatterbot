@@ -1,6 +1,17 @@
 <div id="note-{{ note.id }}"
      class="rounded-xl border border-subtle bg-surface p-3 group hover:bg-surface-raised transition-all duration-150 ease-out">
-  <div class="flex items-start justify-between gap-2">
+  <div class="flex items-start gap-2">
+    {# Multi-select checkbox for the merge UI. Each click toggles the
+       per-row selected class via the shared chatterbotMergeSelect()
+       helper, which also updates the floating merge action bar. #}
+    <label class="shrink-0 mt-1 cursor-pointer"
+           title="Select to merge with other notes">
+      <input type="checkbox"
+             class="merge-select-checkbox accent-accent cursor-pointer"
+             data-note-id="{{ note.id }}"
+             onchange="window.chatterbotMergeSelect && window.chatterbotMergeSelect()">
+      <span class="sr-only">select for merge</span>
+    </label>
     <p class="flex-1 leading-relaxed text-primary">{{ note.text }}</p>
     <div class="flex gap-1 shrink-0">
       <button class="tap inline-flex items-center justify-center px-2 text-xs rounded bg-surface-raised hover:bg-subtle text-muted hover:text-primary"

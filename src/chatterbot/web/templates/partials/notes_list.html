@@ -92,4 +92,55 @@
     {% else %}<span></span>{% endif %}
   </div>
   {% endif %}
+
+  {# Floating merge bar — appears once 2+ notes are checkbox-selected.
+     Reads which boxes are ticked, opens the merge modal with their
+     ids. Hidden by default; chatterbotMergeSelect() flips visibility. #}
+  <div id="merge-action-bar"
+       class="hidden sticky bottom-2 z-10 mt-2 mx-auto w-fit"
+       data-twitch-id="{{ user.twitch_id }}">
+    <button type="button"
+            class="tap inline-flex items-center gap-2 px-4 py-2 rounded-full bg-accent hover:bg-accent-600 text-white font-medium shadow-lg"
+            onclick="window.chatterbotOpenMerge && window.chatterbotOpenMerge()">
+      <i class="fa-solid fa-object-group"></i>
+      <span id="merge-count">0</span> selected — merge
+    </button>
+  </div>
 </div>
+
+<script>
+  // Idempotent install — re-runs after every htmx swap of #notes-list
+  // because the partial re-renders on filter / page change. Each
+  // checkbox change recomputes the floating bar's count + visibility.
+  (function () {
+    function update() {
+      const boxes = document.querySelectorAll('.merge-select-checkbox:checked');
+      const bar = document.getElementById('merge-action-bar');
+      if (!bar) return;
+      if (boxes.length >= 2) {
+        bar.classList.remove('hidden');
+      } else {
+        bar.classList.add('hidden');
+      }
+      const c = document.getElementById('merge-count');
+      if (c) c.textContent = String(boxes.length);
+    }
+    function open() {
+      const bar = document.getElementById('merge-action-bar');
+      if (!bar) return;
+      const twitchId = bar.dataset.twitchId;
+      const ids = Array.from(
+        document.querySelectorAll('.merge-select-checkbox:checked')
+      ).map(b => b.dataset.noteId).join(',');
+      if (!ids || !twitchId) return;
+      if (window.htmx) {
+        htmx.ajax('GET',
+          `/modals/notes/merge?ids=${encodeURIComponent(ids)}&twitch_id=${encodeURIComponent(twitchId)}`,
+          { target: '#modal-root', swap: 'innerHTML' });
+      }
+    }
+    window.chatterbotMergeSelect = update;
+    window.chatterbotOpenMerge = open;
+    update();
+  })();
+</script>

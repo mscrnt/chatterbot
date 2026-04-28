@@ -1,0 +1,73 @@
+{% set modal_title = 'Merge ' ~ (notes | length) ~ ' notes' %}
+{% set modal_icon = 'fa-object-group' %}
+{% set modal_tone = 'accent' %}
+{% set modal_size = 'lg' %}
+{% extends "components/_modal.html" %}
+{% block modal_body %}
+<form class="space-y-4 text-sm"
+      hx-post="/notes/merge"
+      hx-target="#notes-list"
+      hx-swap="outerHTML"
+      hx-on::after-request="if(event.detail.successful) window.chatterbotCloseModal()">
+  <input type="hidden" name="ids" value="{{ ids_csv }}">
+  <input type="hidden" name="twitch_id" value="{{ twitch_id }}">
+
+  {# Source notes side — read-only preview so the streamer can see
+     what's going to be folded together. #}
+  <section>
+    <p class="text-[11px] uppercase tracking-wider text-muted mb-1">
+      consolidating
+    </p>
+    <ul class="divide-y divide-subtle rounded-xl border border-subtle bg-canvas overflow-hidden max-h-44 overflow-y-auto">
+      {% for n in notes %}
+        <li class="px-3 py-2 text-[12px] text-primary leading-snug">
+          <span class="text-[10px] text-muted mr-2">{{ n.ts | short_ts }}</span>
+          {{ n.text }}
+        </li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  {# Merge target — pre-filled with concatenation. The "suggest"
+     button below is opt-in; clicking it makes one Ollama call and
+     swaps the textarea contents with the LLM's umbrella version. #}
+  <section>
+    <div class="flex items-baseline justify-between mb-1">
+      <p class="text-[11px] uppercase tracking-wider text-muted">
+        merged umbrella note
+      </p>
+      <button type="button"
+              class="tap inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] bg-accent/10 hover:bg-accent/20 text-accent border border-accent/30"
+              hx-post="/notes/merge/suggest"
+              hx-include="[name='ids'], [name='twitch_id']"
+              hx-target="#merge-text-field"
+              hx-swap="outerHTML"
+              hx-indicator="#merge-suggest-spinner"
+              title="One LLM call to draft a single observational umbrella line. You can edit before saving.">
+        <i id="merge-suggest-spinner" class="htmx-indicator fa-solid fa-spinner fa-spin text-[10px]"></i>
+        <i class="fa-solid fa-wand-magic-sparkles text-[10px]"></i>
+        suggest
+      </button>
+    </div>
+    {% with prefill=prefill %}
+      {% include "partials/merge_textarea.html" %}
+    {% endwith %}
+    <p class="text-[10px] text-muted mt-1">
+      Sources from all {{ notes | length }} notes are unioned onto the
+      merged note. Originals are deleted.
+    </p>
+  </section>
+
+  <div class="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 pt-1">
+    <button type="button"
+            class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-surface-raised hover:bg-subtle text-primary"
+            onclick="window.chatterbotCloseModal()">
+      Cancel
+    </button>
+    <button type="submit"
+            class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-accent hover:bg-accent-600 text-white font-medium">
+      <i class="fa-solid fa-object-group"></i> Merge
+    </button>
+  </div>
+</form>
+{% endblock %}
