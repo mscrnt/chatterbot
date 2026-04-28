@@ -10,22 +10,39 @@
     </p>
     <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
       {% for m in messages %}
-        <li class="px-3 py-2 text-sm hover:bg-surface-raised cursor-pointer transition-all duration-150 ease-out"
+        <li class="px-3 py-2 text-sm hover:bg-surface-raised cursor-pointer transition-all duration-150 ease-out group flex items-start gap-2"
             hx-get="/modals/message/{{ m.id }}"
             hx-target="#modal-root"
             hx-swap="innerHTML"
             title="Open with surrounding context">
-          {% if m.reply_parent_body %}
-            <div class="text-[11px] text-muted mb-1 inline-flex items-center gap-1">
-              <i class="fa-solid fa-reply text-[10px]"></i>
-              replying to <span class="text-accent">{{ m.reply_parent_login or '?' }}</span>:
-              <span class="italic truncate max-w-[28rem]">"{{ m.reply_parent_body }}"</span>
+          <div class="flex-1 min-w-0">
+            {% if m.reply_parent_body %}
+              <div class="text-[11px] text-muted mb-1 inline-flex items-center gap-1">
+                <i class="fa-solid fa-reply text-[10px]"></i>
+                replying to <span class="text-accent">{{ m.reply_parent_login or '?' }}</span>:
+                <span class="italic truncate max-w-[28rem]">"{{ m.reply_parent_body }}"</span>
+              </div>
+            {% endif %}
+            <div>
+              <span class="text-xs text-muted mr-2 inline-block w-32">{{ m.ts | short_ts }}</span>
+              <span class="break-words text-primary">{{ m.content }}</span>
             </div>
-          {% endif %}
-          <div>
-            <span class="text-xs text-muted mr-2 inline-block w-32">{{ m.ts | short_ts }}</span>
-            <span class="break-words text-primary">{{ m.content }}</span>
           </div>
+          {# "Make a note out of this" — opens a modal pre-filled with
+             this message's text + a hidden citation. event.stopPropagation
+             so the row's own click-to-open-context doesn't also fire. #}
+          <button type="button"
+                  class="tap shrink-0 inline-flex items-center justify-center px-2 py-1 text-xs rounded
+                         bg-surface-raised hover:bg-accent/15 text-muted hover:text-accent
+                         opacity-0 group-hover:opacity-100 focus:opacity-100 transition-all duration-150 ease-out"
+                  hx-get="/modals/note-from-message/{{ m.id }}"
+                  hx-target="#modal-root"
+                  hx-swap="innerHTML"
+                  onclick="event.stopPropagation()"
+                  title="Make a note from this message — pre-filled + cited"
+                  aria-label="note this message">
+            <i class="fa-solid fa-note-sticky"></i>
+          </button>
         </li>
       {% endfor %}
     </ul>

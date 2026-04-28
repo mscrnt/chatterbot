@@ -1,0 +1,54 @@
+{% set modal_title = 'Make note from message · ' ~ message.name %}
+{% set modal_icon = 'fa-note-sticky' %}
+{% set modal_tone = 'accent' %}
+{% set modal_size = 'md' %}
+{% extends "components/_modal.html" %}
+{% block modal_body %}
+<form class="space-y-3 text-sm"
+      hx-post="/users/{{ message.user_id }}/notes"
+      hx-target="#notes-list"
+      hx-swap="outerHTML"
+      hx-on::after-request="if(event.detail.successful) window.chatterbotCloseModal()">
+  {# The cited message — verbatim, read-only. The new note carries the
+     message id back as `source_message_ids` so this row shows up under
+     the note's "view sources" expander on the user page. #}
+  <section class="rounded-lg border border-subtle bg-canvas p-3">
+    <div class="flex items-baseline gap-2 mb-1">
+      <span class="text-[10px] uppercase tracking-wider text-muted">message · {{ message.ts | short_ts }}</span>
+      <a href="/users/{{ message.user_id }}?focus={{ message.id }}"
+         class="ml-auto text-[10px] text-accent hover:underline inline-flex items-center gap-1"
+         onclick="event.stopPropagation()">
+        <i class="fa-solid fa-up-right-from-square text-[9px]"></i> see in context
+      </a>
+    </div>
+    <p class="text-primary leading-snug break-words">{{ message.content }}</p>
+  </section>
+
+  <input type="hidden" name="source_message_ids" value="{{ message.id }}">
+  <label class="block">
+    <span class="text-[11px] uppercase tracking-wider text-muted">note text</span>
+    <textarea name="text" rows="4" autofocus required
+              maxlength="500"
+              @keydown.shift.enter.prevent="$el.form.requestSubmit()"
+              class="mt-1 w-full tap bg-canvas border border-subtle rounded px-3 py-2 text-base text-primary leading-relaxed focus:outline-none focus:ring-2 focus:ring-accent">{{ message.content }}</textarea>
+  </label>
+  <p class="text-[10px] text-muted">
+    Pre-filled with the message verbatim — paraphrase or trim if you want.
+    The note is cited back to this exact message; you'll see it in
+    "view source" on the chatter's profile.
+    <span class="ml-1"><kbd class="kb">Shift</kbd> + <kbd class="kb">Enter</kbd> to save</span>
+  </p>
+
+  <div class="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 pt-1">
+    <button type="button"
+            class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-surface-raised hover:bg-subtle text-primary"
+            onclick="window.chatterbotCloseModal()">
+      Cancel
+    </button>
+    <button type="submit"
+            class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-accent hover:bg-accent-600 text-white font-medium">
+      <i class="fa-solid fa-note-sticky"></i> Save note
+    </button>
+  </div>
+</form>
+{% endblock %}

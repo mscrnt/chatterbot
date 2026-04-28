@@ -581,7 +581,12 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         request: Request,
         twitch_id: str,
         text: Annotated[str, Form()],
+        source_message_ids: Annotated[str, Form()] = "",
     ):
+        """Add a manual note. Optional `source_message_ids` is a CSV of
+        message ids the streamer wants to cite (e.g., from the
+        click-message-to-note flow). Validation against this user's
+        own messages happens inside repo.add_note."""
         text = text.strip()
         user = repo.get_user(twitch_id)
         if not user:
@@ -593,11 +598,39 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             except Exception:
                 logger.exception("embed failed for manual note; storing without vector")
                 embedding = None
-            repo.add_note(twitch_id, text[:500], embedding, origin="manual")
+            cited: list[int] | None = None
+            if source_message_ids:
+                try:
+                    cited = [
+                        int(x.strip()) for x in source_message_ids.split(",")
+                        if x.strip()
+                    ]
+                except ValueError:
+                    cited = None
+            repo.add_note(
+                twitch_id, text[:500], embedding,
+                source_message_ids=cited,
+                origin="manual",
+            )
         # Always reset to page 1 / no filter so the streamer sees what they
         # just added at the top of the list.
         ctx = _notes_partial_ctx(twitch_id, q="", origin="all", page=1)
         return TEMPLATES.TemplateResponse(request, "partials/notes_list.html", ctx)
+
+    @app.get("/modals/note-from-message/{message_id}", response_class=HTMLResponse)
+    async def modal_note_from_message(request: Request, message_id: int):
+        """Open a "make note from this message" modal. The message text
+        is pre-filled into the textarea so the streamer can paraphrase
+        before saving; the message id rides as a hidden field so the
+        new note auto-cites it."""
+        ctx = repo.get_message_context(message_id, before=0, after=0)
+        focal = ctx.get("focal") if ctx else None
+        if focal is None:
+            raise HTTPException(404, "message not found")
+        return TEMPLATES.TemplateResponse(
+            request, "modals/_note_from_message.html",
+            {"message": focal},
+        )
 
     @app.patch("/notes/{note_id}", response_class=HTMLResponse)
     async def patch_note(
