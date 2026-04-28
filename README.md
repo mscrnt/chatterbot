@@ -26,8 +26,7 @@ ollama pull nomic-embed-text
 # 3. configure
 cp .env.example .env
 # Edit .env: set TWITCH_BOT_NICK, TWITCH_OAUTH_TOKEN (oauth:...),
-# TWITCH_CHANNEL, and OLLAMA_HOST. Get a token at
-# https://twitchtokengenerator.com (Bot Chat Token, scope chat:read).
+# TWITCH_CHANNEL, and OLLAMA_HOST. See "Twitch credentials" below.
 
 # 4. run both bot + dashboard in one shell
 make all
@@ -38,6 +37,96 @@ Ctrl+C in the dashboard terminal stops both.
 
 > Need separate processes? `make bot` and `make dashboard` (and optionally
 > `make tui`) all run independently and share the SQLite DB via WAL.
+
+## Twitch credentials
+
+Two paths — pick one:
+
+### Quick path (no app registration)
+
+If you just want to read chat and get up and running fast, generate a
+**Bot Chat Token** at <https://twitchtokengenerator.com> with scope
+`chat:read`. Paste the resulting `oauth:…` string into `TWITCH_OAUTH_TOKEN`
+and you're done. This works because the generator gives you a token signed
+against *its* public Client ID.
+
+Trade-offs:
+
+- The Client ID isn't yours; the generator can revoke it at any time and
+  every chatterbot install would have to re-issue.
+- No path to add Helix scopes for the moderator-roster sync (VIP / mod /
+  sub / follower lookups) — that side of the dashboard stays empty.
+- No refresh flow.
+
+If `chat:read` plus event ingestion is enough for you, this is fine. If you
+want the full dashboard surface, do the recommended path below.
+
+### Recommended path (your own app)
+
+Register a Twitch developer app to get a stable Client ID and the option to
+issue tokens with the moderator scopes the [HelixSyncService][hs] uses.
+
+#### 1. Register a developer app
+
+Sign in at <https://dev.twitch.tv/console/apps> and create a new application
+(<https://dev.twitch.tv/docs/authentication/register-app>):
+
+- **Name** — anything, e.g. `chatterbot-<your-handle>`.
+- **OAuth Redirect URLs** — `http://localhost` is fine for personal use.
+- **Category** — *Chat Bot*.
+- **Client Type** — *Confidential* (gives you a Client Secret).
+
+Twitch then gives you a **Client ID** and lets you generate a **Client
+Secret**. Keep the secret somewhere private — it's only used if you later
+want to refresh tokens automatically (chatterbot itself doesn't refresh
+today; long-lived user tokens are the simplest path).
+
+#### 2. Get an OAuth user token
+
+Issue a user-access token against your Client ID with the scopes you need.
+The minimum is `chat:read`; the moderator-roster sync ([HelixSyncService][hs])
+adds optional scopes that unlock VIP / mod / sub / follower lookups:
+
+| Capability | Scope |
+|---|---|
+| Read chat (required) | `chat:read` |
+| VIP roster sync | `channel:read:vips` |
+| Moderator roster sync | `moderation:read` |
+| Subscriber roster + tier sync | `channel:read:subscriptions` |
+| Follower list + follow dates | `moderator:read:followers` |
+
+The scopes are checked once at startup; endpoints you lack scope for are
+silently skipped — chatterbot still runs fine on a `chat:read`-only token.
+
+For a one-time setup, easiest is the **Implicit Grant Flow** described at
+<https://dev.twitch.tv/docs/authentication/getting-tokens-oauth/#implicit-grant-flow>:
+
+```
+https://id.twitch.tv/oauth2/authorize
+  ?client_id=YOUR_CLIENT_ID
+  &redirect_uri=http://localhost
+  &response_type=token
+  &scope=chat:read+channel:read:vips+moderation:read+channel:read:subscriptions+moderator:read:followers
+```
+
+Paste that URL in your browser, approve, and copy the `access_token=…`
+fragment from the redirect URL.
+
+#### 3. Drop credentials into `.env`
+
+```env
+TWITCH_BOT_NICK=your_login_name
+TWITCH_OAUTH_TOKEN=oauth:your_access_token_here
+TWITCH_CHANNEL=channel_to_listen_to     # can be your own or someone else's
+TWITCH_CLIENT_ID=your_client_id          # optional today; reserved for refresh
+TWITCH_CLIENT_SECRET=your_client_secret  # optional today; keep private
+```
+
+`TWITCH_OAUTH_TOKEN` and `TWITCH_CHANNEL` are independent: a personal token
+can read any public channel's chat. The dashboard will log
+`token owner=<login>, watching=<channel>` so the relationship is visible.
+
+[hs]: src/chatterbot/helix_sync.py
 
 ## Architectural rule (non-negotiable)
 
