@@ -38,6 +38,94 @@ Ctrl+C in the dashboard terminal stops both.
 > Need separate processes? `make bot` and `make dashboard` (and optionally
 > `make tui`) all run independently and share the SQLite DB via WAL.
 
+## Requirements
+
+Hard:
+
+- **Python 3.11+** (3.12 tested in CI; ships SQLite ≥ 3.40 which is
+  required for the schema migrations — `ALTER TABLE … DROP COLUMN`
+  landed in 3.35).
+- **Ollama reachable on the network**, even when generation runs on
+  Claude / OpenAI — embeddings (`nomic-embed-text`, 768d) always
+  go through Ollama because `vec_messages` / `vec_threads`
+  geometry is locked.
+- **A Twitch OAuth token** with `chat:read` scope minimum (see
+  [Twitch credentials](#twitch-credentials)).
+
+Soft / recommended:
+
+- **8–10 GB VRAM** if Ollama runs on a CUDA card with the default
+  9B model + embedding model + 2-way parallelism. Fits
+  comfortably in 64 GB unified memory on an M-series Mac.
+  CPU-only works but generation calls take seconds rather than ms.
+- **Anthropic and/or OpenAI API key** if you'd rather offload
+  generation. Ollama still runs locally for embeddings.
+- **OBS WebSocket 5+** (opt-in) for stream / scene state and the
+  audio-relay script that feeds whisper.
+
+**Model size — pick the largest that fits your hardware.** Set
+`OLLAMA_MODEL` in `.env` to any model Ollama serves; common Qwen
+sizes and their rough VRAM footprint at FP16 / Q4_K_M:
+
+| Model size | VRAM (Q4_K_M) | Notes                                      |
+| ---------- | ------------- | ------------------------------------------ |
+| 4B         | ~3 GB         | fast, OK at notes / classification         |
+| 7B / 9B    | ~6–8 GB       | recommended baseline; perf table below     |
+| 14B        | ~10 GB        | sharper notes + recap quality              |
+| 32B        | ~22 GB        | best local quality; slow on smaller cards  |
+
+Bigger models help most on accuracy-critical paths (notes,
+profiles, recaps) where `think=True` is enabled. Realtime paths
+(engaging-subjects, talking-points) stay snappy because they don't
+think — generation budget is the constraint, not model size. You
+can also run a SMALLER model just for the moderation classifier
+via `OLLAMA_MOD_MODEL` so high-frequency mod calls don't block
+the queue.
+
+Per-process resource footprint (steady-state, single-user
+streamer dashboard, observed values — not promises):
+
+| Container  | RSS    | CPU steady | CPU bursts                   |
+| ---------- | ------ | ---------- | ---------------------------- |
+| dashboard  | ~500 MB | 0.5–2%     | 80–400% during Whisper VAD   |
+| bot        | ~100 MB | <1%        | brief on chat-message ingest |
+
+Disk: SQLite DB grows roughly **5–20 MB / hour of busy chat**
+(measured against ~10k msgs in 36 MB). Embedding vectors and
+transcript chunks dominate; messages themselves are tiny.
+
+## Performance
+
+Numbers from a focused optimization pass on a 36 MB DB
+(`k3soju_chatters.db`, ~10k messages). Server-side request timings
+via `curl`, p50 over 6–8 hits each, both warmed. These measure the
+dashboard's own work (DB queries + template rendering + Python
+overhead) — **LLM generation latency is separate** and depends
+entirely on the configured provider and model. Reference baseline
+for the LLM is `qwen3.5:9b` on a CUDA card; numbers below don't
+include any generation calls (those happen on background loops,
+not on the request path).
+
+| Endpoint                       | Before  | After   | Δ p50   |
+| ------------------------------ | ------- | ------- | ------- |
+| `/stats` (cold)                | 358 ms  | 84 ms   | −77%    |
+| `/stats` (warm cache)          | —       | 48 ms   | −87%    |
+| `/insights?view=engagement`    | 1054 ms | 842 ms  | −20%    |
+| `/insights` (whole page)       | 1091 ms | 875 ms  | −20%    |
+| `/insights?view=engagement` p95| 1483 ms | 928 ms  | −37%    |
+| `/stats/wordcloud` (warm)      | n/a     | <1 ms   | new endpoint |
+| Idle dashboard polls / 12 s    | 4–5     | 0       | SSE bus |
+| SSE update latency             | ~1.5 s  | ~10 ms  | cross-process notify |
+
+The biggest wins come from (1) batched repo helpers eliminating
+N+1 queries on the live + insights paths, (2) an
+`asyncio.gather`-parallel + 60s in-memory cache on `/stats`, (3) a
+multiplexed SSE event bus that replaced six `hx-trigger="every Xs"`
+polls so the dashboard does zero HTMX traffic when chat is idle,
+and (4) a cross-process notification path (bot POSTs to
+`/internal/notify` after every message) that pushes SSE updates
+in ~10 ms instead of waiting for the watermark fallback.
+
 ## Twitch credentials
 
 Two paths — pick one:
