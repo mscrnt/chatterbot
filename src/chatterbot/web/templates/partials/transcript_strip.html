@@ -14,12 +14,14 @@
 <div id="transcript-strip"
      hx-get="/transcript"
      hx-vals='js:{ view: localStorage.getItem("chatterbot.transcriptView") || "summary", limit: 15, last_pending: {{ pending_count or 0 }} }'
-     {# `load delay:200ms` fires once on initial page load so the
-        server-side default view (always summary) syncs with whatever
-        the streamer last chose in localStorage. Prevents the
-        buttons from showing the wrong active state until something
-        else triggers a refetch. #}
-     {% if service_status.enabled %}hx-trigger="load delay:200ms, transcript from:body, transcript-view-changed from:body"{% else %}hx-trigger="load delay:200ms, transcript-view-changed from:body"{% endif %}
+     {# Note: NO `load` trigger here. HTMX's `load` event fires every
+        time the element is added to the DOM, including after each
+        outerHTML swap — that creates an infinite refetch loop and
+        constant flicker. Initial-page sync of the server-rendered
+        view with localStorage is handled by a one-shot
+        DOMContentLoaded dispatcher at the bottom of this template
+        (idempotent across swaps via a window flag). #}
+     {% if service_status.enabled %}hx-trigger="transcript from:body, transcript-view-changed from:body"{% else %}hx-trigger="transcript-view-changed from:body"{% endif %}
      hx-swap="outerHTML">
   {# Status badge + view-toggle pills. Title comes from the panel
      wrapper now; we keep service status (model name / waiting /
@@ -105,16 +107,15 @@
         if you want raw utterances right now.
       </div>
     {% else %}
-      {# Chat-window order: oldest at top, newest at bottom. The repo
-         query returns newest-first so we reverse the loop here.
-         show-more hides the OLDEST rows (loop.revindex0 from the
-         tail) so the visible default is always the most-recent N. #}
+      {# Summary view stays newest-first (per streamer ask): the most
+         recent summary lands at the top, older summaries scroll
+         down. Show-more reveals the older entries below the visible
+         5. No auto-scroll — natural top alignment is what the
+         streamer wants for summaries. #}
       <div x-data="{ expanded: localStorage.getItem('chatterbot.transcriptExpanded') === '1' }">
-        <ul data-transcript-feed
-            class="space-y-1 text-sm overflow-y-auto"
-            style="max-height: 22rem;">
-          {% for g in groups | reverse %}
-            <li {% if loop.revindex0 >= _strip_visible %}x-show="expanded" x-cloak{% endif %}>
+        <ul class="space-y-1 text-sm">
+          {% for g in groups %}
+            <li {% if loop.index0 >= _strip_visible %}x-show="expanded" x-cloak{% endif %}>
               <button type="button"
                       class="{{ _row_btn }}"
                       hx-get="/modals/transcript-group/{{ g.id }}"
@@ -204,14 +205,33 @@
     {% endif %}
   {% endif %}
 
-  {# Auto-scroll the strip's row container to the bottom on each
-     refresh (chat-window flow). Each refetch runs this script anew
-     because the strip's hx-swap=outerHTML replaces the whole
-     <div id="transcript-strip">. #}
+  {# Two side-effects that need to run on each render of the strip:
+
+     1. Auto-scroll any data-transcript-feed (only the full-log
+        view has one — summary stays naturally top-aligned) so new
+        utterances always land in view.
+
+     2. ONE-TIME-only sync of the server-rendered view with the
+        streamer's localStorage choice. Window-flag-gated so the
+        dispatch fires once per page open, not on every swap. The
+        old `load delay:200ms` HTMX trigger created an infinite
+        refetch loop because `load` re-fires on every outerHTML
+        swap. #}
   <script>
     (function () {
-      const feeds = document.querySelectorAll('#transcript-strip [data-transcript-feed]');
-      requestAnimationFrame(() => feeds.forEach(f => { f.scrollTop = f.scrollHeight; }));
+      const feed = document.querySelector('#transcript-strip [data-transcript-feed]');
+      if (feed) {
+        requestAnimationFrame(() => { feed.scrollTop = feed.scrollHeight; });
+      }
+      if (window._chatterbotTranscriptViewSynced) return;
+      window._chatterbotTranscriptViewSynced = true;
+      const stored = localStorage.getItem('chatterbot.transcriptView');
+      // Server always renders the strip with view='summary' from
+      // the include site. If the streamer last chose 'log', force
+      // a one-time refetch so the buttons + content match.
+      if (stored === 'log' || stored === 'verbatim') {
+        document.body.dispatchEvent(new CustomEvent('transcript-view-changed'));
+      }
     })();
   </script>
 </div>
