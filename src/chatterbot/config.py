@@ -56,6 +56,15 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "whisper_llm_match_min_chunks",
     "whisper_llm_match_confidence",
     "whisper_auto_confirm_seconds",
+    "whisper_group_interval_seconds",
+    "whisper_group_min_chunks",
+    "thread_recap_interval_seconds",
+    "thread_recap_max_messages_per_thread",
+    "screenshot_interval_seconds",
+    "screenshot_max_age_hours",
+    "screenshot_jpeg_quality",
+    "screenshot_width",
+    "screenshot_grid_max",
 )
 
 # Subset that should be rendered as password inputs. Blank submissions for
@@ -202,6 +211,33 @@ class Settings(BaseSettings):
     # gone. 300 s (5 min) is the new default; raise if you want more
     # review time, lower if you want auto-pendings to disappear faster.
     whisper_auto_confirm_seconds: int = 300
+    # Transcript-group summariser: replaces the per-utterance live strip
+    # with one line per window. Set interval=0 to disable.
+    whisper_group_interval_seconds: int = 60
+    whisper_group_min_chunks: int = 2
+
+    # Topic-thread recap loop. Periodically summarises each active
+    # thread's recent messages into a 1-2 sentence observational line
+    # for the engagement-view "Live conversations" panel. Set
+    # interval=0 to disable.
+    thread_recap_interval_seconds: int = 300
+    thread_recap_max_messages_per_thread: int = 30
+
+    # OBS screenshot capture for transcript groups. When both whisper
+    # and OBS are enabled, captures the current program scene every
+    # `screenshot_interval_seconds`. Up to 4 screenshots from the
+    # group's time window are stitched into a 2x2 grid and passed to
+    # the LLM alongside the transcript text on each group summary —
+    # the model gets visual context too, not just audio. Set
+    # interval=0 to disable screenshot capture entirely.
+    screenshot_interval_seconds: int = 15
+    screenshot_max_age_hours: int = 24
+    screenshot_jpeg_quality: int = 60
+    screenshot_width: int = 480
+    # Maximum screenshots stitched into the per-group grid. 4 keeps a
+    # 2x2 layout that's still legible when a group's window contains
+    # many shots.
+    screenshot_grid_max: int = 4
 
     # Moderation mode — opt-in. When enabled, the bot batches recent
     # messages through a strict-rubric LLM classifier and persists
@@ -250,7 +286,11 @@ def _coerce(key: str, value: str) -> Any:
     if key in (
         "whisper_llm_match_interval_seconds", "whisper_llm_match_min_chunks",
         "whisper_auto_confirm_seconds",
+        "whisper_group_interval_seconds", "whisper_group_min_chunks",
+        "thread_recap_interval_seconds", "thread_recap_max_messages_per_thread",
         "youtube_min_poll_seconds", "youtube_max_poll_seconds",
+        "screenshot_interval_seconds", "screenshot_max_age_hours",
+        "screenshot_jpeg_quality", "screenshot_width", "screenshot_grid_max",
     ):
         try:
             return int(value)
@@ -259,8 +299,17 @@ def _coerce(key: str, value: str) -> Any:
                 "whisper_llm_match_interval_seconds": 90,
                 "whisper_llm_match_min_chunks": 3,
                 "whisper_auto_confirm_seconds": 300,
+                "whisper_group_interval_seconds": 60,
+                "whisper_group_min_chunks": 2,
+                "thread_recap_interval_seconds": 300,
+                "thread_recap_max_messages_per_thread": 30,
                 "youtube_min_poll_seconds": 10,
                 "youtube_max_poll_seconds": 30,
+                "screenshot_interval_seconds": 15,
+                "screenshot_max_age_hours": 24,
+                "screenshot_jpeg_quality": 60,
+                "screenshot_width": 480,
+                "screenshot_grid_max": 4,
             }[key]
     if key in (
         "streamelements_enabled", "mod_mode_enabled",

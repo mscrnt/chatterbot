@@ -215,3 +215,43 @@ class TranscriptMatchResponse(BaseModel):
     game commentary or thinking aloud, not chat-directed)."""
 
     matches: list[TranscriptMatch] = Field(default_factory=list, max_length=10)
+
+
+# ---- topic-thread recaps (batch summarisation, observational) ----
+
+ThreadRecapText = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=400, strip_whitespace=True),
+]
+
+
+class ThreadRecap(BaseModel):
+    """One recap for a single active topic thread. `thread_id` references
+    the integer key the prompt numbered the threads with. `recap` is a
+    1-2 sentence observational summary — what the chatters are actually
+    discussing — never a suggestion to the streamer."""
+
+    thread_id: int
+    recap: ThreadRecapText
+
+
+class ThreadRecapsResponse(BaseModel):
+    """Reply for the batched thread recap call. The model reads a
+    numbered list of active threads with their drivers + recent messages
+    and returns one recap per thread it can ground in the messages.
+    Empty / partial replies are fine — skip threads where the messages
+    are too noisy to summarise without inventing facts."""
+
+    recaps: list[ThreadRecap] = Field(default_factory=list, max_length=20)
+
+
+# ---- transcript group summaries ----
+
+
+class TranscriptGroupSummaryResponse(BaseModel):
+    """Reply for the per-window transcript grouper. Reads a contiguous
+    block of streamer utterances and returns a single 1-2 sentence
+    observational summary. Empty string means "nothing summarisable in
+    this window" — the grouper persists silently and skips."""
+
+    summary: str = Field(default="", max_length=400)

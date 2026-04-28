@@ -42,6 +42,10 @@ whisper = [
     # sounddevice doesn't expose loopback; soundcard does. Windows-only
     # in practice — the `--loopback` flag is a no-op elsewhere.
     "soundcard>=0.4.3",
+    # OBS scene screenshots stitched into a 2x2 grid and passed as a
+    # single image alongside the transcript text on each group summary
+    # — gives the multimodal LLM visual context too, not just audio.
+    "Pillow>=10.0.0",
 ]
 
 [project.scripts]

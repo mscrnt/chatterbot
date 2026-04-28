@@ -15,12 +15,10 @@
    server-side changes from other surfaces — and the scroll-preserve
    handlers above keep the viewport pinned across the full-body swap. #}
 
-  {# ---------------- Live transcript strip (whisper) ---------------- #}
-  {% if transcript_status and (transcript_status.enabled or transcript_chunks) %}
-    {% with chunks=transcript_chunks, service_status=transcript_status %}
-      {% include "partials/transcript_strip.html" %}
-    {% endwith %}
-  {% endif %}
+  {# Live transcript strip lives OUTSIDE this body now (rendered by
+     insights.html above #insights-body) so the 60 s outer-body
+     refresh can't reach it. The strip has its own ~30 s / 2 s ticker
+     and toggle UI that needs to survive across body re-renders. #}
 
   {# ---------------- Recent LLM transcript matches ---------------- #}
   {% if recent_matches %}
@@ -235,6 +233,9 @@
                 {% endif %}
                 <span class="text-[10px] text-muted ml-auto">{{ t.last_ts | short_ts }}</span>
               </div>
+              {% if t.recap %}
+                <p class="text-[12px] text-primary mt-1 leading-snug">{{ t.recap }}</p>
+              {% endif %}
               {% if t.drivers %}
                 <p class="text-[11px] text-muted mt-1 inline-flex items-center gap-1">
                   <i class="fa-solid fa-users text-[9px]"></i>
@@ -255,168 +256,14 @@
   </section>
   {% endif %}
 
-  {# ---------------- Active right now: talking points ---------------- #}
-  {% set _tp_now = (now_iso() if now_iso is defined else '') %}
-  <section class="space-y-2">
-    <header class="flex items-baseline justify-between gap-2">
-      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-        <i class="fa-solid fa-fire text-accent"></i> Active right now
-      </h2>
-      <span class="text-[11px] text-muted">
-        {% if talking_points_age_seconds is not none %}
-          refreshed {{ talking_points_age_seconds }}s ago
-        {% else %}
-          warming up…
-        {% endif %}
-      </span>
-    </header>
-
-    {% if talking_points_error %}
-      <p class="text-xs text-warning italic">
-        <i class="fa-solid fa-triangle-exclamation"></i>
-        couldn't generate talking points: {{ talking_points_error }}
-      </p>
-    {% elif not talking_points %}
-      {% with icon='fa-comments-slash',
-              heading='No active chatters right now',
-              body='As soon as people start talking, suggestions appear here.' %}
-        {% include "components/_empty_state.html" %}
-      {% endwith %}
-    {% else %}
-      {# Bucket by state. Pinned float to top; due-snoozes resurface
-         next; open follow; addressed sink to bottom; skipped hidden. #}
-      {% set _pinned_tps = [] %}
-      {% set _due_tps = [] %}
-      {% set _open_tps = [] %}
-      {% set _addr_tps = [] %}
-      {% for tp in talking_points %}
-        {% set _s = (tp_states.get(tp.item_key) if tp_states else None) %}
-        {% if not _s %}{% set _ = _open_tps.append((tp, _s)) %}
-        {% elif _s.state == 'pinned' %}{% set _ = _pinned_tps.append((tp, _s)) %}
-        {% elif _s.state == 'snoozed' and _s.due_ts and _s.due_ts <= now_iso() %}
-          {% set _ = _due_tps.append((tp, _s)) %}
-        {% elif _s.state == 'snoozed' %}
-          {# still snoozed, hide from main list — shown in subsection below #}
-        {% elif _s.state == 'addressed' %}{% set _ = _addr_tps.append((tp, _s)) %}
-        {% elif _s.state == 'skipped' %}{# hidden #}
-        {% else %}{% set _ = _open_tps.append((tp, _s)) %}
-        {% endif %}
-      {% endfor %}
-      {% set _pending_tps = [] %}
-      {% for tp in talking_points %}
-        {% set _s = (tp_states.get(tp.item_key) if tp_states else None) %}
-        {% if _s and _s.state == 'auto_pending' %}
-          {% set _ = _pending_tps.append((tp, _s)) %}
-        {% endif %}
-      {% endfor %}
-      {# Auto-pending lands at the very top so the streamer sees it
-         instantly; the rest follow the normal pinned → due → open order.
-         Addressed cards live in a collapsed <details> below — once the
-         streamer has spoken to them, they shouldn't crowd the active
-         feed any more. #}
-      {% set _ordered = _pending_tps + _pinned_tps + _due_tps + _open_tps %}
-      {% set _snoozed_tps = [] %}
-      {% for tp in talking_points %}
-        {% set _s = (tp_states.get(tp.item_key) if tp_states else None) %}
-        {% if _s and _s.state == 'snoozed' and _s.due_ts and _s.due_ts > now_iso() %}
-          {% set _ = _snoozed_tps.append((tp, _s)) %}
-        {% endif %}
-      {% endfor %}
-
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
-        {% for tp, _s in _ordered %}
-          {% set _is_pinned  = _s and _s.state == 'pinned' %}
-          {% set _is_due     = _s and _s.state == 'snoozed' and _s.due_ts and _s.due_ts <= now_iso() %}
-          {% set _is_addr    = _s and _s.state == 'addressed' %}
-          {% set _is_pending = _s and _s.state == 'auto_pending' %}
-          <div class="insight-card-root rounded-xl border bg-surface p-3 transition-all duration-150 ease-out
-                      {% if _is_pending %}border-warning ring-2 ring-warning/40
-                      {% elif _is_pinned %}border-accent ring-1 ring-accent/40
-                      {% elif _is_due %}border-warning ring-1 ring-warning/40
-                      {% elif _is_addr %}border-subtle opacity-50
-                      {% else %}border-subtle{% endif %}">
-            {% if (_is_pending or _is_addr) and _s and _s.note and _s.note.startswith('(auto)') %}
-              <div class="text-[11px] {% if _is_pending %}text-warning{% else %}text-muted{% endif %} mb-2 inline-flex items-start gap-1">
-                <i class="fa-solid fa-microphone-lines mt-0.5 text-[10px]"></i>
-                <span class="italic">{{ _s.note }}</span>
-              </div>
-            {% endif %}
-            <button type="button"
-                    class="text-left block w-full hover:opacity-80 transition-all duration-150 ease-out"
-                    hx-get="/modals/insight/talking_point/{{ tp.user_id }}?meta={{ tp.point | urlencode }}"
-                    hx-target="#modal-root"
-                    hx-swap="innerHTML"
-                    title="Open with chat context + LLM analysis">
-              <div class="flex items-center gap-2 mb-1 flex-wrap">
-                {% with name=tp.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
-                <span class="text-accent font-medium">{{ tp.name }}</span>
-                {% if _is_pending %}
-                  <span class="inline-flex items-center gap-1 px-1.5 text-[9px] uppercase tracking-wide rounded-full bg-warning/15 text-warning border border-warning/30 animate-pulse"><i class="fa-solid fa-microphone-lines text-[8px]"></i>auto</span>
-                {% endif %}
-                {% if _is_pinned %}
-                  <span class="inline-flex items-center gap-1 px-1.5 text-[9px] uppercase tracking-wide rounded-full bg-accent/15 text-accent border border-accent/30"><i class="fa-solid fa-thumbtack text-[8px]"></i>pinned</span>
-                {% endif %}
-                {% if _is_due %}
-                  <span class="inline-flex items-center gap-1 px-1.5 text-[9px] uppercase tracking-wide rounded-full bg-warning/15 text-warning border border-warning/30 animate-pulse"><i class="fa-solid fa-bell text-[8px]"></i>due now</span>
-                {% endif %}
-                <i class="fa-solid fa-chevron-right text-muted text-xs ml-auto"></i>
-              </div>
-              <p class="text-sm text-primary leading-snug">{{ tp.point }}</p>
-            </button>
-            <div class="mt-2 pt-2 border-t border-subtle">
-              {% with kind='talking_point', item_key=tp.item_key,
-                      state=(_s.state if _s else None) %}
-                {% include "components/_insight_actions.html" %}
-              {% endwith %}
-            </div>
-          </div>
-        {% endfor %}
-      </div>
-
-      {% if _snoozed_tps %}
-        <details class="text-xs text-muted mt-2">
-          <summary class="cursor-pointer inline-flex items-center gap-1 hover:text-primary">
-            <i class="fa-regular fa-clock"></i>
-            {{ _snoozed_tps | length }} snoozed — view
-          </summary>
-          <ul class="mt-2 space-y-1 ml-4">
-            {% for tp, _s in _snoozed_tps %}
-              <li class="flex items-baseline gap-2">
-                <span class="text-accent">{{ tp.name }}</span>
-                <span class="truncate">{{ tp.point | truncate(80) }}</span>
-                <span class="ml-auto text-[10px]">due {{ _s.due_ts | short_ts }}</span>
-              </li>
-            {% endfor %}
-          </ul>
-        </details>
-      {% endif %}
-
-      {# Addressed talking points — collapsed by default. Streamer
-         feedback: "when chatters are marked addressed, they need to be
-         hidden from the feed." Kept here as a review surface with undo
-         so they can roll one back without waiting for a full refresh. #}
-      {% if _addr_tps %}
-        <details class="text-xs text-muted mt-2">
-          <summary class="cursor-pointer inline-flex items-center gap-1 hover:text-primary">
-            <i class="fa-solid fa-check-double text-success"></i>
-            {{ _addr_tps | length }} addressed — view
-          </summary>
-          <ul class="mt-2 space-y-2 ml-4">
-            {% for tp, _s in _addr_tps %}
-              <li class="insight-card-root flex items-baseline gap-2 text-xs">
-                <span class="text-accent">{{ tp.name }}</span>
-                <span class="text-muted truncate flex-1">{{ tp.point | truncate(100) }}</span>
-                {% with kind='talking_point', item_key=tp.item_key,
-                        state=_s.state %}
-                  {% include "components/_insight_actions.html" %}
-                {% endwith %}
-              </li>
-            {% endfor %}
-          </ul>
-        </details>
-      {% endif %}
-    {% endif %}
-  </section>
+  {# Talking-points section removed per streamer feedback —
+     the LLM-generated per-chatter conversation hooks were
+     hallucinating facts (e.g. inventing an FF8 remake from one
+     mention). The talking-points cache is still kept warm in the
+     background because the transcript LLM matcher uses it as a
+     candidate pool for auto-pending; we just don't render the cards
+     here any more. The Live Conversations panel above + observational
+     thread recaps replace this surface. #}
 
   {# ---------------- Anniversaries today ---------------- #}
   {% if anniversaries %}

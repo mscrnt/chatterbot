@@ -1,12 +1,29 @@
-{# Live transcript strip — what whisper just heard the streamer say.
-   Each chunk shows match state: green check if auto-addressed an open
-   insight card, dot otherwise. Auto-refreshes every 4s while the
-   service is enabled. #}
+{# Live transcript strip — two view modes, toggled client-side and
+   persisted in localStorage so it sticks across reloads:
+
+     - summary — one LLM-summarised line per ~60 s window (default)
+     - log     — every raw whisper utterance, with match-similarity icon
+
+   The auto-refresh's hx-vals reads localStorage at fire time, so each
+   tick honors whichever mode the streamer most recently picked. The
+   buttons trigger a synthetic event the strip listens for, so a click
+   re-fetches immediately rather than waiting for the next tick.
+
+   The strip is rendered by insights.html OUTSIDE #insights-body so
+   the engagement view's 60 s body refresh never clobbers it.
+
+   Polling cadence: 30 s in summary mode, 5 s in full-log mode. Five
+   seconds is fast enough to feel near-real-time (whisper flushes
+   every 5 s anyway) AND slow enough that the pill toggles always
+   have a stable enough DOM for clicks to land cleanly. #}
+{% set _is_summary = view not in ("log", "verbatim") %}
+{% set _refresh_interval = "5s" if not _is_summary else "30s" %}
 <div id="transcript-strip"
-     hx-get="/transcript?limit=15&last_pending={{ pending_count or 0 }}"
-     {% if service_status.enabled %}hx-trigger="every 4s"{% endif %}
-     hx-swap="outerHTML"
-     class="rounded-xl border border-subtle bg-surface p-3">
+     class="rounded-xl border border-subtle bg-surface p-3"
+     hx-get="/transcript"
+     hx-vals='js:{ view: localStorage.getItem("chatterbot.transcriptView") || "summary", limit: 15, last_pending: {{ pending_count or 0 }} }'
+     {% if service_status.enabled %}hx-trigger="every {{ _refresh_interval }}, transcript-view-changed from:body"{% else %}hx-trigger="transcript-view-changed from:body"{% endif %}
+     hx-swap="outerHTML">
   <header class="flex items-baseline justify-between gap-2 mb-2">
     <h3 class="text-sm font-semibold text-primary inline-flex items-center gap-2">
       <i class="fa-solid fa-microphone text-accent"></i> Live transcript
@@ -20,21 +37,65 @@
         <span class="text-[10px] text-muted">{{ service_status.model }} · {{ service_status.card_embeds }} cards indexed</span>
       {% endif %}
     </h3>
-    {% if chunks %}
-      <span class="text-[10px] text-muted">{{ chunks | length }} recent</span>
-    {% endif %}
+    <div class="inline-flex items-center gap-1">
+      {% set _btn_base = 'tap inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] uppercase tracking-wider transition-all duration-150 ease-out' %}
+      <button type="button"
+              class="{{ _btn_base }} {% if _is_summary %}bg-accent/15 border-accent/40 text-primary{% else %}bg-surface border-subtle text-muted hover:bg-surface-raised{% endif %}"
+              onclick="localStorage.setItem('chatterbot.transcriptView','summary'); document.body.dispatchEvent(new CustomEvent('transcript-view-changed'));"
+              title="Show LLM summaries — one row per window">
+        <i class="fa-solid fa-microphone-lines text-[9px]"></i>summary
+      </button>
+      <button type="button"
+              class="{{ _btn_base }} {% if not _is_summary %}bg-accent/15 border-accent/40 text-primary{% else %}bg-surface border-subtle text-muted hover:bg-surface-raised{% endif %}"
+              onclick="localStorage.setItem('chatterbot.transcriptView','log'); document.body.dispatchEvent(new CustomEvent('transcript-view-changed'));"
+              title="Show every raw utterance — polls every 5 s for near-real-time updates">
+        <i class="fa-solid fa-list text-[9px]"></i>full log
+      </button>
+      {% if groups %}
+        <span class="text-[10px] text-muted ml-1">{{ groups | length }} recent</span>
+      {% elif chunks %}
+        <span class="text-[10px] text-muted ml-1">{{ chunks | length }} recent</span>
+      {% endif %}
+    </div>
   </header>
 
-  {% if not chunks %}
+  {# Shared row classes — keep summary + full-log visually identical
+     except for the lead-icon glyph and the trailing badge content.
+     Toggling modes should feel like a content swap, not a re-style. #}
+  {% set _row_btn = "w-full flex items-baseline gap-2 hover:bg-surface-raised/50 rounded px-1 py-1 text-left" %}
+  {% set _row_ts  = "text-[10px] text-muted whitespace-nowrap shrink-0 tabular-nums" %}
+  {% set _row_text = "text-primary leading-snug flex-1 break-words" %}
+  {% set _row_trail = "text-[10px] text-muted tabular-nums shrink-0" %}
+
+  {% if not groups and not chunks %}
     <p class="text-xs text-muted italic">
       Nothing heard yet. Drop
       <code class="text-accent">obs_scripts/chatterbot_audio_relay.py</code>
       into your OBS scripts folder to feed audio in.
     </p>
+  {% elif groups %}
+    {# Summary view — one LLM-summarised row per ~60 s window. #}
+    <ul class="space-y-1 text-sm">
+      {% for g in groups %}
+        <li>
+          <button type="button"
+                  class="{{ _row_btn }}"
+                  hx-get="/modals/transcript-group/{{ g.id }}"
+                  hx-target="#modal-root"
+                  hx-swap="innerHTML"
+                  title="Open with the underlying utterances + screenshots">
+            <span class="{{ _row_ts }}">{{ g.start_ts | short_ts }}</span>
+            <i class="fa-solid fa-microphone-lines text-muted text-[10px] shrink-0"></i>
+            <span class="{{ _row_text }}">{{ g.summary }}</span>
+            <span class="{{ _row_trail }}">
+              {{ g.last_chunk_id - g.first_chunk_id + 1 }} lines
+            </span>
+          </button>
+        </li>
+      {% endfor %}
+    </ul>
   {% else %}
-    {# Threshold the dashboard considers "auto-address". Hard-coded
-       here to match config; if you change WHISPER_MATCH_THRESHOLD the
-       icon colors here update on next render. #}
+    {# Full-log view — every raw whisper utterance, sim-icon lead. #}
     {% set _thr = 0.55 %}
     <ul class="space-y-1 text-sm">
       {% for c in chunks %}
@@ -43,24 +104,26 @@
         {% set _close = _sim is not none and _sim >= 0.30 and not _hit %}
         <li>
           <button type="button"
-                  class="w-full flex items-baseline gap-2 hover:bg-surface-raised/50 rounded px-1 py-0.5 text-left"
+                  class="{{ _row_btn }}"
                   hx-get="/modals/transcript/{{ c.id }}"
                   hx-target="#modal-root"
                   hx-swap="innerHTML"
                   title="Open with surrounding context + matched card">
-            <span class="text-[10px] text-muted whitespace-nowrap shrink-0">{{ c.ts | short_ts }}</span>
+            <span class="{{ _row_ts }}">{{ c.ts | short_ts }}</span>
             {% if _hit %}
               <i class="fa-solid fa-check-circle text-success text-[10px] shrink-0"></i>
             {% elif _close %}
               <i class="fa-solid fa-circle-notch text-warning text-[10px] shrink-0"></i>
             {% elif _sim is not none %}
-              <i class="fa-solid fa-circle text-muted text-[8px] shrink-0"></i>
+              <i class="fa-solid fa-circle text-muted text-[10px] shrink-0"></i>
             {% else %}
-              <i class="fa-solid fa-circle text-subtle text-[6px] shrink-0"></i>
+              <i class="fa-solid fa-circle text-subtle text-[10px] shrink-0"></i>
             {% endif %}
-            <span class="text-primary break-words flex-1 leading-snug">{{ c.text }}</span>
+            <span class="{{ _row_text }}">{{ c.text }}</span>
             {% if _sim is not none %}
-              <span class="text-[10px] text-muted tabular-nums shrink-0">{{ '%.2f'|format(_sim) }}</span>
+              <span class="{{ _row_trail }}">{{ '%.2f'|format(_sim) }}</span>
+            {% else %}
+              <span class="{{ _row_trail }}">—</span>
             {% endif %}
           </button>
         </li>

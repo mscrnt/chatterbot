@@ -39,6 +39,52 @@ _ALNUM_RE = re.compile(r"[^a-z0-9]+")
 _TRAIL_DIGITS_RE = re.compile(r"\d+$")
 
 
+def _stitch_grid(image_paths: list[str], max_size: tuple[int, int] = (960, 540)) -> bytes | None:
+    """Stitch up to 4 JPEGs into a 2x2 grid (or 1x1 / 1x2 for fewer).
+    Returns JPEG bytes ready to base64-encode for the multimodal LLM
+    call. Returns None if no images load — not an error, just "skip
+    the image attachment for this group."
+
+    Lazy-imports Pillow so the dashboard boots fine without it (the
+    feature is opt-in via screenshot_interval_seconds > 0)."""
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.warning(
+            "transcript: Pillow not installed — skipping screenshot grid. "
+            "Run `uv sync --extra whisper` to enable."
+        )
+        return None
+    paths = [p for p in image_paths if p]
+    if not paths:
+        return None
+    n = min(4, len(paths))
+    if n == 1:
+        cols, rows = 1, 1
+    elif n == 2:
+        cols, rows = 2, 1
+    else:  # 3 or 4 — always 2x2 with last cell blank if N=3
+        cols, rows = 2, 2
+    cell_w = max_size[0] // cols
+    cell_h = max_size[1] // rows
+    canvas = Image.new("RGB", (cell_w * cols, cell_h * rows), (10, 10, 14))
+    for i, path in enumerate(paths[:n]):
+        try:
+            im = Image.open(path).convert("RGB")
+        except Exception:
+            continue
+        im.thumbnail((cell_w, cell_h))
+        col = i % cols
+        row = i // cols
+        x = col * cell_w + (cell_w - im.width) // 2
+        y = row * cell_h + (cell_h - im.height) // 2
+        canvas.paste(im, (x, y))
+    import io as _io
+    buf = _io.BytesIO()
+    canvas.save(buf, format="JPEG", quality=70, optimize=True)
+    return buf.getvalue()
+
+
 def _utterance_mentions_chatter(utterance: str, names: list[str]) -> bool:
     """Heuristic: did the streamer name the chatter in this utterance?
 
@@ -104,10 +150,12 @@ class TranscriptService:
 
     def __init__(
         self, repo: ChatterRepo, llm: OllamaClient, settings: Settings,
+        *, obs=None,
     ):
         self.repo = repo
         self.llm = llm
         self.settings = settings
+        self.obs = obs  # OBSStatusService — used for screenshot capture
         self._buffer = _IngestBuffer()
         self._lock = asyncio.Lock()
         self._model = None  # lazy-loaded WhisperModel
@@ -717,6 +765,384 @@ When in doubt, return NO match. Empty `matches` list is the expected, common out
                 raise
             except Exception:
                 logger.exception("transcript: llm_match_loop iteration failed")
+
+    # =========================================================
+    # Transcript group summariser — replaces the per-utterance
+    # live strip. Every N seconds, take new chunks and emit one
+    # 1-2 sentence observational line for the group.
+    # =========================================================
+
+    GROUP_SUMMARY_NUM_CTX = 8192
+    GROUP_SUMMARY_TRUNCATE_PER_CHUNK = 200
+
+    GROUP_SUMMARY_SYSTEM = """You're labeling a window of streamer voice transcripts on a Twitch dashboard, with an attached screenshot grid showing what was on the streamer's OBS scene during that same window.
+
+Write ONE 1-2 sentence OBSERVATIONAL summary that combines BOTH sources:
+  - what the streamer SAID (the utterances), and
+  - what was VISIBLE on screen (the screenshot grid — gameplay HUD, cam shot, on-screen text, scene name, characters, or whatever the scene contains).
+
+The screenshots are ground truth — you may describe what's in them as confidently as the utterances. Together they're complementary; "the streamer reacts to a boss fight in [game]" is more useful than just "the streamer reacts to something."
+
+HARD RULES:
+- Pure description. Don't tell the streamer anything ("you should…", advice).
+- Stay grounded — don't invent products, events, plot points, or characters that aren't visible/audible. If the gameplay shows a generic menu or cam, just say so.
+- Skip filler: if both the utterances AND the image are uninformative (one-word reactions, blank scene, etc.), return an empty `summary` string.
+
+Reply with `summary` = the line (or empty string).
+"""
+
+    async def transcript_group_loop(self) -> None:
+        """Background task: every `whisper_group_interval_seconds`,
+        pull new chunks since the last group's watermark and write one
+        LLM-summarised group row. No-op when disabled or whisper off."""
+        await asyncio.sleep(20)
+        while True:
+            try:
+                interval = max(15, int(getattr(
+                    self.settings, "whisper_group_interval_seconds", 60,
+                )))
+                if interval <= 0:
+                    return
+                await asyncio.sleep(interval)
+                if not self.enabled:
+                    continue
+                await self._run_group_summary()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("transcript: group_loop iteration failed")
+
+    async def _run_group_summary(self) -> int:
+        """One pass — pull all chunks > last group's last_chunk_id,
+        summarise, persist. Returns number of groups created (0 or 1)."""
+        watermark = await asyncio.to_thread(
+            self.repo.latest_transcript_group_last_chunk_id
+        )
+        chunks = await asyncio.to_thread(
+            self.repo.list_transcripts_after_id, watermark, limit=400,
+        )
+        min_chunks = max(1, int(getattr(
+            self.settings, "whisper_group_min_chunks", 2,
+        )))
+        if len(chunks) < min_chunks:
+            return 0
+
+        # Build the prompt — clip each utterance defensively.
+        lines = [
+            f"  [{c.ts[11:16] if len(c.ts) >= 16 else c.ts}] "
+            f"{c.text[:self.GROUP_SUMMARY_TRUNCATE_PER_CHUNK]}"
+            for c in chunks
+        ]
+
+        # Pull screenshots in this window's time range and stitch up to
+        # `screenshot_grid_max` into a 2x2 grid. The multimodal LLM gets
+        # this image alongside the transcript text — visual context for
+        # the audio. No screenshots? Pure text call as before.
+        grid_b64 = None
+        screenshot_count = 0
+        try:
+            shots = await asyncio.to_thread(
+                self.repo.screenshots_in_range,
+                chunks[0].ts, chunks[-1].ts,
+                max_count=int(getattr(self.settings, "screenshot_grid_max", 4)),
+            )
+        except Exception:
+            logger.exception("transcript: screenshots_in_range failed")
+            shots = []
+        if shots:
+            from pathlib import Path
+            data_dir = Path(self.settings.db_path).parent
+            abs_paths = [str(data_dir / s.path) for s in shots]
+            try:
+                grid_bytes = await asyncio.to_thread(_stitch_grid, abs_paths)
+            except Exception:
+                logger.exception("transcript: stitch_grid failed")
+                grid_bytes = None
+            if grid_bytes:
+                import base64 as _b64
+                grid_b64 = _b64.b64encode(grid_bytes).decode("ascii")
+                screenshot_count = len(shots)
+
+        image_note = (
+            f"\n\nThe attached image is a {screenshot_count}-cell grid of "
+            "OBS scene screenshots from this same window, oldest top-left, "
+            "newest bottom-right. Treat what's in the image as ground truth: "
+            "describe what's visible (game / scene / characters / on-screen "
+            "text / cam) alongside what the streamer said."
+        ) if screenshot_count else ""
+
+        prompt = (
+            f"STREAMER UTTERANCES ({len(chunks)} lines, "
+            f"oldest first):\n"
+            + "\n".join(lines)
+            + image_note
+            + "\n\nReturn ONE observational `summary` line, or empty "
+            "string if there's nothing coherent to summarise."
+        )
+
+        try:
+            from .llm.schemas import TranscriptGroupSummaryResponse
+            response = await self.llm.generate_structured(
+                prompt=prompt,
+                system_prompt=self.GROUP_SUMMARY_SYSTEM,
+                response_model=TranscriptGroupSummaryResponse,
+                num_ctx=self.GROUP_SUMMARY_NUM_CTX,
+                images=[grid_b64] if grid_b64 else None,
+            )
+        except Exception:
+            logger.exception("transcript: group summary call failed")
+            return 0
+
+        summary = (response.summary or "").strip()
+        if not summary:
+            # The LLM said this window had nothing summarisable. Still
+            # advance the watermark by inserting an empty group? No —
+            # that pollutes the strip with empty rows. Just don't emit
+            # anything; the watermark stays where it was, and the next
+            # pass will retry with the same chunks plus more — by then
+            # there may be enough signal to summarise.
+            logger.info(
+                "transcript: group skipped (LLM returned empty) — %d chunks",
+                len(chunks),
+            )
+            # If chunks are growing without bound (LLM consistently empty),
+            # eventually we need to advance to avoid retrying forever.
+            # Force advance after 5x the threshold.
+            if len(chunks) >= 5 * min_chunks:
+                logger.info(
+                    "transcript: force-advancing watermark — %d chunks "
+                    "without summary", len(chunks),
+                )
+                await asyncio.to_thread(
+                    self.repo.add_transcript_group,
+                    start_ts=chunks[0].ts, end_ts=chunks[-1].ts,
+                    first_chunk_id=chunks[0].id, last_chunk_id=chunks[-1].id,
+                    # Use the repo's sentinel so list_transcript_groups
+                    # filters this row out of the live strip by default.
+                    # The row exists only to advance the watermark.
+                    summary=self.repo.PLACEHOLDER_GROUP_SUMMARY,
+                )
+                return 1
+            return 0
+
+        await asyncio.to_thread(
+            self.repo.add_transcript_group,
+            start_ts=chunks[0].ts, end_ts=chunks[-1].ts,
+            first_chunk_id=chunks[0].id, last_chunk_id=chunks[-1].id,
+            summary=summary,
+        )
+        logger.info(
+            "transcript: group written — %d chunks (id %d → %d): %r",
+            len(chunks), chunks[0].id, chunks[-1].id, summary[:80],
+        )
+        return 1
+
+    # =========================================================
+    # OBS screenshot capture — runs every N seconds while whisper +
+    # OBS are both enabled. Stored as JPEGs on disk so the per-group
+    # render can pick up to N evenly spaced frames from the window
+    # and stitch them into a grid for the multimodal LLM call.
+    # =========================================================
+
+    # Prune cadence is wall-clock based (60 min) so it fires even when
+    # the loop is idle (whisper off, OBS down, etc.). Old files from
+    # prior streams shouldn't sit around just because nothing's being
+    # captured right now.
+    SCREENSHOT_PRUNE_INTERVAL_SECONDS = 3600
+
+    def _screenshot_dir(self):
+        from pathlib import Path
+        return Path(self.settings.db_path).parent / "transcript_screenshots"
+
+    async def screenshot_loop(self) -> None:
+        """Background task: every `screenshot_interval_seconds` capture
+        the current OBS program scene and write to disk + DB. Periodic
+        pruning trims rows + files older than `screenshot_max_age_hours`
+        to keep disk usage bounded.
+
+        Gating: whisper enabled + OBS enabled + OBS reachable. We do
+        NOT gate on streaming/recording state — the streamer might
+        capture audio (and want paired screenshots) without OBS's
+        output pipeline being live (testing, local recording with the
+        recording output off, second-monitor preview, etc.).
+        """
+        await asyncio.sleep(20)  # wait for boot to settle
+        if self.obs is None:
+            logger.info("transcript: screenshot_loop disabled — no OBS handle")
+            return
+        passes = 0
+        skipped_disabled = 0
+        skipped_disconnected = 0
+        last_prune_at = 0.0
+        from pathlib import Path
+        shot_dir = self._screenshot_dir()
+        shot_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "transcript: screenshot_loop starting (interval=%ds, dir=%s)",
+            int(getattr(self.settings, "screenshot_interval_seconds", 15)),
+            shot_dir,
+        )
+        # Startup prune — handles old files from prior runs that aged
+        # out while the dashboard was down, plus any orphaned files
+        # whose DB rows got cleared between sessions.
+        try:
+            await self._prune_screenshots()
+            last_prune_at = time.time()
+        except Exception:
+            logger.exception("transcript: startup prune failed")
+        while True:
+            try:
+                interval = max(5, int(getattr(
+                    self.settings, "screenshot_interval_seconds", 15,
+                )))
+                if interval <= 0:
+                    return
+                await asyncio.sleep(interval)
+                # Wall-clock pruning fires regardless of whether we're
+                # capturing, so old files from prior streams don't sit
+                # around while the streamer is offline.
+                if time.time() - last_prune_at >= self.SCREENSHOT_PRUNE_INTERVAL_SECONDS:
+                    try:
+                        await self._prune_screenshots()
+                    except Exception:
+                        logger.exception("transcript: scheduled prune failed")
+                    last_prune_at = time.time()
+                if not self.enabled:
+                    skipped_disabled += 1
+                    if skipped_disabled in (1, 60):
+                        logger.info(
+                            "transcript: screenshot_loop idle — whisper disabled "
+                            "(skipped %d cycles)", skipped_disabled,
+                        )
+                    continue
+                if not getattr(self.settings, "obs_enabled", False):
+                    skipped_disabled += 1
+                    if skipped_disabled in (1, 60):
+                        logger.info(
+                            "transcript: screenshot_loop idle — obs disabled "
+                            "(skipped %d cycles)", skipped_disabled,
+                        )
+                    continue
+                obs_status = getattr(self.obs, "status", None)
+                if obs_status is not None and not obs_status.connected:
+                    skipped_disconnected += 1
+                    if skipped_disconnected in (1, 60):
+                        logger.info(
+                            "transcript: screenshot_loop waiting — OBS not "
+                            "connected (skipped %d cycles)", skipped_disconnected,
+                        )
+                    continue
+                # Reset the skip counters once we're actively capturing.
+                skipped_disabled = skipped_disconnected = 0
+                shot = await asyncio.to_thread(
+                    self.obs.take_screenshot_sync,
+                    image_format="jpg",
+                    width=int(getattr(self.settings, "screenshot_width", 480)),
+                    quality=int(getattr(self.settings, "screenshot_jpeg_quality", 60)),
+                )
+                if shot is None:
+                    if passes == 0:
+                        logger.warning(
+                            "transcript: take_screenshot_sync returned None — "
+                            "OBS up but screenshot call failed (check OBS "
+                            "WebSocket logs)"
+                        )
+                    continue
+                image_bytes, scene_name = shot
+                from datetime import datetime as _dt2, timezone as _tz2
+                ts = _dt2.now(_tz2.utc).isoformat(timespec="seconds")
+                fname = ts.replace(":", "-").replace("+", "_") + ".jpg"
+                fpath = shot_dir / fname
+                try:
+                    fpath.write_bytes(image_bytes)
+                except OSError:
+                    logger.exception("transcript: write screenshot failed")
+                    continue
+                rel_path = f"transcript_screenshots/{fname}"
+                await asyncio.to_thread(
+                    self.repo.add_transcript_screenshot,
+                    ts=ts, path=rel_path, scene_name=scene_name,
+                )
+                passes += 1
+                if passes in (1, 5, 30, 100) or passes % 240 == 0:
+                    logger.info(
+                        "transcript: screenshot #%d saved (scene=%r, %d KB)",
+                        passes, scene_name, len(image_bytes) // 1024,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("transcript: screenshot_loop iteration failed")
+
+    async def _prune_screenshots(self) -> None:
+        """Delete DB rows + JPEG files older than the configured TTL,
+        then sweep the screenshot dir for any files no longer
+        referenced in the DB (orphans from manual DB clears, crashes
+        between insert and write, container migrations, etc.)."""
+        max_age_h = max(1, int(getattr(
+            self.settings, "screenshot_max_age_hours", 24,
+        )))
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        cutoff = (_dt.now(_tz.utc) - _td(hours=max_age_h)).isoformat(timespec="seconds")
+
+        # Step 1 — age-based delete: drops DB rows and returns the
+        # paths so we can unlink the files.
+        try:
+            paths = await asyncio.to_thread(
+                self.repo.delete_screenshots_older_than, cutoff,
+            )
+        except Exception:
+            logger.exception("transcript: screenshot prune DB step failed")
+            return
+        from pathlib import Path
+        data_dir = Path(self.settings.db_path).parent
+        aged_deleted = 0
+        for rel in paths:
+            try:
+                p = data_dir / rel
+                if p.exists():
+                    p.unlink()
+                    aged_deleted += 1
+            except OSError:
+                pass
+
+        # Step 2 — orphan sweep: find files in the screenshot dir
+        # whose paths aren't referenced in the DB any more, and
+        # remove them. Use a set for O(1) membership.
+        shot_dir = self._screenshot_dir()
+        orphan_deleted = 0
+        if shot_dir.exists():
+            try:
+                referenced_paths = await asyncio.to_thread(
+                    self._list_referenced_screenshot_paths,
+                )
+                referenced = {Path(rel).name for rel in referenced_paths}
+                for f in shot_dir.iterdir():
+                    if not f.is_file():
+                        continue
+                    if f.name in referenced:
+                        continue
+                    try:
+                        f.unlink()
+                        orphan_deleted += 1
+                    except OSError:
+                        pass
+            except Exception:
+                logger.exception("transcript: orphan screenshot sweep failed")
+
+        if aged_deleted or orphan_deleted:
+            logger.info(
+                "transcript: pruned %d aged + %d orphan screenshots "
+                "(TTL %dh)",
+                aged_deleted, orphan_deleted, max_age_h,
+            )
+
+    def _list_referenced_screenshot_paths(self) -> list[str]:
+        """Synchronous helper for the orphan sweep — returns every path
+        currently referenced in the transcript_screenshots table."""
+        with self.repo._cursor() as cur:
+            cur.execute("SELECT path FROM transcript_screenshots")
+            return [r["path"] for r in cur.fetchall()]
 
     AUTO_CONFIRM_INTERVAL = 15
 

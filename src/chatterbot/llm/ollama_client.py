@@ -48,6 +48,7 @@ class OllamaClient:
         format_schema: dict[str, Any] | None = None,
         model_override: str | None = None,
         num_ctx: int | None = None,
+        images: list[str] | None = None,
     ) -> str:
         """Low-level generate. Returns raw response string.
 
@@ -56,8 +57,13 @@ class OllamaClient:
 
         `num_ctx` overrides Ollama's per-call context window. Ollama defaults
         to 2048 tokens which is fine for short prompts; bump for long bundles
-        (transcript windows, large summaries). Qwen 2.5 family supports up
-        to 131072 at the model level.
+        (transcript windows, large summaries). Qwen 2.5/3.5 family supports
+        up to 131072+ at the model level.
+
+        `images` is a list of base64-encoded image strings (no `data:` URI
+        prefix — just the b64 payload). Multimodal models (Qwen3.5-9B has
+        a vision encoder) consume them alongside the prompt. Non-vision
+        models silently ignore the field.
         """
         payload: dict[str, Any] = {
             "model": model_override or self.model,
@@ -72,6 +78,8 @@ class OllamaClient:
             payload["format"] = format_schema
         if num_ctx is not None:
             payload["options"] = {"num_ctx": int(num_ctx)}
+        if images:
+            payload["images"] = list(images)
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(f"{self.base_url}/api/generate", json=payload)
@@ -86,6 +94,7 @@ class OllamaClient:
         system_prompt: str | None = None,
         model_override: str | None = None,
         num_ctx: int | None = None,
+        images: list[str] | None = None,
     ) -> T:
         """Run a generation that returns a validated `response_model` instance.
 
@@ -101,6 +110,7 @@ class OllamaClient:
             format_schema=schema,
             model_override=model_override,
             num_ctx=num_ctx,
+            images=images,
         )
         return response_model.model_validate_json(raw)
 

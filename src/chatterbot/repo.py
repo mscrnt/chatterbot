@@ -127,6 +127,31 @@ class TranscriptChunk:
 
 
 @dataclass
+class TranscriptScreenshot:
+    """One JPEG captured from OBS at `ts`. Path is relative to
+    `Settings.db_path`'s parent directory."""
+    id: int
+    ts: str
+    path: str
+    scene_name: str | None
+
+
+@dataclass
+class TranscriptGroup:
+    """A window of consecutive whisper utterances summarised by the LLM
+    into a single observational line. Replaces per-utterance lines in the
+    live transcript strip — less distracting, more skimmable."""
+
+    id: int
+    start_ts: str
+    end_ts: str
+    first_chunk_id: int
+    last_chunk_id: int
+    summary: str
+    created_at: str
+
+
+@dataclass
 class StreamRecap:
     id: int
     started_at: str
@@ -258,6 +283,8 @@ class TopicThread:
     member_count: int
     status: str          # 'active' | 'dormant' | 'archived'
     category: str | None # latest member's category if any (Phase 4 tags)
+    recap: str | None = None              # LLM-generated 1-2 sentence summary
+    recap_updated_at: str | None = None
 
 
 @dataclass
@@ -552,10 +579,21 @@ class ChatterRepo:
                     first_ts  TEXT NOT NULL,
                     last_ts   TEXT NOT NULL,
                     category  TEXT,
-                    embedding BLOB
+                    embedding BLOB,
+                    recap     TEXT,
+                    recap_updated_at TEXT
                 )
                 """
             )
+            # Migrate older DBs that pre-date the recap columns.
+            cur.execute("PRAGMA table_info(topic_threads)")
+            _cols = {r["name"] for r in cur.fetchall()}
+            if "recap" not in _cols:
+                cur.execute("ALTER TABLE topic_threads ADD COLUMN recap TEXT")
+            if "recap_updated_at" not in _cols:
+                cur.execute(
+                    "ALTER TABLE topic_threads ADD COLUMN recap_updated_at TEXT"
+                )
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS topic_thread_members (
@@ -724,6 +762,47 @@ class ChatterRepo:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_transcript_ts "
                 "ON transcript_chunks(ts)"
+            )
+            # Per-window LLM-summarized groups of transcript chunks.
+            # Replaces the per-utterance live strip on the dashboard
+            # with a less distracting "summary every N seconds" view.
+            # The grouper service writes one row per pass.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS transcript_groups (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    start_ts        TEXT NOT NULL,
+                    end_ts          TEXT NOT NULL,
+                    first_chunk_id  INTEGER NOT NULL,
+                    last_chunk_id   INTEGER NOT NULL,
+                    summary         TEXT NOT NULL,
+                    created_at      TEXT NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_transcript_groups_end "
+                "ON transcript_groups(end_ts)"
+            )
+            # OBS screenshots paired with transcript chunks, captured by
+            # the screenshot loop every N seconds while whisper + OBS
+            # are both active. Each transcript group queries this table
+            # by ts range and shows up to 4 evenly-spaced screenshots
+            # so the streamer can scrub the visual context that went
+            # with what they were saying.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS transcript_screenshots (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts          TEXT NOT NULL,
+                    path        TEXT NOT NULL,
+                    scene_name  TEXT
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_transcript_screenshots_ts "
+                "ON transcript_screenshots(ts)"
             )
             # Vector index over transcript chunk embeddings — drives the
             # bidirectional link: a chat message can find the recent
@@ -2028,6 +2107,188 @@ class ChatterRepo:
             similarity=float(r["similarity"]) if r["similarity"] is not None else None,
         )
         return chunk, cosine_sim
+
+    # ---- transcript groups (LLM-summarized windows) --------------------
+
+    def add_transcript_group(
+        self, *, start_ts: str, end_ts: str,
+        first_chunk_id: int, last_chunk_id: int, summary: str,
+    ) -> int:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO transcript_groups(
+                    start_ts, end_ts, first_chunk_id, last_chunk_id,
+                    summary, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (start_ts, end_ts, int(first_chunk_id), int(last_chunk_id),
+                 summary.strip(), _now_iso()),
+            )
+            return int(cur.lastrowid)
+
+    # Sentinel summary text the grouper writes when the LLM gave up on
+    # a window but the watermark still needs to advance. Filtered out
+    # of the strip render by default so they don't crowd the view.
+    PLACEHOLDER_GROUP_SUMMARY = "(no coherent summary available)"
+
+    def list_transcript_groups(
+        self, *, limit: int = 15, include_placeholders: bool = False,
+    ) -> list[TranscriptGroup]:
+        """Recent groups, newest first. Drives the live transcript strip.
+        Placeholder rows (the LLM gave up but we needed to advance the
+        watermark) are hidden by default — they exist for the system,
+        not for the streamer."""
+        if include_placeholders:
+            sql = (
+                "SELECT id, start_ts, end_ts, first_chunk_id, last_chunk_id, "
+                "       summary, created_at "
+                "FROM transcript_groups ORDER BY id DESC LIMIT ?"
+            )
+            params: tuple = (int(limit),)
+        else:
+            sql = (
+                "SELECT id, start_ts, end_ts, first_chunk_id, last_chunk_id, "
+                "       summary, created_at "
+                "FROM transcript_groups "
+                "WHERE summary IS NOT NULL AND summary != '' AND summary != ? "
+                "ORDER BY id DESC LIMIT ?"
+            )
+            params = (self.PLACEHOLDER_GROUP_SUMMARY, int(limit))
+        with self._cursor() as cur:
+            cur.execute(sql, params)
+            return [
+                TranscriptGroup(
+                    id=int(r["id"]), start_ts=r["start_ts"], end_ts=r["end_ts"],
+                    first_chunk_id=int(r["first_chunk_id"]),
+                    last_chunk_id=int(r["last_chunk_id"]),
+                    summary=r["summary"], created_at=r["created_at"],
+                )
+                for r in cur.fetchall()
+            ]
+
+    def get_transcript_group(self, group_id: int) -> TranscriptGroup | None:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, start_ts, end_ts, first_chunk_id, last_chunk_id,
+                       summary, created_at
+                FROM transcript_groups WHERE id = ?
+                """,
+                (int(group_id),),
+            )
+            r = cur.fetchone()
+            if not r:
+                return None
+            return TranscriptGroup(
+                id=int(r["id"]), start_ts=r["start_ts"], end_ts=r["end_ts"],
+                first_chunk_id=int(r["first_chunk_id"]),
+                last_chunk_id=int(r["last_chunk_id"]),
+                summary=r["summary"], created_at=r["created_at"],
+            )
+
+    def latest_transcript_group_last_chunk_id(self) -> int:
+        """Watermark for the grouper loop — returns the largest chunk id
+        already grouped, or 0 if no groups yet."""
+        with self._cursor() as cur:
+            r = cur.execute(
+                "SELECT COALESCE(MAX(last_chunk_id), 0) AS x FROM transcript_groups"
+            ).fetchone()
+            return int(r["x"]) if r else 0
+
+    # ---- transcript screenshots -----------------------------------------
+
+    def add_transcript_screenshot(
+        self, *, ts: str, path: str, scene_name: str | None,
+    ) -> int:
+        with self._cursor() as cur:
+            cur.execute(
+                "INSERT INTO transcript_screenshots(ts, path, scene_name) "
+                "VALUES (?, ?, ?)",
+                (ts, path, scene_name),
+            )
+            return int(cur.lastrowid)
+
+    def screenshots_in_range(
+        self, start_ts: str, end_ts: str, *, max_count: int = 4,
+    ) -> list[TranscriptScreenshot]:
+        """All screenshots between [start_ts, end_ts] inclusive, picked
+        evenly so we never blow past `max_count`. Comparison is done via
+        `datetime()` so the trailing `+00:00` on stored ISO timestamps
+        doesn't break against SQLite's space-separated `datetime('now')`
+        outputs."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, ts, path, scene_name
+                FROM transcript_screenshots
+                WHERE datetime(ts) >= datetime(?)
+                  AND datetime(ts) <= datetime(?)
+                ORDER BY ts ASC
+                """,
+                (start_ts, end_ts),
+            )
+            rows = [
+                TranscriptScreenshot(
+                    id=int(r["id"]), ts=r["ts"], path=r["path"],
+                    scene_name=r["scene_name"],
+                )
+                for r in cur.fetchall()
+            ]
+        if len(rows) <= max_count:
+            return rows
+        # Evenly spaced subsample: indices 0 and N-1 always present so
+        # the strip captures the start + end of the window.
+        n = len(rows)
+        k = max(1, int(max_count))
+        idx_set = {0, n - 1}
+        if k > 2:
+            for i in range(1, k - 1):
+                idx_set.add(int(round(i * (n - 1) / (k - 1))))
+        return [rows[i] for i in sorted(idx_set)][:k]
+
+    def delete_screenshots_older_than(self, cutoff_iso: str) -> list[str]:
+        """Delete rows older than `cutoff_iso` and return the file paths
+        that should now be removed from disk. Caller does the unlink so
+        we don't mix DB and FS concerns inside the cursor lock."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT path FROM transcript_screenshots WHERE datetime(ts) < datetime(?)",
+                (cutoff_iso,),
+            )
+            paths = [r["path"] for r in cur.fetchall()]
+            cur.execute(
+                "DELETE FROM transcript_screenshots WHERE datetime(ts) < datetime(?)",
+                (cutoff_iso,),
+            )
+        return paths
+
+    def transcript_chunks_in_id_range(
+        self, first_id: int, last_id: int,
+    ) -> list[TranscriptChunk]:
+        """Pull chunks by inclusive id range — used by the group-detail
+        modal to expand a summary back to its underlying utterances."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, ts, duration_ms, text,
+                       matched_kind, matched_item_key, similarity
+                FROM transcript_chunks
+                WHERE id >= ? AND id <= ? ORDER BY id ASC
+                """,
+                (int(first_id), int(last_id)),
+            )
+            return [
+                TranscriptChunk(
+                    id=int(r["id"]), ts=r["ts"],
+                    duration_ms=int(r["duration_ms"] or 0),
+                    text=r["text"],
+                    matched_kind=r["matched_kind"],
+                    matched_item_key=r["matched_item_key"],
+                    similarity=float(r["similarity"]) if r["similarity"] is not None else None,
+                )
+                for r in cur.fetchall()
+            ]
 
     def list_transcripts_after_id(
         self, after_id: int, *, limit: int = 200,
@@ -4083,6 +4344,7 @@ class ChatterRepo:
             cur.execute(
                 f"""
                 SELECT t.id, t.title, t.first_ts, t.last_ts, t.category,
+                       t.recap, t.recap_updated_at,
                        (SELECT COUNT(*) FROM topic_thread_members m WHERE m.thread_id = t.id) AS mc,
                        {self._STATUS_CASE} AS status
                 FROM topic_threads t
@@ -4108,6 +4370,8 @@ class ChatterRepo:
                     member_count=int(r["mc"]),
                     status=r["status"],
                     category=r["category"],
+                    recap=r["recap"],
+                    recap_updated_at=r["recap_updated_at"],
                 )
             )
         return out
@@ -4164,6 +4428,7 @@ class ChatterRepo:
             cur.execute(
                 f"""
                 SELECT t.id, t.title, t.first_ts, t.last_ts, t.category,
+                       t.recap, t.recap_updated_at,
                        (SELECT COUNT(*) FROM topic_thread_members m WHERE m.thread_id = t.id) AS mc,
                        {self._STATUS_CASE} AS status
                 FROM topic_threads t
@@ -4185,6 +4450,8 @@ class ChatterRepo:
             member_count=int(row["mc"]),
             status=row["status"],
             category=row["category"],
+            recap=row["recap"],
+            recap_updated_at=row["recap_updated_at"],
         )
 
     def get_thread_members(self, thread_id: int) -> list[TopicThreadMember]:
@@ -4214,6 +4481,17 @@ class ChatterRepo:
                     )
                 )
             return out
+
+    def set_thread_recap(self, thread_id: int, recap: str) -> None:
+        """Persist the LLM-generated thread recap. The InsightsService
+        recap loop calls this after batch-generating recaps for active
+        threads."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE topic_threads SET recap = ?, recap_updated_at = ? "
+                "WHERE id = ?",
+                (recap.strip() or None, _now_iso(), int(thread_id)),
+            )
 
     def get_thread_messages(
         self, thread_id: int, limit: int = 200

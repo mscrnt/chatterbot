@@ -193,3 +193,137 @@ class InsightsService:
                 "insights refreshed: %d active, %d talking points",
                 len(active), len(entries),
             )
+
+    # =========================================================
+    # Thread recap loop — observational summaries for the Live
+    # Conversations panel. Replaces per-chatter talking-points
+    # as the primary "what's happening" surface.
+    # =========================================================
+
+    THREAD_RECAP_NUM_CTX = 16384
+    THREAD_RECAP_TRUNCATE_PER_MSG = 200
+
+    THREAD_RECAP_SYSTEM = """You're labeling clustered chat conversations on a Twitch streamer's dashboard.
+
+For each numbered thread below, write a 1-2 sentence OBSERVATIONAL recap of what the chatters are actually discussing. The streamer reads these on a second monitor — they are NOT suggestions for what to talk about, they are descriptions of what's already in chat.
+
+HARD RULES:
+- Stay grounded: only paraphrase content that appears in the messages. Don't bridge, infer, or extrapolate.
+- Never assert facts beyond what you can quote. If a chatter said "excited for the FF8 remake," do NOT write "an FF8 remake is coming" — write "chatters are talking about a possible FF8 remake."
+- Never tell the streamer to do anything. No "ask them about X", no "you should mention Y." Pure description.
+- If a thread's messages are too noisy / unrelated to summarise without inventing context, SKIP it (omit from your response).
+- Reply with `thread_id` matching the integer key in the input and a 1-2 sentence `recap`.
+
+Empty / partial replies are fine. Skipping is the right call when in doubt.
+"""
+
+    async def thread_recap_loop(
+        self, interval_seconds: int | None = None,
+    ) -> None:
+        """Background task: periodically refresh recaps for active topic
+        threads. No-op when interval is 0."""
+        # Same booting delay as the talking-points refresh.
+        await asyncio.sleep(15)
+        while True:
+            try:
+                interval = max(60, int(
+                    interval_seconds
+                    or getattr(self.settings, "thread_recap_interval_seconds", 300)
+                ))
+                if interval <= 0:
+                    return
+                await self._refresh_thread_recaps()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("thread recap iteration failed")
+            await asyncio.sleep(interval)
+
+    async def _refresh_thread_recaps(self) -> None:
+        """One pass: pull all active threads + their recent messages,
+        send to LLM in one batch, write back recaps."""
+        threads = await asyncio.to_thread(
+            self.repo.list_threads,
+            status_filter="active", query="", limit=20,
+        )
+        if not threads:
+            return
+        per_msg_cap = max(40, int(getattr(
+            self.settings, "thread_recap_max_messages_per_thread", 30,
+        )))
+
+        # Build a numbered prompt — for each thread, include drivers +
+        # recent messages clipped per-message so the LLM has signal but
+        # we don't blow the context budget on a single hot thread.
+        blocks: list[str] = []
+        for t in threads:
+            try:
+                msgs = await asyncio.to_thread(
+                    self.repo.get_thread_messages, t.id, per_msg_cap,
+                )
+            except Exception:
+                logger.exception(
+                    "thread-recap: get_thread_messages failed for %d", t.id,
+                )
+                continue
+            if not msgs:
+                continue
+            user_id_to_name: dict[str, str] = {}
+            for m in msgs:
+                if m.user_id and m.user_id not in user_id_to_name:
+                    u = await asyncio.to_thread(self.repo.get_user, m.user_id)
+                    if u:
+                        user_id_to_name[m.user_id] = u.name
+            msg_lines = "\n      ".join(
+                f"[{user_id_to_name.get(m.user_id, m.user_id)}] "
+                f"{m.content[:self.THREAD_RECAP_TRUNCATE_PER_MSG]}"
+                for m in msgs
+            )
+            drivers_str = ", ".join(t.drivers) if t.drivers else "—"
+            blocks.append(
+                f"THREAD {t.id} (current title: {t.title!r})\n"
+                f"  drivers: {drivers_str}\n"
+                f"  messages:\n      {msg_lines}"
+            )
+        if not blocks:
+            return
+
+        from .llm.schemas import ThreadRecapsResponse
+        prompt = (
+            "Active topic threads (numbered by `thread_id`):\n\n"
+            + "\n\n".join(blocks)
+            + "\n\nReturn one observational `recap` per thread you can "
+            "ground in its messages. Skip noisy / unsummarisable ones."
+        )
+        try:
+            response = await self.llm.generate_structured(
+                prompt=prompt,
+                system_prompt=self.THREAD_RECAP_SYSTEM,
+                response_model=ThreadRecapsResponse,
+                num_ctx=self.THREAD_RECAP_NUM_CTX,
+            )
+        except ValidationError as e:
+            logger.warning("thread-recap validation failed: %s", e)
+            return
+        except Exception:
+            logger.exception("thread-recap LLM call failed")
+            return
+
+        valid_ids = {t.id for t in threads}
+        written = 0
+        for r in response.recaps:
+            if r.thread_id not in valid_ids:
+                continue
+            try:
+                await asyncio.to_thread(
+                    self.repo.set_thread_recap, r.thread_id, r.recap,
+                )
+                written += 1
+            except Exception:
+                logger.exception(
+                    "thread-recap: set_thread_recap failed for %d", r.thread_id,
+                )
+        logger.info(
+            "thread recaps refreshed: %d threads in batch, %d recaps written",
+            len(blocks), written,
+        )

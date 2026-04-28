@@ -191,3 +191,82 @@ class OBSStatusService:
             streaming=streaming, recording=recording, scene=scene_name,
             error=None, refreshed_at=time.time(),
         )
+
+    def take_screenshot_sync(
+        self, *, image_format: str = "jpg",
+        width: int = 480, quality: int = 60,
+        height: int | None = None,
+    ) -> tuple[bytes, str] | None:
+        """Capture the current program scene as a JPEG. Returns
+        (image_bytes, scene_name) or None on any failure (OBS off, not
+        connected, scene resolution failed, etc.). Synchronous —
+        callers should wrap in `asyncio.to_thread`.
+
+        OBS WebSocket returns a `data:image/jpg;base64,...` data URI;
+        we strip the prefix and decode to raw bytes for disk storage.
+        """
+        if not self.settings.obs_enabled or _ReqClient is None:
+            return None
+        try:
+            client = _ReqClient(
+                host=self.settings.obs_host,
+                port=self.settings.obs_port,
+                password=self.settings.obs_password,
+                timeout=4,
+            )
+        except Exception as e:
+            err = _classify_error(e)
+            if err != self._last_logged_error:
+                logger.warning("obs screenshot connect failed: %s", err)
+                self._last_logged_error = err
+            return None
+        try:
+            scene_resp = client.get_current_program_scene()
+            scene_name = (
+                getattr(scene_resp, "current_program_scene_name", None)
+                or getattr(scene_resp, "scene_name", None)
+            )
+            if not scene_name:
+                return None
+            # OBS WebSocket v5 requires imageHeight >= 8 — passing 0
+            # to "skip" returns code 402. Derive a 16:9 height from
+            # the configured width unless an explicit one was passed
+            # in. 16:9 is the streaming-overwhelmingly-likely case
+            # and preserves aspect ratio for the default 480-wide
+            # capture (→ 270 px tall).
+            img_w = max(8, min(4096, int(width)))
+            img_h = (
+                max(8, min(4096, int(height)))
+                if height is not None else
+                max(8, int(round(img_w * 9 / 16)))
+            )
+            try:
+                shot = client.get_source_screenshot(
+                    name=scene_name,
+                    img_format=image_format,
+                    width=img_w, height=img_h,
+                    quality=int(quality),
+                )
+            except TypeError:
+                # Older obsws-python signature uses positional args.
+                shot = client.get_source_screenshot(
+                    scene_name, image_format,
+                    img_w, img_h, int(quality),
+                )
+            data_uri = getattr(shot, "image_data", "") or ""
+            if not data_uri.startswith("data:"):
+                return None
+            comma = data_uri.find(",")
+            if comma == -1:
+                return None
+            import base64 as _b64
+            return _b64.b64decode(data_uri[comma + 1:]), scene_name
+        except Exception as e:
+            err = _classify_error(e)
+            logger.warning("obs screenshot failed: %s", err)
+            return None
+        finally:
+            try:
+                client.disconnect()
+            except Exception:
+                pass

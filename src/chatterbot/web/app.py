@@ -191,7 +191,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     # Real-time transcript service. Owns the whisper model (lazy-loaded
     # on first audio chunk) + match-to-card cache. No-op when disabled.
     from ..transcript import TranscriptService
-    transcript_service = TranscriptService(repo, llm, settings)
+    transcript_service = TranscriptService(repo, llm, settings, obs=obs_status)
     # Wire the talking-points provider so the transcript matcher can
     # auto-address them when the streamer speaks about them.
     transcript_service._talking_points_provider = lambda: (
@@ -237,6 +237,30 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 name="transcript_llm_match",
             )
         )
+        # Transcript group summariser — replaces the per-utterance
+        # live strip with one observational line per window.
+        _bg_tasks.add(
+            asyncio.create_task(
+                transcript_service.transcript_group_loop(),
+                name="transcript_group_summary",
+            )
+        )
+        # Topic-thread recap loop — observational summaries for the
+        # Live Conversations panel on engagement view.
+        _bg_tasks.add(
+            asyncio.create_task(
+                insights.thread_recap_loop(),
+                name="thread_recap_loop",
+            )
+        )
+        # OBS screenshot capture — pairs visual context with each
+        # transcript group summary. No-op if OBS is unreachable.
+        _bg_tasks.add(
+            asyncio.create_task(
+                transcript_service.screenshot_loop(),
+                name="transcript_screenshot_loop",
+            )
+        )
         try:
             yield
         finally:
@@ -255,6 +279,17 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         "/static",
         StaticFiles(directory=str(WEB_DIR / "static")),
         name="static",
+    )
+    # Serve transcript-group screenshots directly out of the data
+    # directory. Created lazily by the screenshot loop; mounting an
+    # empty directory at startup is fine — StaticFiles tolerates it.
+    from pathlib import Path as _Path
+    _shot_dir = _Path(settings.db_path).parent / "transcript_screenshots"
+    _shot_dir.mkdir(parents=True, exist_ok=True)
+    app.mount(
+        "/transcript-screenshots",
+        StaticFiles(directory=str(_shot_dir)),
+        name="transcript_screenshots",
     )
 
     # ---------------- chatters list ----------------
@@ -638,6 +673,15 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "whisper_llm_match_min_chunks",
                 "whisper_llm_match_confidence",
                 "whisper_auto_confirm_seconds",
+                "whisper_group_interval_seconds",
+                "whisper_group_min_chunks",
+                "thread_recap_interval_seconds",
+                "thread_recap_max_messages_per_thread",
+                "screenshot_interval_seconds",
+                "screenshot_max_age_hours",
+                "screenshot_jpeg_quality",
+                "screenshot_width",
+                "screenshot_grid_max",
             ),
         ),
     )
@@ -1390,6 +1434,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "goals_state": _build_goals_state(),
             # Live transcript strip — what whisper just heard.
             "transcript_chunks": repo.list_transcript_chunks(limit=15),
+            "transcript_groups": repo.list_transcript_groups(limit=15),
             "transcript_status": transcript_service.status(),
             # Recent LLM-transcript matches — feed of cards the matcher
             # has flipped to auto_pending in the last hour, regardless of
@@ -1714,6 +1759,26 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             await transcript_service.ingest_chunk(body, sr)
         return Response(status_code=204)
 
+    @app.get("/modals/transcript-group/{group_id}", response_class=HTMLResponse)
+    async def modal_transcript_group(request: Request, group_id: int):
+        """Detail view for one transcript group — summary + the
+        underlying utterances clipped to the group's id range, plus
+        the OBS screenshots captured during the group's window."""
+        group = repo.get_transcript_group(group_id)
+        if not group:
+            raise HTTPException(404, "transcript group not found")
+        chunks = repo.transcript_chunks_in_id_range(
+            group.first_chunk_id, group.last_chunk_id,
+        )
+        screenshots = repo.screenshots_in_range(
+            group.start_ts, group.end_ts,
+            max_count=int(getattr(settings, "screenshot_grid_max", 4)),
+        )
+        return TEMPLATES.TemplateResponse(
+            request, "modals/_transcript_group.html",
+            {"group": group, "chunks": chunks, "screenshots": screenshots},
+        )
+
     @app.get("/modals/transcript/{chunk_id}", response_class=HTMLResponse)
     async def modal_transcript(request: Request, chunk_id: int):
         """Detail view for one transcript chunk: the utterance itself,
@@ -1796,21 +1861,42 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         request: Request,
         limit: int = Query(20, ge=1, le=100),
         last_pending: int = Query(0, ge=0),
+        view: str = Query("summary"),
     ):
-        """Live transcript strip for /insights. HTMX target re-fetches
-        every few seconds to show the streamer what whisper just heard.
+        """Live transcript strip for /insights. Two view modes:
 
-        `last_pending` is what the client saw on the previous swap;
-        when the server's pending_count has advanced, we emit
-        HX-Trigger: insights-state-changed so the engagement body
-        re-renders immediately to surface the new auto_pending card.
+          - `summary` (default) — one row per LLM-summarised group,
+            ~60 s windows. Less distracting; less granular.
+          - `log` — every raw whisper utterance with its match icon.
+            Granular; noisier; polls fast for near-real-time updates.
+
+        Accepts the legacy `verbatim` value as an alias for `log` so a
+        streamer with the older value in localStorage keeps the right
+        view through the rename.
+
+        Streamer toggles client-side via localStorage; the choice rides
+        on the auto-refresh `hx-vals` so each tick honors it.
         """
-        chunks = repo.list_transcript_chunks(limit=limit)
+        if view == "verbatim":
+            view = "log"
+        if view not in ("summary", "log"):
+            view = "summary"
+        if view == "log":
+            groups = []
+            chunks = repo.list_transcript_chunks(limit=limit)
+        else:
+            groups = repo.list_transcript_groups(limit=limit)
+            # Warming-up fallback: while no groups exist yet, show
+            # chunks so the strip isn't empty during the first ~60 s
+            # of audio.
+            chunks = (
+                [] if groups else repo.list_transcript_chunks(limit=limit)
+            )
         status = transcript_service.status()
         resp = TEMPLATES.TemplateResponse(
             request, "partials/transcript_strip.html",
-            {"chunks": chunks, "service_status": status,
-             "pending_count": status["pending_count"]},
+            {"groups": groups, "chunks": chunks, "service_status": status,
+             "pending_count": status["pending_count"], "view": view},
         )
         if status["pending_count"] > last_pending:
             resp.headers["HX-Trigger"] = "insights-state-changed"

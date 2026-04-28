@@ -1,0 +1,80 @@
+{% set modal_title = 'Transcript group' %}
+{% set modal_icon = 'fa-microphone-lines' %}
+{% set modal_tone = 'accent' %}
+{% set modal_size = 'lg' %}
+{% extends "components/_modal.html" %}
+{% block modal_body %}
+<div class="space-y-4 text-sm">
+  {# Screenshots first — visual context for the audio. Up to 4 evenly
+     spaced from the group's window. Click to open at full size. #}
+  {% if screenshots %}
+  <section>
+    <p class="text-[11px] uppercase tracking-wider text-muted mb-1">
+      scene snapshots ({{ screenshots | length }})
+    </p>
+    <div class="grid {% if screenshots|length == 1 %}grid-cols-1{% elif screenshots|length == 2 %}grid-cols-2{% else %}grid-cols-2{% endif %} gap-2">
+      {% for s in screenshots %}
+        <a href="/transcript-screenshots/{{ s.path | replace('transcript_screenshots/', '') }}"
+           target="_blank" rel="noopener"
+           class="block rounded-lg overflow-hidden border border-subtle bg-canvas hover:opacity-90 transition-all duration-150 ease-out">
+          <img src="/transcript-screenshots/{{ s.path | replace('transcript_screenshots/', '') }}"
+               alt="OBS scene {{ s.scene_name or 'capture' }} at {{ s.ts | short_ts }}"
+               class="w-full h-auto block"
+               loading="lazy">
+          <div class="px-2 py-1 text-[10px] text-muted flex items-center justify-between gap-2">
+            <span>{{ s.ts | short_ts }}</span>
+            {% if s.scene_name %}
+              <span class="text-accent truncate">{{ s.scene_name }}</span>
+            {% endif %}
+          </div>
+        </a>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  {# LLM-generated observational summary — same line the strip shows,
+     here as the primary anchor below the visual context. #}
+  <section class="rounded-lg border border-accent/30 bg-accent/5 p-3">
+    <div class="flex items-baseline gap-2 mb-1">
+      <i class="fa-solid fa-microphone-lines text-accent text-[10px]"></i>
+      <span class="text-[11px] uppercase tracking-wider text-muted">summary</span>
+      <span class="text-[10px] text-muted ml-auto">
+        {{ group.start_ts | short_ts }} — {{ group.end_ts | short_ts }}
+        · {{ chunks | length }} utterance{{ '' if chunks|length == 1 else 's' }}
+      </span>
+    </div>
+    <p class="text-primary leading-snug">{{ group.summary }}</p>
+  </section>
+
+  {# Underlying utterances. Click any single one to open its own
+     context modal (re-anchors on that utterance with neighbours). #}
+  <section>
+    <p class="text-[11px] uppercase tracking-wider text-muted mb-1">
+      raw utterances ({{ chunks | length }})
+    </p>
+    <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
+      {% for c in chunks %}
+        <li class="px-3 py-2 hover:bg-surface-raised/60">
+          <div class="flex items-baseline gap-2">
+            <span class="text-[11px] text-muted whitespace-nowrap w-32 shrink-0">{{ c.ts | short_ts }}</span>
+            <i class="fa-solid fa-microphone text-muted text-[10px] shrink-0"></i>
+            <span class="text-primary break-words flex-1">{{ c.text }}</span>
+            {% if c.similarity is not none %}
+              <span class="text-[10px] text-muted tabular-nums shrink-0">{{ '%.2f'|format(c.similarity) }}</span>
+            {% endif %}
+            <button type="button"
+                    class="text-muted hover:text-accent text-[10px] shrink-0"
+                    hx-get="/modals/transcript/{{ c.id }}"
+                    hx-target="#modal-root"
+                    hx-swap="innerHTML"
+                    title="Open with surrounding utterances + matched card">
+              <i class="fa-solid fa-crosshairs"></i>
+            </button>
+          </div>
+        </li>
+      {% endfor %}
+    </ul>
+  </section>
+</div>
+{% endblock %}
