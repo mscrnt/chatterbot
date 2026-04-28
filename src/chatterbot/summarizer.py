@@ -355,12 +355,19 @@ RULES:
 - This output renders to the streamer's private dashboard. Never to chat.
 """
 
-    async def recap_loop(self, obs) -> None:  # noqa: ANN001 — OBSStatusService
+    async def recap_loop(self, obs, on_stream_start=None) -> None:  # noqa: ANN001
         """Watch OBS state. On streaming → not-streaming transition, run
         a recap LLM call and persist the result. obs.status.streaming is
         the source of truth; we only fire when it goes True → False AND
         the OBS service is connected (so a disconnect doesn't fake an
-        end-of-stream)."""
+        end-of-stream).
+
+        Optional `on_stream_start` callback fires on the rising edge
+        (not-streaming → streaming) so callers can hook session-reset
+        behavior — e.g., wipe per-session insight state, clear the
+        engaging-subjects blocklist, etc. Failures in the callback are
+        logged but don't stop the loop.
+        """
         if obs is None:
             return
         was_streaming = False
@@ -380,6 +387,15 @@ RULES:
                         self.repo.latest_message_id
                     )
                     logger.info("recap_loop: stream started — anchor msg_id=%s", first_msg_id)
+                    if on_stream_start is not None:
+                        try:
+                            res = on_stream_start()
+                            if hasattr(res, "__await__"):
+                                await res
+                        except Exception:
+                            logger.exception(
+                                "recap_loop: on_stream_start callback raised",
+                            )
                 # Falling edge — stream went offline.
                 if not streaming and was_streaming:
                     ended_at = datetime.now(timezone.utc).isoformat(

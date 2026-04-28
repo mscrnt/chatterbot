@@ -101,10 +101,42 @@ async def run_bot(settings: Settings) -> None:
         )
     if settings.obs_enabled:
         tasks.append(asyncio.create_task(obs.poll_loop(), name="obs_poll"))
+
+        # Stream-start session reset. On not-streaming → streaming,
+        # wipe per-session ephemeral state (currently-addressed insight
+        # cards, engaging-subjects blocklist) so the new stream starts
+        # with a clean slate. The audit history table preserves the
+        # transitions so /audit still tells the full story.
+        def _on_stream_start_reset() -> None:
+            try:
+                cleared = repo.reset_session_addressed_states()
+                if cleared:
+                    logger.info(
+                        "session-reset: cleared %d 'addressed' insight "
+                        "states for new stream", cleared,
+                    )
+            except Exception:
+                logger.exception(
+                    "session-reset: failed to clear addressed states"
+                )
+            # Engaging-subjects blocklist is owned by the dashboard
+            # process via app_settings (cross-process safe). Wipe it
+            # so the new stream's subject extractor starts fresh.
+            try:
+                repo.set_app_setting(
+                    "engaging_subjects_blocklist", "[]",
+                )
+                logger.info("session-reset: cleared engaging-subjects blocklist")
+            except Exception:
+                logger.exception(
+                    "session-reset: failed to clear subjects blocklist"
+                )
+
         # End-of-stream recap: watch OBS state, fire LLM debrief on
         # streaming → not-streaming transition. No-op if OBS is disabled.
         tasks.append(asyncio.create_task(
-            summarizer.recap_loop(obs), name="recap_loop"
+            summarizer.recap_loop(obs, on_stream_start=_on_stream_start_reset),
+            name="recap_loop",
         ))
     if settings.streamelements_enabled:
         tasks.append(asyncio.create_task(se.run(), name="streamelements"))

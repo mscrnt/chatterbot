@@ -3933,6 +3933,27 @@ class ChatterRepo:
             cur.execute("DELETE FROM vec_notes WHERE note_id = ?", (note_id,))
             cur.execute("DELETE FROM notes WHERE id = ?", (note_id,))
 
+    def reset_session_addressed_states(self) -> int:
+        """Clear all current 'addressed' insight_states. Used at the
+        start of a new stream session — "I addressed this on stream"
+        is a per-session signal; carrying it forward makes the new
+        stream feel like everything's already handled.
+
+        The audit trail in `insight_state_history` is preserved; only
+        the current snapshot in `insight_states` is wiped. Streamer
+        can still see "I addressed X yesterday" via /audit if they
+        want.
+
+        Returns the number of rows cleared.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM insight_states WHERE state = 'addressed'"
+            )
+            n = int(cur.fetchone()["c"])
+            cur.execute("DELETE FROM insight_states WHERE state = 'addressed'")
+            return n
+
     def merge_notes(
         self,
         note_ids: list[int],

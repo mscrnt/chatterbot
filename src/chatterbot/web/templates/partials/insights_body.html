@@ -152,9 +152,14 @@
     {%- endif -%}
   {% endmacro %}
 
-  {# ---------------- Neglected lurkers ---------------- #}
-  {# Filter applied here so the empty-state appears even when the only
-     "neglected" entries are snoozed/addressed. #}
+  {# ---------------- Individuals tab strip ----------------
+     Streamer feedback: "active but not engaged" + "talking to you"
+     should be tabs, not stacked sections. Tab choice persisted in
+     localStorage as `chatterbot.insightIndividualsTab`. Default
+     opens whichever has more entries on first render. Each row
+     dismissible via the existing per-row skip/snooze/addressed
+     buttons (kind='neglected_lurker' / 'direct_mention').
+  #}
   {% set _visible_lurkers = [] %}
   {% for u in neglected_lurkers %}
     {% set _s = (nl_states.get(u.twitch_id) if nl_states else None) %}
@@ -162,44 +167,6 @@
       {% set _ = _visible_lurkers.append((u, _s)) %}
     {% endif %}
   {% endfor %}
-  {% if _visible_lurkers %}
-  <section class="space-y-2">
-    <header>
-      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-        <i class="fa-solid fa-user-clock text-warning"></i> Active but not engaged
-        <span class="text-[11px] text-muted">({{ _visible_lurkers | length }}) · here now, not addressed lately</span>
-      </h2>
-    </header>
-    <ul class="divide-y divide-subtle rounded-xl border border-warning/30 bg-warning/5 overflow-hidden">
-      {% for u, _s in _visible_lurkers %}
-        <li class="insight-card-root px-3 py-2 text-sm flex items-center gap-3 hover:bg-warning/10">
-          {% with name=u.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
-          <a href="/users/{{ u.twitch_id }}" class="text-primary font-medium hover:underline">{{ u.name }}</a>
-          <span class="text-[11px] text-muted">last spoke {{ u.last_seen | short_ts }}</span>
-          <div class="ml-auto flex items-center gap-2">
-            <button type="button"
-                    class="tap inline-flex items-center justify-center gap-1 px-2 rounded bg-warning/15 hover:bg-warning/25 text-warning text-xs"
-                    hx-get="/modals/insight/adhoc/{{ u.twitch_id }}"
-                    hx-target="#modal-root"
-                    hx-swap="innerHTML"
-                    title="Subjects this chatter engages with">
-              <i class="fa-solid fa-bookmark text-[10px]"></i> engaged by
-            </button>
-            {% with kind='neglected_lurker', item_key=u.twitch_id,
-                    state=(_s.state if _s else None) %}
-              {% include "components/_insight_actions.html" %}
-            {% endwith %}
-          </div>
-        </li>
-      {% endfor %}
-    </ul>
-  </section>
-  {% endif %}
-
-  {# ---------------- Talking to you (direct mentions) ---------------- #}
-  {# Dismiss/snooze keyed by user_id so acknowledging once hides every
-     mention from that chatter in the same panel. The actual mentions
-     stay in the messages table; this just hides them from this view. #}
   {% set _visible_mentions = [] %}
   {% for m in direct_mentions %}
     {% set _s = (dm_states.get(m.user_id) if dm_states else None) %}
@@ -207,32 +174,95 @@
       {% set _ = _visible_mentions.append((m, _s)) %}
     {% endif %}
   {% endfor %}
-  {% if _visible_mentions %}
-  <section class="space-y-2">
-    <header>
-      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
-        <i class="fa-solid fa-comment-dots text-warning"></i> Talking to you
-        <span class="text-[11px] text-muted">({{ _visible_mentions | length }})</span>
-      </h2>
-    </header>
-    <ul class="divide-y divide-subtle rounded-xl border border-warning/30 bg-warning/5 overflow-hidden">
-      {% for m, _s in _visible_mentions %}
-        <li class="insight-card-root px-3 py-2 text-sm flex items-baseline gap-2 hover:bg-warning/10">
-          <span class="text-[10px] text-muted shrink-0">{{ m.ts | short_ts }}</span>
-          {% with source=m.source %}{% include "components/_source_mark.html" %}{% endwith %}
-          <a href="/users/{{ m.user_id }}?focus={{ m.id }}"
-             class="text-accent hover:underline font-medium shrink-0">{{ m.name }}</a>
-          <span class="text-primary break-words flex-1">{{ m.content }}</span>
-          <div class="shrink-0">
-            {% with kind='direct_mention', item_key=m.user_id,
-                    state=(_s.state if _s else None) %}
-              {% include "components/_insight_actions.html" %}
-            {% endwith %}
-          </div>
-        </li>
-      {% endfor %}
-    </ul>
-  </section>
+  {% if _visible_lurkers or _visible_mentions %}
+    {# Default tab: whichever surface has more entries. Streamer's
+       localStorage choice (if any) wins via x-init. #}
+    {% set _default_tab = 'mentions' if (_visible_mentions | length) >= (_visible_lurkers | length) and _visible_mentions else 'lurkers' %}
+    <section class="space-y-2"
+             x-data="{ tab: '{{ _default_tab }}' }"
+             x-init="(() => { const t = localStorage.getItem('chatterbot.insightIndividualsTab'); if (t === 'mentions' || t === 'lurkers') tab = t; })()">
+      <header class="flex items-center gap-1 border-b border-subtle">
+        {% set _tab_base = 'tap inline-flex items-center gap-2 px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-all duration-150 ease-out' %}
+        {% if _visible_mentions %}
+        <button type="button"
+                @click="tab = 'mentions'; localStorage.setItem('chatterbot.insightIndividualsTab', 'mentions')"
+                :class="tab === 'mentions' ? 'border-warning text-warning' : 'border-transparent text-muted hover:text-primary hover:bg-surface-raised'"
+                class="{{ _tab_base }}">
+          <i class="fa-solid fa-comment-dots text-xs"></i>
+          Talking to you
+          <span class="text-[10px] text-muted">({{ _visible_mentions | length }})</span>
+        </button>
+        {% endif %}
+        {% if _visible_lurkers %}
+        <button type="button"
+                @click="tab = 'lurkers'; localStorage.setItem('chatterbot.insightIndividualsTab', 'lurkers')"
+                :class="tab === 'lurkers' ? 'border-warning text-warning' : 'border-transparent text-muted hover:text-primary hover:bg-surface-raised'"
+                class="{{ _tab_base }}">
+          <i class="fa-solid fa-user-clock text-xs"></i>
+          Active but not engaged
+          <span class="text-[10px] text-muted">({{ _visible_lurkers | length }})</span>
+        </button>
+        {% endif %}
+      </header>
+
+      {# Talking-to-you pane — direct mentions, dismiss keyed by
+         user_id so acknowledging once hides every mention from
+         that chatter. #}
+      {% if _visible_mentions %}
+      <div x-show="tab === 'mentions'" x-cloak>
+        <p class="text-[11px] text-muted mb-1 px-1">questions / @-mentions of you in the last window</p>
+        <ul class="divide-y divide-subtle rounded-xl border border-warning/30 bg-warning/5 overflow-hidden">
+          {% for m, _s in _visible_mentions %}
+            <li class="insight-card-root px-3 py-2 text-sm flex items-baseline gap-2 hover:bg-warning/10">
+              <span class="text-[10px] text-muted shrink-0">{{ m.ts | short_ts }}</span>
+              {% with source=m.source %}{% include "components/_source_mark.html" %}{% endwith %}
+              <a href="/users/{{ m.user_id }}?focus={{ m.id }}"
+                 class="text-accent hover:underline font-medium shrink-0">{{ m.name }}</a>
+              <span class="text-primary break-words flex-1">{{ m.content }}</span>
+              <div class="shrink-0">
+                {% with kind='direct_mention', item_key=m.user_id,
+                        state=(_s.state if _s else None) %}
+                  {% include "components/_insight_actions.html" %}
+                {% endwith %}
+              </div>
+            </li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+
+      {# Active-but-not-engaged pane — chatters here now without
+         recent acknowledgment. Each row links to subjects-they-
+         engage-with via the "engaged by" button. #}
+      {% if _visible_lurkers %}
+      <div x-show="tab === 'lurkers'" x-cloak>
+        <p class="text-[11px] text-muted mb-1 px-1">here now, not addressed lately</p>
+        <ul class="divide-y divide-subtle rounded-xl border border-warning/30 bg-warning/5 overflow-hidden">
+          {% for u, _s in _visible_lurkers %}
+            <li class="insight-card-root px-3 py-2 text-sm flex items-center gap-3 hover:bg-warning/10">
+              {% with name=u.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+              <a href="/users/{{ u.twitch_id }}" class="text-primary font-medium hover:underline">{{ u.name }}</a>
+              <span class="text-[11px] text-muted">last spoke {{ u.last_seen | short_ts }}</span>
+              <div class="ml-auto flex items-center gap-2">
+                <button type="button"
+                        class="tap inline-flex items-center justify-center gap-1 px-2 rounded bg-warning/15 hover:bg-warning/25 text-warning text-xs"
+                        hx-get="/modals/insight/adhoc/{{ u.twitch_id }}"
+                        hx-target="#modal-root"
+                        hx-swap="innerHTML"
+                        title="Subjects this chatter engages with">
+                  <i class="fa-solid fa-bookmark text-[10px]"></i> engaged by
+                </button>
+                {% with kind='neglected_lurker', item_key=u.twitch_id,
+                        state=(_s.state if _s else None) %}
+                  {% include "components/_insight_actions.html" %}
+                {% endwith %}
+              </div>
+            </li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+    </section>
   {% endif %}
 
   {# ---------------- What to say next (high-impact subjects) ----------------
