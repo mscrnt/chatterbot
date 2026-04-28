@@ -69,6 +69,25 @@ class InsightsCache:
     error: str | None = None
 
 
+@dataclass
+class EngagingSubjectEntry:
+    """One curated subject the LLM extracted from recent chat. Distinct
+    from `topic_threads` (which cluster snapshots by embedding cosine):
+    these come from a direct subject-extraction pass over messages, so
+    the unit is "actual conversation subject" rather than "embedding-
+    similar text"."""
+    name: str
+    drivers: list[str]
+    msg_count: int
+
+
+@dataclass
+class EngagingSubjectsCache:
+    subjects: list[EngagingSubjectEntry]
+    refreshed_at: float | None
+    error: str | None = None
+
+
 class InsightsService:
     """Caches the LLM-derived talking points; refreshed by a background task."""
 
@@ -81,11 +100,19 @@ class InsightsService:
         self.llm = llm
         self.settings = settings
         self._cache = InsightsCache(talking_points=[], refreshed_at=None, error=None)
+        self._subjects_cache = EngagingSubjectsCache(
+            subjects=[], refreshed_at=None, error=None,
+        )
         self._lock = asyncio.Lock()
+        self._subjects_lock = asyncio.Lock()
 
     @property
     def cache(self) -> InsightsCache:
         return self._cache
+
+    @property
+    def subjects_cache(self) -> EngagingSubjectsCache:
+        return self._subjects_cache
 
     async def refresh_loop(self, interval_seconds: int | None = None) -> None:
         interval = interval_seconds or self.DEFAULT_REFRESH_SECONDS
@@ -327,3 +354,155 @@ Empty / partial replies are fine. Skipping is the right call when in doubt.
             "thread recaps refreshed: %d threads in batch, %d recaps written",
             len(blocks), written,
         )
+
+    # =========================================================
+    # Engaging subjects loop — direct subject-extraction from
+    # recent chat. Distinct from topic_threads (cosine clustering
+    # of snapshots), which tend to lump multiple subjects together
+    # within a window. This pass asks the LLM to SEPARATE distinct
+    # subjects and to silently filter out religious / political /
+    # controversial topics.
+    # =========================================================
+
+    SUBJECTS_NUM_CTX = 8192
+    SUBJECTS_LOOKBACK_MINUTES = 20
+    SUBJECTS_MAX_MESSAGES = 250
+
+    SUBJECTS_SYSTEM = """You're identifying distinct conversation subjects in a Twitch chat for the streamer's dashboard.
+
+Look at the recent messages and extract SEPARATE subjects — not vague themes. The streamer wants to see *what specific things* are being discussed so they can pivot toward the most engaging one.
+
+DEFINITION OF A SUBJECT:
+- Specific: "Ninja Gaiden 4 parry timing", not "video games"
+- Distinct: "Resident Evil aim-parry strats" and "Resident Evil no-damage runs" can be separate subjects even if they share vocabulary; merge only when they're really the same conversation
+- 4-8 word subject line, no fluff
+
+DO NOT EMIT (mark `is_sensitive: true` and the dashboard filters them out):
+- religion, faith traditions, religious holidays as moral commentary
+- politics: parties, candidates, elections, policy debates
+- controversies: war, abortion, gun control, immigration, race discourse, etc.
+The streamer doesn't want these surfaced. If chatters are talking about them, just flag `is_sensitive: true` and the dashboard hides the row.
+
+ALSO SKIP (don't emit at all — empty `name` is fine):
+- Pure greeting / lurking ("hi", "lol", "first time here")
+- One-off reactions with no follow-up
+- Bot commands
+
+For each remaining subject:
+- name: the subject line
+- drivers: distinct chatters actually engaged (NOT just present in the window)
+- msg_count: rough number of messages on this subject in the window
+- is_sensitive: false (you've already filtered the sensitive ones)
+
+Return AT MOST 8 subjects, sorted by len(drivers) desc. Empty list is the right answer when chat is too quiet or unfocused.
+
+IMPORTANT: emit observation, not advice. No "you should…", no "the streamer could ask about…". Pure description of what people are talking about.
+"""
+
+    async def engaging_subjects_loop(
+        self, interval_seconds: int | None = None,
+    ) -> None:
+        """Background task: periodically refresh the engaging-subjects
+        cache. No-op when the channel is quiet."""
+        await asyncio.sleep(25)  # boot delay so the dashboard settles
+        while True:
+            try:
+                interval = max(60, int(
+                    interval_seconds
+                    or getattr(self.settings, "engaging_subjects_interval_seconds", 180)
+                ))
+                if interval <= 0:
+                    return
+                await self._refresh_engaging_subjects()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("engaging-subjects iteration failed")
+            await asyncio.sleep(interval)
+
+    async def _refresh_engaging_subjects(self) -> None:
+        async with self._subjects_lock:
+            window_min = int(getattr(
+                self.settings, "engaging_subjects_lookback_minutes",
+                self.SUBJECTS_LOOKBACK_MINUTES,
+            ))
+            limit = int(getattr(
+                self.settings, "engaging_subjects_max_messages",
+                self.SUBJECTS_MAX_MESSAGES,
+            ))
+            try:
+                msgs = await asyncio.to_thread(
+                    self.repo.recent_messages, limit=limit,
+                    within_minutes=window_min,
+                )
+            except Exception:
+                logger.exception("engaging-subjects: recent_messages failed")
+                return
+            if len(msgs) < 5:
+                # Too quiet to bother. Reset the cache so the panel
+                # shows the empty state instead of stale subjects.
+                self._subjects_cache = EngagingSubjectsCache(
+                    subjects=[], refreshed_at=time.time(), error=None,
+                )
+                return
+
+            # Build a numbered prompt block; clip per-message to keep
+            # the context budget sane.
+            user_id_to_name: dict[str, str] = {}
+            for m in msgs:
+                if m.user_id and m.user_id not in user_id_to_name:
+                    u = await asyncio.to_thread(self.repo.get_user, m.user_id)
+                    if u:
+                        user_id_to_name[m.user_id] = u.name
+            lines = [
+                f"  [{user_id_to_name.get(m.user_id, m.user_id)}] {m.content[:200]}"
+                for m in msgs
+            ]
+            prompt = (
+                f"Recent chat ({len(msgs)} msgs over the last "
+                f"{window_min} min, oldest first):\n"
+                + "\n".join(lines)
+                + "\n\nReturn the distinct conversation subjects, sorted by "
+                "engagement (driver count). Skip sensitive topics."
+            )
+            try:
+                from .llm.schemas import EngagingSubjectsResponse
+                response = await self.llm.generate_structured(
+                    prompt=prompt,
+                    system_prompt=self.SUBJECTS_SYSTEM,
+                    response_model=EngagingSubjectsResponse,
+                    num_ctx=self.SUBJECTS_NUM_CTX,
+                )
+            except ValidationError as e:
+                logger.warning("engaging-subjects validation failed: %s", e)
+                self._subjects_cache = EngagingSubjectsCache(
+                    subjects=[], refreshed_at=time.time(),
+                    error=f"validation failed: {e!s}",
+                )
+                return
+            except Exception as e:
+                logger.exception("engaging-subjects LLM call failed")
+                self._subjects_cache = EngagingSubjectsCache(
+                    subjects=[], refreshed_at=time.time(), error=str(e),
+                )
+                return
+
+            entries: list[EngagingSubjectEntry] = []
+            for s in response.subjects:
+                if s.is_sensitive:
+                    continue
+                if not s.name.strip():
+                    continue
+                entries.append(EngagingSubjectEntry(
+                    name=s.name.strip(),
+                    drivers=[d for d in s.drivers if d],
+                    msg_count=int(s.msg_count or 0),
+                ))
+            self._subjects_cache = EngagingSubjectsCache(
+                subjects=entries, refreshed_at=time.time(), error=None,
+            )
+            logger.info(
+                "engaging subjects refreshed: %d msgs in window, "
+                "%d subjects (after sensitivity filter)",
+                len(msgs), len(entries),
+            )

@@ -1478,6 +1478,41 @@ class ChatterRepo:
                 for r in cur.fetchall()
             ]
 
+    def recent_messages(
+        self, *, limit: int = 250, within_minutes: int = 20,
+    ) -> list[Message]:
+        """Recent non-emote chat messages within the last `within_minutes`,
+        oldest-first. Used by the engaging-subjects extractor on
+        InsightsService."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.id, m.user_id, u.name, u.source, m.ts, m.content,
+                       m.reply_parent_login, m.reply_parent_body
+                FROM messages m
+                JOIN users u ON u.twitch_id = m.user_id
+                WHERE u.opt_out = 0
+                  AND m.is_emote_only = 0
+                  AND datetime(m.ts) >= datetime('now', ?)
+                ORDER BY m.id DESC
+                LIMIT ?
+                """,
+                (f"-{int(within_minutes)} minutes", int(limit)),
+            )
+            rows = cur.fetchall()
+        out = [
+            Message(
+                id=int(r["id"]), user_id=r["user_id"], name=r["name"],
+                source=r["source"] or "twitch",
+                ts=r["ts"], content=r["content"],
+                reply_parent_login=r["reply_parent_login"],
+                reply_parent_body=r["reply_parent_body"],
+            )
+            for r in rows
+        ]
+        out.reverse()
+        return out
+
     def recent_messages_for_topics(self, limit: int) -> list[tuple[int, str, str]]:
         """Latest `limit` messages across all opted-in users, oldest-first."""
         with self._cursor() as cur:

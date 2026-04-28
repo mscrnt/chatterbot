@@ -69,6 +69,9 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "quiet_cohort_lookback_hours",
     "quiet_cohort_min_drivers",
     "quiet_cohort_limit",
+    "engaging_subjects_interval_seconds",
+    "engaging_subjects_lookback_minutes",
+    "engaging_subjects_max_messages",
 )
 
 # Subset that should be rendered as password inputs. Blank submissions for
@@ -256,6 +259,15 @@ class Settings(BaseSettings):
     quiet_cohort_min_drivers: int = 2
     quiet_cohort_limit: int = 6
 
+    # Engaging-subjects extractor on InsightsService. A separate
+    # subject-level pass over recent chat messages — distinct from
+    # topic_threads (cosine clustering) which often lump multiple
+    # subjects within the same time window. The LLM is prompted to
+    # silently filter religion / politics / controversy out.
+    engaging_subjects_interval_seconds: int = 180
+    engaging_subjects_lookback_minutes: int = 20
+    engaging_subjects_max_messages: int = 250
+
     # Moderation mode — opt-in. When enabled, the bot batches recent
     # messages through a strict-rubric LLM classifier and persists
     # flagged ones as incidents for streamer review. Advisory only —
@@ -310,6 +322,9 @@ def _coerce(key: str, value: str) -> Any:
         "screenshot_jpeg_quality", "screenshot_width", "screenshot_grid_max",
         "quiet_cohort_silence_minutes", "quiet_cohort_lookback_hours",
         "quiet_cohort_min_drivers", "quiet_cohort_limit",
+        "engaging_subjects_interval_seconds",
+        "engaging_subjects_lookback_minutes",
+        "engaging_subjects_max_messages",
     ):
         try:
             return int(value)
@@ -333,6 +348,9 @@ def _coerce(key: str, value: str) -> Any:
                 "quiet_cohort_lookback_hours": 24,
                 "quiet_cohort_min_drivers": 2,
                 "quiet_cohort_limit": 6,
+                "engaging_subjects_interval_seconds": 180,
+                "engaging_subjects_lookback_minutes": 20,
+                "engaging_subjects_max_messages": 250,
             }[key]
     if key in (
         "streamelements_enabled", "mod_mode_enabled",

@@ -255,3 +255,36 @@ class TranscriptGroupSummaryResponse(BaseModel):
     this window" — the grouper persists silently and skips."""
 
     summary: str = Field(default="", max_length=400)
+
+
+# ---- engaging subjects (per-message extraction with sensitivity gate) ----
+
+EngagingSubjectName = Annotated[
+    str,
+    StringConstraints(min_length=3, max_length=120, strip_whitespace=True),
+]
+
+
+class EngagingSubject(BaseModel):
+    """One distinct conversation subject the LLM extracted from a window
+    of recent chat messages.
+
+    `drivers` is the list of chatters actually engaging with this
+    subject (not just present in chat). `msg_count` is approximate —
+    how many recent messages the model judged to be on this subject.
+    `is_sensitive` flags subjects involving religion, politics, or
+    other controversies that the streamer probably wants the dashboard
+    to silently filter out."""
+
+    name: EngagingSubjectName
+    drivers: list[str] = Field(default_factory=list, max_length=20)
+    msg_count: int = Field(ge=0, default=0)
+    is_sensitive: bool = False
+
+
+class EngagingSubjectsResponse(BaseModel):
+    """Reply for the engaging-subjects extractor on InsightsService.
+    Empty list is a valid output when chat is too quiet / unfocused
+    to identify distinct subjects."""
+
+    subjects: list[EngagingSubject] = Field(default_factory=list, max_length=12)

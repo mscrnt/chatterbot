@@ -568,6 +568,9 @@ class TranscriptService:
 
     LLM_MATCH_SYSTEM = """You are watching the live voice transcript of a Twitch streamer.
 
+IMPORTANT — whisper output is imperfect. Expect misheard words, garbled proper nouns and game/character names, missing punctuation, run-on phrases, and the streamer trailing off or overlapping with game audio. When matching utterances to chatter names or topic threads, allow for phonetic spellings ("aqua note one" can be "aquanote1"; "purry" near gameplay context is likely "parry"). If a word seems garbled, infer the most plausible reading from context before deciding whether it's a match.
+
+
 The streamer is most likely:
   - playing a game and reacting to gameplay
   - reacting to media (videos, articles, news)
@@ -776,6 +779,14 @@ When in doubt, return NO match. Empty `matches` list is the expected, common out
     GROUP_SUMMARY_TRUNCATE_PER_CHUNK = 200
 
     GROUP_SUMMARY_SYSTEM = """You're labeling a window of streamer voice transcripts on a Twitch dashboard. An attached image shows what was on the streamer's OBS scene during this same window — use it as SILENT CONTEXT, not as content.
+
+IMPORTANT — whisper output is imperfect. The transcripts come from real-time speech-to-text on streamer audio, so expect:
+  - misheard words (homophones, proper nouns garbled, game/character names mangled)
+  - missing or wrong punctuation
+  - run-on phrases with no clear sentence boundaries
+  - the streamer trailing off mid-thought, mumbling, or overlapping with game audio
+Use the image and context to interpret what was *probably* said. If "purry" appears next to a Resident Evil scene, it's "parry." If "yogi" turns up while Yoshi is on screen, it's Yoshi. Don't quote literally — paraphrase with the most plausible reading.
+
 
 Write ONE 1-2 sentence OBSERVATIONAL summary of WHAT THE STREAMER SAID. The audio is primary. The image exists only to help you ground the audio:
   - resolve pronouns / vague nouns ("the boss" → "the Malenia boss in Elden Ring"),

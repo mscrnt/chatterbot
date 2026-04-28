@@ -1,0 +1,63 @@
+{# Engaging subjects panel — distinct conversation subjects extracted
+   from recent chat by the LLM. Each row: subject + driver chips +
+   message count. Pure observation, no "you should…" prescription.
+   The streamer scans the panel and decides what to lean into.
+
+   Sensitive subjects (religion / politics / controversy) are stripped
+   at the prompt + cache layer; nothing here surfaces them. #}
+{% set _subjects_age = engaging_subjects_age_seconds %}
+{% set _has_subjects = engaging_subjects and engaging_subjects | length > 0 %}
+{# Show the panel once any pass has completed OR errored, so the streamer
+   sees what the feature looks like even during quiet stretches. Pre-first-
+   pass (warming up) is hidden — there's nothing useful to display yet. #}
+{% if _has_subjects or engaging_subjects_error or _subjects_age is not none %}
+<section class="space-y-2">
+  <header class="flex items-baseline justify-between gap-2">
+    <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+      <i class="fa-solid fa-fire text-accent"></i> Engaging subjects
+      <span class="text-[11px] text-muted font-normal">what chat is actually talking about — distinct subjects, ranked by chatter count</span>
+    </h2>
+    <span class="text-[11px] text-muted">
+      {% if _subjects_age is not none %}refreshed {{ _subjects_age }}s ago{% else %}warming up…{% endif %}
+    </span>
+  </header>
+
+  {% if engaging_subjects_error %}
+    <p class="text-xs text-warning italic">
+      <i class="fa-solid fa-triangle-exclamation"></i>
+      couldn't extract subjects: {{ engaging_subjects_error }}
+    </p>
+  {% elif not _has_subjects %}
+    <p class="text-xs text-muted italic">
+      Chat is too quiet or unfocused to identify distinct subjects right now.
+    </p>
+  {% else %}
+    <ul class="divide-y divide-subtle rounded-xl border border-accent/30 bg-accent/5 overflow-hidden">
+      {% for s in engaging_subjects %}
+        <li class="px-3 py-2.5 flex flex-col gap-1.5">
+          <div class="flex items-baseline gap-2 flex-wrap">
+            <span class="font-medium text-primary text-sm sm:text-base">{{ s.name }}</span>
+            <span class="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] uppercase tracking-wide rounded-full bg-accent/15 text-accent border border-accent/30">
+              <i class="fa-solid fa-users text-[9px]"></i>
+              {{ s.drivers | length }} chatter{{ '' if s.drivers|length == 1 else 's' }}
+            </span>
+            {% if s.msg_count %}
+              <span class="text-[10px] text-muted">{{ s.msg_count }} msg{{ '' if s.msg_count == 1 else 's' }}</span>
+            {% endif %}
+          </div>
+          {% if s.drivers %}
+            <div class="flex flex-wrap gap-1">
+              {% for d in s.drivers %}
+                <a href="/users/{{ d | urlencode }}"
+                   class="text-[11px] text-muted hover:text-accent hover:underline px-1.5 py-0.5 rounded bg-surface border border-subtle">
+                  {{ d }}
+                </a>
+              {% endfor %}
+            </div>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</section>
+{% endif %}

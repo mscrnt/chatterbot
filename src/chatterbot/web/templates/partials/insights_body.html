@@ -139,29 +139,57 @@
   </section>
   {% endif %}
 
+  {# Helper macro: per-row dismissal gate. A row is hidden when its
+     state is skipped, addressed, OR snoozed-not-yet-due. The
+     macro keeps the two panels below tidy. #}
+  {% macro _row_hidden(state) %}
+    {%- if state -%}
+      {%- if state.state in ('skipped', 'addressed') -%}true
+      {%- elif state.state == 'snoozed' and state.due_ts and state.due_ts > now_iso() -%}true
+      {%- else -%}false
+      {%- endif -%}
+    {%- else -%}false
+    {%- endif -%}
+  {% endmacro %}
+
   {# ---------------- Neglected lurkers ---------------- #}
-  {% if neglected_lurkers %}
+  {# Filter applied here so the empty-state appears even when the only
+     "neglected" entries are snoozed/addressed. #}
+  {% set _visible_lurkers = [] %}
+  {% for u in neglected_lurkers %}
+    {% set _s = (nl_states.get(u.twitch_id) if nl_states else None) %}
+    {% if _row_hidden(_s)|trim != 'true' %}
+      {% set _ = _visible_lurkers.append((u, _s)) %}
+    {% endif %}
+  {% endfor %}
+  {% if _visible_lurkers %}
   <section class="space-y-2">
     <header>
       <h2 class="font-semibold text-primary inline-flex items-center gap-2">
         <i class="fa-solid fa-user-clock text-warning"></i> Active but not engaged
-        <span class="text-[11px] text-muted">({{ neglected_lurkers | length }}) · here now, not addressed lately</span>
+        <span class="text-[11px] text-muted">({{ _visible_lurkers | length }}) · here now, not addressed lately</span>
       </h2>
     </header>
     <ul class="divide-y divide-subtle rounded-xl border border-warning/30 bg-warning/5 overflow-hidden">
-      {% for u in neglected_lurkers %}
-        <li class="px-3 py-2 text-sm flex items-center gap-3 hover:bg-warning/10">
+      {% for u, _s in _visible_lurkers %}
+        <li class="insight-card-root px-3 py-2 text-sm flex items-center gap-3 hover:bg-warning/10">
           {% with name=u.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
-          <span class="text-primary font-medium">{{ u.name }}</span>
+          <a href="/users/{{ u.twitch_id }}" class="text-primary font-medium hover:underline">{{ u.name }}</a>
           <span class="text-[11px] text-muted">last spoke {{ u.last_seen | short_ts }}</span>
-          <button type="button"
-                  class="ml-auto tap inline-flex items-center justify-center gap-1 px-2 rounded bg-warning/15 hover:bg-warning/25 text-warning text-xs"
-                  hx-get="/modals/insight/adhoc/{{ u.twitch_id }}"
-                  hx-target="#modal-root"
-                  hx-swap="innerHTML"
-                  title="Ad-hoc engagement angle">
-            <i class="fa-solid fa-comment-dots text-[10px]"></i> what to say
-          </button>
+          <div class="ml-auto flex items-center gap-2">
+            <button type="button"
+                    class="tap inline-flex items-center justify-center gap-1 px-2 rounded bg-warning/15 hover:bg-warning/25 text-warning text-xs"
+                    hx-get="/modals/insight/adhoc/{{ u.twitch_id }}"
+                    hx-target="#modal-root"
+                    hx-swap="innerHTML"
+                    title="Ad-hoc engagement angle">
+              <i class="fa-solid fa-comment-dots text-[10px]"></i> what to say
+            </button>
+            {% with kind='neglected_lurker', item_key=u.twitch_id,
+                    state=(_s.state if _s else None) %}
+              {% include "components/_insight_actions.html" %}
+            {% endwith %}
+          </div>
         </li>
       {% endfor %}
     </ul>
@@ -169,27 +197,51 @@
   {% endif %}
 
   {# ---------------- Talking to you (direct mentions) ---------------- #}
-  {% if direct_mentions %}
+  {# Dismiss/snooze keyed by user_id so acknowledging once hides every
+     mention from that chatter in the same panel. The actual mentions
+     stay in the messages table; this just hides them from this view. #}
+  {% set _visible_mentions = [] %}
+  {% for m in direct_mentions %}
+    {% set _s = (dm_states.get(m.user_id) if dm_states else None) %}
+    {% if _row_hidden(_s)|trim != 'true' %}
+      {% set _ = _visible_mentions.append((m, _s)) %}
+    {% endif %}
+  {% endfor %}
+  {% if _visible_mentions %}
   <section class="space-y-2">
     <header>
       <h2 class="font-semibold text-primary inline-flex items-center gap-2">
         <i class="fa-solid fa-comment-dots text-warning"></i> Talking to you
-        <span class="text-[11px] text-muted">({{ direct_mentions | length }})</span>
+        <span class="text-[11px] text-muted">({{ _visible_mentions | length }})</span>
       </h2>
     </header>
     <ul class="divide-y divide-subtle rounded-xl border border-warning/30 bg-warning/5 overflow-hidden">
-      {% for m in direct_mentions %}
-        <li class="px-3 py-2 text-sm flex items-baseline gap-2 hover:bg-warning/10">
+      {% for m, _s in _visible_mentions %}
+        <li class="insight-card-root px-3 py-2 text-sm flex items-baseline gap-2 hover:bg-warning/10">
           <span class="text-[10px] text-muted shrink-0">{{ m.ts | short_ts }}</span>
           {% with source=m.source %}{% include "components/_source_mark.html" %}{% endwith %}
           <a href="/users/{{ m.user_id }}?focus={{ m.id }}"
              class="text-accent hover:underline font-medium shrink-0">{{ m.name }}</a>
           <span class="text-primary break-words flex-1">{{ m.content }}</span>
+          <div class="shrink-0">
+            {% with kind='direct_mention', item_key=m.user_id,
+                    state=(_s.state if _s else None) %}
+              {% include "components/_insight_actions.html" %}
+            {% endwith %}
+          </div>
         </li>
       {% endfor %}
     </ul>
   </section>
   {% endif %}
+
+  {# ---------------- Engaging subjects ----------------
+     LLM-curated distinct conversation subjects from recent chat —
+     replaces the cosine-clustered "Live conversations" panel as the
+     primary "what's the room talking about" surface. Sensitive
+     subjects (religion / politics / controversy) filtered at the
+     prompt level so they never reach the dashboard. #}
+  {% include "partials/engaging_subjects.html" %}
 
   {# ---------------- Live conversation threads ---------------- #}
   {# Streamer feedback: per-chatter "talking points" sometimes hallucinate

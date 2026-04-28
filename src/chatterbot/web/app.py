@@ -253,6 +253,16 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 name="thread_recap_loop",
             )
         )
+        # Engaging-subjects extractor — separate subject-level pass
+        # over recent chat (distinct from topic_threads' cosine
+        # clustering). Filters religion/politics/controversy at the
+        # prompt level.
+        _bg_tasks.add(
+            asyncio.create_task(
+                insights.engaging_subjects_loop(),
+                name="engaging_subjects_loop",
+            )
+        )
         # OBS screenshot capture — pairs visual context with each
         # transcript group summary. No-op if OBS is unreachable.
         _bg_tasks.add(
@@ -1416,6 +1426,11 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "newc_states": repo.get_insight_states("newcomer"),
             "reg_states": repo.get_insight_states("regular"),
             "lapsed_states": repo.get_insight_states("lapsed"),
+            # Per-row dismissal for the "Talking to you" + "Active but
+            # not engaged" panels. Keyed by user_id so snoozing once
+            # hides every entry from that chatter for the window.
+            "dm_states": repo.get_insight_states("direct_mention"),
+            "nl_states": repo.get_insight_states("neglected_lurker"),
             # Activity pulse for the sparkline at the top.
             "pulse": repo.messages_per_minute(60),
             # Direct mentions (recent questions / @-style addresses).
@@ -1457,6 +1472,15 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             # thread but have all gone silent. Streamer can pivot back
             # to a topic to re-engage that group of people. Same skip/
             # addressed state machine as live threads (kind='thread').
+            # Engaging subjects — LLM-curated distinct conversation
+            # subjects from recent chat. Sensitive topics (religion /
+            # politics / controversy) filtered at the prompt level.
+            "engaging_subjects": insights.subjects_cache.subjects,
+            "engaging_subjects_age_seconds": (
+                int(_t.time() - insights.subjects_cache.refreshed_at)
+                if insights.subjects_cache.refreshed_at is not None else None
+            ),
+            "engaging_subjects_error": insights.subjects_cache.error,
             "quiet_cohorts": repo.list_quiet_thread_cohorts(
                 silence_minutes=int(getattr(settings, "quiet_cohort_silence_minutes", 15)),
                 lookback_hours=int(getattr(settings, "quiet_cohort_lookback_hours", 24)),
