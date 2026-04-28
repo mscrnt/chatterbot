@@ -1742,7 +1742,7 @@ class ChatterRepo:
                 LEFT JOIN insight_states s
                   ON s.kind = h.kind AND s.item_key = h.item_key
                 WHERE h.state = 'auto_pending'
-                  AND h.ts >= datetime('now', ?)
+                  AND datetime(h.ts) >= datetime('now', ?)
                   AND h.note IS NOT NULL
                 ORDER BY h.ts DESC
                 LIMIT ?
@@ -4993,8 +4993,17 @@ class ChatterRepo:
     # ============================ teardown =================================
 
     def close(self) -> None:
-        with self._lock:
-            self._conn.close()
+        # Best-effort: close the current thread's connection. Other
+        # threads' thread-local connections will be closed when their
+        # threads exit — Python finalizes thread-local storage on
+        # thread teardown.
+        conn = getattr(self._tl, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._tl.conn = None
 
 
 def _incident_row_from_row(r) -> IncidentRow:

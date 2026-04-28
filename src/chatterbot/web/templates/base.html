@@ -136,28 +136,37 @@
 
   {% set current_path = request.url.path %}
 
-  {# Sticky top nav #}
-  <header class="sticky top-0 z-30 bg-surface/95 backdrop-blur border-b border-subtle">
+  {# Sticky top nav. Below `lg` (1024 px — covers portrait monitors,
+     phones, and stacked second screens) we collapse the primary links
+     and utility icons into a hamburger dropdown so they stop
+     overlapping with the status pills. #}
+  <header class="sticky top-0 z-30 bg-surface/95 backdrop-blur border-b border-subtle"
+          x-data="{ menuOpen: false }"
+          @keydown.escape.window="menuOpen = false">
     <nav class="max-w-6xl mx-auto px-3 sm:px-4 flex items-center gap-1 sm:gap-2">
       <a href="/" class="font-semibold text-base sm:text-lg py-3 pr-2 sm:pr-3 whitespace-nowrap text-primary">
         <i class="fa-solid fa-circle-nodes text-accent mr-1"></i> chatterbot
       </a>
-      <div class="flex-1 flex items-center gap-1 overflow-x-auto">
+      {# Primary nav links — inline on lg+, in dropdown on smaller screens. #}
+      <div class="flex-1 hidden lg:flex items-center gap-1 overflow-x-auto">
         {% set is_chatters = current_path == "/" or current_path.startswith("/users") %}
         {% include "components/_nav_link.html" with context %}
       </div>
-      {# Live + Settings — icon-only, right-aligned in the utility cluster. #}
+      {# spacer so the right cluster anchors correctly when the link row is hidden #}
+      <div class="flex-1 lg:hidden"></div>
+      {# Live + Settings — icon-only, lg+ only. The hamburger below carries
+         them on smaller screens. #}
       <a href="/live"
          aria-label="Live"
          title="Live"
-         class="tap inline-flex items-center justify-center px-3 rounded transition-all duration-150 ease-out
+         class="tap hidden lg:inline-flex items-center justify-center px-3 rounded transition-all duration-150 ease-out
                 {% if current_path == '/live' %}bg-surface-raised text-primary{% else %}text-muted hover:text-primary hover:bg-surface-raised{% endif %}">
         <i class="fa-solid fa-tower-broadcast"></i>
       </a>
       <a href="/settings"
          aria-label="settings"
          title="Settings"
-         class="tap inline-flex items-center justify-center px-3 rounded transition-all duration-150 ease-out
+         class="tap hidden lg:inline-flex items-center justify-center px-3 rounded transition-all duration-150 ease-out
                 {% if current_path == '/settings' %}bg-surface-raised text-primary{% else %}text-muted hover:text-primary hover:bg-surface-raised{% endif %}">
         <i class="fa-solid fa-sliders"></i>
       </a>
@@ -213,18 +222,78 @@
       {% endif %}
       <button type="button"
               @click="toggleTheme()"
-              class="tap inline-flex items-center justify-center px-3 rounded text-muted hover:text-primary hover:bg-surface-raised transition-all duration-150 ease-out"
+              class="tap hidden lg:inline-flex items-center justify-center px-3 rounded text-muted hover:text-primary hover:bg-surface-raised transition-all duration-150 ease-out"
               aria-label="toggle theme">
         <i class="fa-solid fa-sun" x-show="!isDark"></i>
         <i class="fa-solid fa-moon" x-show="isDark"></i>
       </button>
       <button type="button"
               @click="openShortcuts()"
-              class="tap hidden sm:inline-flex items-center justify-center px-3 rounded text-muted hover:text-primary hover:bg-surface-raised transition-all duration-150 ease-out"
+              class="tap hidden lg:inline-flex items-center justify-center px-3 rounded text-muted hover:text-primary hover:bg-surface-raised transition-all duration-150 ease-out"
               aria-label="keyboard shortcuts">
         <kbd class="kb">?</kbd>
       </button>
+      {# Hamburger — only renders below lg. Toggles the dropdown panel
+         that holds primary nav links + utility actions. #}
+      <button type="button"
+              @click="menuOpen = !menuOpen"
+              :aria-expanded="menuOpen.toString()"
+              aria-label="toggle navigation menu"
+              class="tap lg:hidden inline-flex items-center justify-center px-3 rounded text-muted hover:text-primary hover:bg-surface-raised transition-all duration-150 ease-out">
+        <i class="fa-solid" :class="menuOpen ? 'fa-xmark' : 'fa-bars'"></i>
+      </button>
     </nav>
+
+    {# Mobile dropdown — collapsed by default, toggled by the hamburger.
+       Mirrors the lg+ inline layout: primary links, then utility icons,
+       then theme toggle + shortcuts. Status pills stay in the top bar
+       (their own responsive breakpoints already gate their visibility). #}
+    {% set is_chatters = current_path == "/" or current_path.startswith("/users") %}
+    {% set is_insights = current_path == '/insights' or current_path == '/topics' %}
+    <div class="lg:hidden border-t border-subtle bg-surface"
+         x-show="menuOpen"
+         x-transition.opacity.duration.150ms
+         x-cloak
+         @click.outside="menuOpen = false">
+      <div class="max-w-6xl mx-auto px-3 sm:px-4 py-2 grid grid-cols-2 gap-1">
+        {% set _mobile_links = [
+          ('/',         'Chatters',   'fa-users',                is_chatters),
+          ('/insights', 'Insights',   'fa-lightbulb',            is_insights),
+          ('/stats',    'Stats',      'fa-chart-pie',            current_path == '/stats'),
+          ('/events',   'Events',     'fa-coins',                current_path == '/events'),
+          ('/search',   'Search',     'fa-wand-magic-sparkles',  current_path == '/search'),
+          ('/live',     'Live',       'fa-tower-broadcast',      current_path == '/live'),
+        ] %}
+        {% if mod_mode_enabled %}
+          {% set _ = _mobile_links.append(('/moderation', 'Moderation', 'fa-shield-halved', current_path == '/moderation')) %}
+        {% endif %}
+        {% set _ = _mobile_links.append(('/settings', 'Settings', 'fa-sliders', current_path == '/settings')) %}
+        {% for href, label, icon, active in _mobile_links %}
+          <a href="{{ href }}"
+             @click="menuOpen = false"
+             class="tap inline-flex items-center gap-2 px-3 rounded text-sm transition-all duration-150 ease-out
+                    {% if active %}bg-surface-raised text-primary{% else %}text-muted hover:text-primary hover:bg-surface-raised{% endif %}">
+            <i class="fa-solid {{ icon }} text-base w-5 text-center"></i>
+            <span class="whitespace-nowrap">{{ label }}</span>
+          </a>
+        {% endfor %}
+      </div>
+      <div class="max-w-6xl mx-auto px-3 sm:px-4 pb-2 flex items-center gap-1 border-t border-subtle pt-2">
+        <button type="button"
+                @click="toggleTheme()"
+                class="tap inline-flex items-center gap-2 px-3 rounded text-sm text-muted hover:text-primary hover:bg-surface-raised transition-all duration-150 ease-out">
+          <i class="fa-solid fa-sun w-5 text-center" x-show="!isDark"></i>
+          <i class="fa-solid fa-moon w-5 text-center" x-show="isDark"></i>
+          <span x-text="isDark ? 'Light mode' : 'Dark mode'"></span>
+        </button>
+        <button type="button"
+                @click="openShortcuts(); menuOpen = false"
+                class="tap inline-flex items-center gap-2 px-3 rounded text-sm text-muted hover:text-primary hover:bg-surface-raised transition-all duration-150 ease-out">
+          <kbd class="kb">?</kbd>
+          <span>Shortcuts</span>
+        </button>
+      </div>
+    </div>
   </header>
 
   <main class="flex-1 max-w-6xl w-full mx-auto px-3 sm:px-4 py-4 sm:py-6">

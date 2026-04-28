@@ -46,6 +46,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from typing import Any
 
 import obspython as obs
@@ -112,6 +113,43 @@ def _bootstrap_cmd() -> list[str]:
 
 
 # ---------------- subprocess plumbing -----------------------------------
+
+
+def _drain_stream(slot: str, stream, label: str) -> None:
+    """Read lines from a subprocess pipe and forward them to the OBS
+    script log so the audio_client.py output is visible in real time
+    (otherwise it sits buffered in PIPE forever and only surfaces if the
+    process dies). Runs as a daemon thread; exits when the pipe closes."""
+    try:
+        for raw in iter(stream.readline, b""):
+            try:
+                line = raw.decode("utf-8", errors="replace").rstrip()
+            except Exception:
+                line = repr(raw)
+            if not line:
+                continue
+            print(f"[{slot}{':err' if label == 'stderr' else ''}] {line}")
+    except (ValueError, OSError):
+        # ValueError = stream closed mid-read; OSError = broken pipe.
+        # Either way, the subprocess has gone away — script_tick will
+        # pick up the exit + decide whether to restart.
+        pass
+
+
+def _start_log_drainers(slot: str, proc: subprocess.Popen) -> None:
+    """Spin up the two daemon threads that relay stdout/stderr."""
+    if proc.stdout is not None:
+        t = threading.Thread(
+            target=_drain_stream, args=(slot, proc.stdout, "stdout"),
+            daemon=True, name=f"chatterbot-drain-{slot}-out",
+        )
+        t.start()
+    if proc.stderr is not None:
+        t = threading.Thread(
+            target=_drain_stream, args=(slot, proc.stderr, "stderr"),
+            daemon=True, name=f"chatterbot-drain-{slot}-err",
+        )
+        t.start()
 
 
 def _popen_kwargs() -> dict:
@@ -203,7 +241,11 @@ def _spawn_for_slot(slot: str, device_idx: str, loopback: bool) -> None:
         print(f"[chatterbot] cannot start {slot}: venv not bootstrapped yet")
         return
     cmd = [
-        py, os.path.join(_scripts_dir(), "audio_client.py"),
+        # `-u` forces unbuffered stdout/stderr — without it Python
+        # block-buffers when its output is a pipe, and the drainer
+        # threads see nothing until a buffer fills (often never, since
+        # audio_client.py prints sparingly).
+        py, "-u", os.path.join(_scripts_dir(), "audio_client.py"),
         "--device", str(device_idx),
         "--url", _state["url"] or "http://127.0.0.1:8765",
     ]
@@ -215,6 +257,7 @@ def _spawn_for_slot(slot: str, device_idx: str, loopback: bool) -> None:
     try:
         proc = subprocess.Popen(cmd, **_popen_kwargs())
         _state["procs"][slot] = proc
+        _start_log_drainers(slot, proc)
         print(f"[chatterbot] started {slot} (pid={proc.pid}, device={device_idx}{', loopback' if loopback else ''})")
     except OSError as e:
         print(f"[chatterbot] failed to start {slot}: {e}")
@@ -408,15 +451,9 @@ def script_tick(_seconds: float) -> None:
         rc = proc.poll()
         if rc is None:
             continue
-        # Drain stderr for the OBS log so the user can see why it died.
-        try:
-            err = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
-            if err:
-                print(f"[chatterbot] {slot} subprocess exited rc={rc}:\n{err}")
-            else:
-                print(f"[chatterbot] {slot} subprocess exited rc={rc}")
-        except OSError:
-            pass
+        # The drainer threads have already relayed stderr to the OBS
+        # log line-by-line; we just need to announce the exit code.
+        print(f"[chatterbot] {slot} subprocess exited rc={rc}")
         # Auto-restart with the same config. If the device went away we
         # can't recover, but the next tick will exit again and the user
         # will see repeating log lines — clearer than silence.

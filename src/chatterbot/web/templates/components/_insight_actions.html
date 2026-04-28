@@ -27,7 +27,8 @@
       <i class="fa-solid fa-microphone-lines text-[10px]"></i>
       heard you address this — confirm?
     </span>
-    <form hx-post="/insights/state" hx-swap="none" class="inline-flex">
+    <form hx-post="/insights/state" hx-swap="none" class="inline-flex"
+          hx-on::after-request="if(event.detail.successful) this.closest('.insight-card-root')?.remove()">
       <input type="hidden" name="kind" value="{{ kind }}">
       <input type="hidden" name="item_key" value="{{ item_key }}">
       <input type="hidden" name="action" value="confirm_pending">
@@ -37,7 +38,8 @@
         <i class="fa-solid fa-check text-[10px]"></i> yes
       </button>
     </form>
-    <form hx-post="/insights/state" hx-swap="none" class="inline-flex">
+    <form hx-post="/insights/state" hx-swap="none" class="inline-flex"
+          hx-on::after-request="if(event.detail.successful) this.closest('.insight-card-root')?.remove()">
       <input type="hidden" name="kind" value="{{ kind }}">
       <input type="hidden" name="item_key" value="{{ item_key }}">
       <input type="hidden" name="action" value="reject_pending">
@@ -77,8 +79,12 @@
       </button>
     </form>
   {% else %}
-    {# Open card — full action row. #}
-    <form hx-post="/insights/state" hx-swap="none" class="inline-flex">
+    {# Open card — full action row. After any state change, the form
+       removes its own card from the DOM so the page stays anchored
+       where the streamer was looking. The 60 s tick re-builds the body
+       from server state to pick up changes from other surfaces. #}
+    <form hx-post="/insights/state" hx-swap="none" class="inline-flex"
+          hx-on::after-request="if(event.detail.successful) this.closest('.insight-card-root')?.remove()">
       <input type="hidden" name="kind" value="{{ kind }}">
       <input type="hidden" name="item_key" value="{{ item_key }}">
       <input type="hidden" name="action" value="addressed">
@@ -99,7 +105,8 @@
       </button>
       <span x-show="open" x-cloak class="inline-flex gap-0.5 ml-1">
         {% for label, val in [('10m','10m'),('30m','30m'),('1h','1h'),('24h','24h')] %}
-          <form hx-post="/insights/state" hx-swap="none" class="inline-flex">
+          <form hx-post="/insights/state" hx-swap="none" class="inline-flex"
+                hx-on::after-request="if(event.detail.successful) this.closest('.insight-card-root')?.remove()">
             <input type="hidden" name="kind" value="{{ kind }}">
             <input type="hidden" name="item_key" value="{{ item_key }}">
             <input type="hidden" name="action" value="snooze">
@@ -122,7 +129,8 @@
         <i class="fa-solid fa-thumbtack text-[10px]"></i>
       </button>
     </form>
-    <form hx-post="/insights/state" hx-swap="none" class="inline-flex">
+    <form hx-post="/insights/state" hx-swap="none" class="inline-flex"
+          hx-on::after-request="if(event.detail.successful) this.closest('.insight-card-root')?.remove()">
       <input type="hidden" name="kind" value="{{ kind }}">
       <input type="hidden" name="item_key" value="{{ item_key }}">
       <input type="hidden" name="action" value="skip">

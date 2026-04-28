@@ -4,8 +4,13 @@
    already spoken to on stream. The streamer never types in chat. #}
 <div id="insights-body" class="space-y-5"
      hx-get="/insights?view=engagement&partial=1&window={{ window }}"
-     hx-trigger="every 60s, insights-state-changed from:body"
+     hx-trigger="every 60s"
      hx-swap="outerHTML">
+{# Note: insights-state-changed is intentionally NOT listed as a trigger.
+   Clicking "addressed" on a card does a client-side remove (see the
+   action forms in components/_insight_actions.html), so the page stays
+   anchored where the streamer was looking. The 60 s tick pulls in any
+   server-side changes from other surfaces. #}
 
   {# ---------------- Live transcript strip (whisper) ---------------- #}
   {% if transcript_status and (transcript_status.enabled or transcript_chunks) %}
@@ -240,9 +245,11 @@
         {% endif %}
       {% endfor %}
       {# Auto-pending lands at the very top so the streamer sees it
-         instantly; the rest follow the normal pinned → due → open
-         → addressed order. #}
-      {% set _ordered = _pending_tps + _pinned_tps + _due_tps + _open_tps + _addr_tps %}
+         instantly; the rest follow the normal pinned → due → open order.
+         Addressed cards live in a collapsed <details> below — once the
+         streamer has spoken to them, they shouldn't crowd the active
+         feed any more. #}
+      {% set _ordered = _pending_tps + _pinned_tps + _due_tps + _open_tps %}
       {% set _snoozed_tps = [] %}
       {% for tp in talking_points %}
         {% set _s = (tp_states.get(tp.item_key) if tp_states else None) %}
@@ -318,6 +325,31 @@
           </ul>
         </details>
       {% endif %}
+
+      {# Addressed talking points — collapsed by default. Streamer
+         feedback: "when chatters are marked addressed, they need to be
+         hidden from the feed." Kept here as a review surface with undo
+         so they can roll one back without waiting for a full refresh. #}
+      {% if _addr_tps %}
+        <details class="text-xs text-muted mt-2">
+          <summary class="cursor-pointer inline-flex items-center gap-1 hover:text-primary">
+            <i class="fa-solid fa-check-double text-success"></i>
+            {{ _addr_tps | length }} addressed — view
+          </summary>
+          <ul class="mt-2 space-y-2 ml-4">
+            {% for tp, _s in _addr_tps %}
+              <li class="insight-card-root flex items-baseline gap-2 text-xs">
+                <span class="text-accent">{{ tp.name }}</span>
+                <span class="text-muted truncate flex-1">{{ tp.point | truncate(100) }}</span>
+                {% with kind='talking_point', item_key=tp.item_key,
+                        state=_s.state %}
+                  {% include "components/_insight_actions.html" %}
+                {% endwith %}
+              </li>
+            {% endfor %}
+          </ul>
+        </details>
+      {% endif %}
     {% endif %}
   </section>
 
@@ -333,7 +365,7 @@
     <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
       {% for u, milestone in anniversaries %}
         {% set _s = (anniv_states.get(u.twitch_id) if anniv_states else None) %}
-        {% if not _s or _s.state != 'skipped' %}
+        {% if not _s or _s.state not in ('skipped', 'addressed') %}
           {% set _is_addr = _s and _s.state == 'addressed' %}
           <div class="insight-card-root flex items-center gap-3 rounded-xl border p-3 transition-all duration-150 ease-out
                       {% if _is_addr %}border-subtle bg-surface opacity-50{% else %}border-accent/40 bg-accent/5 hover:bg-accent/10{% endif %}">
@@ -378,7 +410,7 @@
       <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
         {% for u in newcomers %}
           {% set _s = (newc_states.get(u.twitch_id) if newc_states else None) %}
-          {% if not _s or _s.state != 'skipped' %}
+          {% if not _s or _s.state not in ('skipped', 'addressed') %}
             {% set _is_addr = _s and _s.state == 'addressed' %}
             <li class="insight-card-root px-3 py-2 text-sm flex items-center gap-3 hover:bg-surface-raised
                        {% if _is_addr %}opacity-50{% endif %}">
@@ -417,7 +449,7 @@
       <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
         {% for r in regulars %}
           {% set _s = (reg_states.get(r.user.twitch_id) if reg_states else None) %}
-          {% if not _s or _s.state != 'skipped' %}
+          {% if not _s or _s.state not in ('skipped', 'addressed') %}
             {% set _is_addr = _s and _s.state == 'addressed' %}
             <li class="insight-card-root px-3 py-2 text-sm flex items-center gap-3 hover:bg-surface-raised
                        {% if _is_addr %}opacity-50{% endif %}">
@@ -461,7 +493,7 @@
       <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
         {% for r in lapsed %}
           {% set _s = (lapsed_states.get(r.user.twitch_id) if lapsed_states else None) %}
-          {% if not _s or _s.state != 'skipped' %}
+          {% if not _s or _s.state not in ('skipped', 'addressed') %}
             {% set _is_addr = _s and _s.state == 'addressed' %}
             <li class="insight-card-root px-3 py-2 text-sm flex items-center gap-3 hover:bg-surface-raised
                        {% if _is_addr %}opacity-50{% endif %}">
