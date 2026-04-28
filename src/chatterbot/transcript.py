@@ -775,18 +775,31 @@ When in doubt, return NO match. Empty `matches` list is the expected, common out
     GROUP_SUMMARY_NUM_CTX = 8192
     GROUP_SUMMARY_TRUNCATE_PER_CHUNK = 200
 
-    GROUP_SUMMARY_SYSTEM = """You're labeling a window of streamer voice transcripts on a Twitch dashboard, with an attached screenshot grid showing what was on the streamer's OBS scene during that same window.
+    GROUP_SUMMARY_SYSTEM = """You're labeling a window of streamer voice transcripts on a Twitch dashboard. An attached image shows what was on the streamer's OBS scene during this same window — use it as SILENT CONTEXT, not as content.
 
-Write ONE 1-2 sentence OBSERVATIONAL summary that combines BOTH sources:
-  - what the streamer SAID (the utterances), and
-  - what was VISIBLE on screen (the screenshot grid — gameplay HUD, cam shot, on-screen text, scene name, characters, or whatever the scene contains).
+Write ONE 1-2 sentence OBSERVATIONAL summary of WHAT THE STREAMER SAID. The audio is primary. The image exists only to help you ground the audio:
+  - resolve pronouns / vague nouns ("the boss" → "the Malenia boss in Elden Ring"),
+  - name the game / app / scene if it's relevant to what was said,
+  - back up an ambiguous word the streamer used.
 
-The screenshots are ground truth — you may describe what's in them as confidently as the utterances. Together they're complementary; "the streamer reacts to a boss fight in [game]" is more useful than just "the streamer reacts to something."
+NEVER describe the image directly. Do NOT mention:
+  - the image itself ("the screenshot shows", "in the image"),
+  - the image format ("four-panel grid", "2x2 grid", "panel", "thumbnail"),
+  - the cam ("webcam inset", "the streamer is visible in"),
+  - the layout ("alongside a UI displaying", "next to the cam").
+
+Bad example (your output keeps doing this — STOP):
+  "In a four-panel grid of the game Parkitect, the streamer explores a park scene while discussing digital tickets."
+
+Good example (image used silently to identify the game; summary about what was said):
+  "The streamer talks about a new feature in Parkitect that lets guests buy tickets in advance."
 
 HARD RULES:
-- Pure description. Don't tell the streamer anything ("you should…", advice).
-- Stay grounded — don't invent products, events, plot points, or characters that aren't visible/audible. If the gameplay shows a generic menu or cam, just say so.
-- Skip filler: if both the utterances AND the image are uninformative (one-word reactions, blank scene, etc.), return an empty `summary` string.
+- Audio is primary. Lead with what was said. Use the image only to fill in nouns the streamer left implicit.
+- If you can't tell the image is adding anything, just summarise the audio alone.
+- No advice ("you should…").
+- Don't invent products, events, plot points, or characters that aren't in the audio or the image.
+- Skip filler: empty `summary` is fine when the utterances are one-word reactions or noise.
 
 Reply with `summary` = the line (or empty string).
 """
@@ -864,11 +877,12 @@ Reply with `summary` = the line (or empty string).
                 screenshot_count = len(shots)
 
         image_note = (
-            f"\n\nThe attached image is a {screenshot_count}-cell grid of "
-            "OBS scene screenshots from this same window, oldest top-left, "
-            "newest bottom-right. Treat what's in the image as ground truth: "
-            "describe what's visible (game / scene / characters / on-screen "
-            "text / cam) alongside what the streamer said."
+            "\n\nAn image is attached showing what was on screen during this "
+            "window. Use it ONLY as silent context: identify the game/app, "
+            "resolve vague nouns the streamer used, verify an ambiguous word. "
+            "Do NOT describe the image, its layout, or mention that it's "
+            "attached. The summary should read as if you only heard the "
+            "audio, with the image silently helping you understand it."
         ) if screenshot_count else ""
 
         prompt = (
