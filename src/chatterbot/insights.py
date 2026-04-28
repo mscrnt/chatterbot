@@ -103,10 +103,18 @@ class InsightsService:
     ACTIVE_WINDOW_MINUTES = 10
     RECENT_MESSAGES_PER_USER = 6
 
-    def __init__(self, repo: ChatterRepo, llm: OllamaClient, settings: Settings):
+    def __init__(
+        self, repo: ChatterRepo, llm: OllamaClient, settings: Settings,
+        *, twitch_status=None,  # Optional[TwitchService] — for channel context
+    ):
         self.repo = repo
         self.llm = llm
         self.settings = settings
+        # Used by the engaging-subjects extractor to inject "streamer
+        # is currently playing X" into the prompt so the LLM can
+        # disambiguate game-specific jargon. None when the dashboard
+        # boots without TwitchService (e.g. no oauth token configured).
+        self.twitch_status = twitch_status
         self._cache = InsightsCache(talking_points=[], refreshed_at=None, error=None)
         self._subjects_cache = EngagingSubjectsCache(
             subjects=[], refreshed_at=None, error=None,
@@ -548,8 +556,28 @@ IMPORTANT: emit observation, not advice. No "you should…", no "the streamer co
                         "include it in your output. The streamer has already "
                         "decided this isn't a useful subject."
                     )
+            # Channel context — what the streamer is actually playing
+            # / streaming right now. Helps the LLM ground game-specific
+            # jargon (e.g. "parry timing" vs "wallbang" mean different
+            # things in different games).
+            channel_context = ""
+            if self.twitch_status is not None:
+                ts = getattr(self.twitch_status, "status", None)
+                if ts is not None and getattr(ts, "is_live", False):
+                    bits = []
+                    if getattr(ts, "game_name", None):
+                        bits.append(f"playing/streaming: {ts.game_name}")
+                    if getattr(ts, "title", None):
+                        bits.append(f"stream title: {ts.title}")
+                    if bits:
+                        channel_context = (
+                            "CHANNEL CONTEXT (the streamer is currently "
+                            "live; chat may reference this): "
+                            + " · ".join(bits) + "\n\n"
+                        )
             prompt = (
-                f"Recent chat ({len(msgs)} msgs over the last "
+                channel_context
+                + f"Recent chat ({len(msgs)} msgs over the last "
                 f"{window_min} min, oldest first):\n"
                 + "\n".join(lines)
                 + blocklist_lines

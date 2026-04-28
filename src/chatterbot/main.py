@@ -22,6 +22,7 @@ from .config import Settings, get_settings
 from .diagnose import build_diagnostic_bundle, default_bundle_filename
 from .discord_bot import DiscordListener
 from .llm.ollama_client import OllamaClient
+from .helix_sync import HelixSyncService
 from .logging_setup import setup_logging
 from .moderator import Moderator
 from .obs import OBSStatusService
@@ -144,6 +145,13 @@ async def run_bot(settings: Settings) -> None:
         moderator = Moderator(repo, llm, settings)
         tasks.append(asyncio.create_task(moderator.review_loop(), name="moderator"))
         logger.info("moderation mode ENABLED — advisory-only classifier active")
+    # Helix roster sync — VIPs / mods / subs / followers polled
+    # periodically into the users table. No-op without scopes or
+    # without TWITCH_OAUTH_TOKEN. OBS-aware: pauses while offline.
+    helix_sync = HelixSyncService(settings, repo, obs=obs)
+    if helix_sync.configured:
+        tasks.append(asyncio.create_task(helix_sync.run(), name="helix_sync"))
+
     # Cross-platform listeners. Both no-op when disabled or unconfigured.
     # YouTube takes the OBS poller so it can skip its 100-unit search.list
     # while we're not actually streaming (OBS-confirmed offline).

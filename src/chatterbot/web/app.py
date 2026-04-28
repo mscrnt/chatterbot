@@ -183,11 +183,14 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     auth_dep = make_auth_dependency(settings)
     deps = [Depends(auth_dep)] if settings.dashboard_basic_auth_enabled else []
 
-    insights = InsightsService(repo, llm, settings)
     obs_status = OBSStatusService(settings)
     # The Helix poller consults OBS so it can pause itself while we're
     # not actually streaming. Same defaults-on-uncertainty contract.
     twitch_status = TwitchService(settings, obs=obs_status)
+    # InsightsService takes the twitch_status so the engaging-subjects
+    # extractor can include channel context (current game, title) in
+    # its prompt. Helps the LLM disambiguate game-specific jargon.
+    insights = InsightsService(repo, llm, settings, twitch_status=twitch_status)
     # Real-time transcript service. Owns the whisper model (lazy-loaded
     # on first audio chunk) + match-to-card cache. No-op when disabled.
     from ..transcript import TranscriptService

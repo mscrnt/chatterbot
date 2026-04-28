@@ -69,6 +69,7 @@ class User:
     interests: list[str] | None = None  # deduped, capped, ordered by recency
     profile_updated_at: str | None = None
     is_starred: bool = False          # streamer-personal favorite
+    followed_at: str | None = None    # ISO-UTC; populated by HelixSyncService
 
 
 @dataclass
@@ -480,6 +481,11 @@ class ChatterRepo:
                 # native VIP role. Drives the gold-bordered live-widget
                 # surfacing + the "starred chatters present" insights row.
                 ("is_starred",          "INTEGER NOT NULL DEFAULT 0"),
+                # When this user followed the broadcaster's channel.
+                # Populated by HelixSyncService (channel-followers poll).
+                # NULL = unknown / not following at the time of last
+                # sync. Surfaced as a "follower for Nd" pill on profiles.
+                ("followed_at",         "TEXT"),
             ):
                 if col not in _ucols:
                     cur.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
@@ -3135,7 +3141,7 @@ class ChatterRepo:
             profile_updated_at=(
                 r["profile_updated_at"] if "profile_updated_at" in r.keys() else None
             ),
-            is_starred=bool(r["is_starred"]) if "is_starred" in r.keys() else False,
+            is_starred=bool(r["is_starred"]) if "is_starred" in r.keys() else False, followed_at=(r["followed_at"] if "followed_at" in r.keys() else None),
         )
 
     # ============================ Neglected lurkers =======================
@@ -3569,6 +3575,7 @@ class ChatterRepo:
                         is_vip=bool(r["is_vip"]),
                         is_founder=bool(r["is_founder"]),
                         is_starred=bool(r["is_starred"]),
+                        followed_at=r["followed_at"] if "followed_at" in r.keys() else None,
                     ),
                     note_count=int(r["note_count"]),
                     msg_count=int(r["msg_count"]),
@@ -3645,7 +3652,7 @@ class ChatterRepo:
                 "sub_tier, sub_months, is_mod, is_vip, is_founder, "
                 "source, merged_into, "
                 "pronouns, location, demeanor, interests, profile_updated_at, "
-                "is_starred "
+                "is_starred, followed_at "
                 "FROM users WHERE twitch_id = ?",
                 (twitch_id,),
             )
@@ -3680,6 +3687,7 @@ class ChatterRepo:
                 interests=interests,
                 profile_updated_at=r["profile_updated_at"],
                 is_starred=bool(r["is_starred"]),
+                followed_at=r["followed_at"] if "followed_at" in r.keys() else None,
             )
 
     def get_user_aliases(self, user_id: str) -> list[Alias]:
@@ -3932,6 +3940,132 @@ class ChatterRepo:
         with self._cursor() as cur:
             cur.execute("DELETE FROM vec_notes WHERE note_id = ?", (note_id,))
             cur.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+
+    def set_user_followed_at(self, twitch_id: str, followed_at: str | None) -> None:
+        """Update users.followed_at without touching anything else.
+        Idempotent — setting the same value is a no-op. Called by the
+        HelixSyncService after each /channels/followers poll."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE users SET followed_at = ? WHERE twitch_id = ?",
+                (followed_at, twitch_id),
+            )
+
+    def upsert_chatter_minimal(
+        self, twitch_id: str, name: str, source: str = "twitch",
+    ) -> bool:
+        """Lightweight upsert used by Helix sync — inserts a stub row
+        if the user has never spoken in chat, so Helix-only signals
+        (sub list, follower list, vip/mod list) get persisted even
+        before the chatter sends their first message. Returns True if
+        a new row was created.
+
+        Differs from `upsert_user` in that we don't touch first_seen /
+        last_seen — those are chat-driven timestamps and shouldn't be
+        falsely advanced just because Helix saw them.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM users WHERE twitch_id = ? LIMIT 1",
+                (twitch_id,),
+            )
+            if cur.fetchone():
+                return False
+            now = _now_iso()
+            cur.execute(
+                """
+                INSERT INTO users(
+                    twitch_id, name, first_seen, last_seen, opt_out, source
+                ) VALUES (?, ?, ?, ?, 0, ?)
+                """,
+                (twitch_id, name, now, now, source),
+            )
+            return True
+
+    def helix_apply_role_snapshot(
+        self,
+        *,
+        vips:    dict[str, str] | None = None,  # twitch_id -> login
+        mods:    dict[str, str] | None = None,
+        subs:    dict[str, dict] | None = None,  # twitch_id -> {login, tier}
+        followers: dict[str, dict] | None = None,  # twitch_id -> {login, followed_at}
+    ) -> dict[str, int]:
+        """Bulk apply a Helix snapshot to the users table. Each map is
+        optional — pass only the slices you have scope for. Returns a
+        per-slice count of rows touched (existing + inserted).
+
+        Semantics:
+          - vips/mods: the role flag is set TRUE for users in the snapshot
+            and FALSE for users not in the snapshot but currently flagged
+            (so role removals propagate). Subs follow the same pattern
+            for sub_tier (None when no longer subbed). Followers update
+            followed_at to whatever Helix returned; followers not in the
+            current poll are left alone (we only ever poll the recent
+            page, so absence isn't a signal of unfollow).
+          - sub_months is preserved — Helix's `/subscriptions` doesn't
+            return cumulative months, only the current tier. IRCv3 tags
+            from incoming chat keep that field accurate.
+          - is_founder is preserved — Helix has no notion of it; the
+            badge comes from chat tags only.
+
+        New rows are inserted via upsert_chatter_minimal so a chatter
+        we've never had chat from still gets a record.
+        """
+        counts = {"vips": 0, "mods": 0, "subs": 0, "followers": 0}
+
+        # Insert stubs for any user we've never seen in chat. Doing
+        # this first means subsequent UPDATEs hit existing rows.
+        for snap in (vips, mods, subs, followers):
+            if not snap:
+                continue
+            for uid, info in snap.items():
+                if isinstance(info, dict):
+                    name = info.get("login") or info.get("name") or uid
+                else:
+                    name = info or uid
+                self.upsert_chatter_minimal(uid, name)
+
+        with self._cursor() as cur:
+            if vips is not None:
+                cur.execute("UPDATE users SET is_vip = 0 WHERE is_vip = 1")
+                for uid in vips:
+                    cur.execute(
+                        "UPDATE users SET is_vip = 1 WHERE twitch_id = ?",
+                        (uid,),
+                    )
+                    counts["vips"] += cur.rowcount
+            if mods is not None:
+                cur.execute("UPDATE users SET is_mod = 0 WHERE is_mod = 1")
+                for uid in mods:
+                    cur.execute(
+                        "UPDATE users SET is_mod = 1 WHERE twitch_id = ?",
+                        (uid,),
+                    )
+                    counts["mods"] += cur.rowcount
+            if subs is not None:
+                # Wipe sub_tier for everyone currently flagged; the
+                # snapshot then re-asserts.
+                cur.execute(
+                    "UPDATE users SET sub_tier = NULL WHERE sub_tier IS NOT NULL"
+                )
+                for uid, info in subs.items():
+                    cur.execute(
+                        "UPDATE users SET sub_tier = ? WHERE twitch_id = ?",
+                        (info.get("tier") or None, uid),
+                    )
+                    counts["subs"] += cur.rowcount
+            if followers is not None:
+                # Don't wipe — followers not in this page might just
+                # be older. Only update what we observed.
+                for uid, info in followers.items():
+                    cur.execute(
+                        "UPDATE users SET followed_at = COALESCE(followed_at, ?) "
+                        "WHERE twitch_id = ?",
+                        (info.get("followed_at"), uid),
+                    )
+                    counts["followers"] += cur.rowcount
+
+        return counts
 
     def reset_session_addressed_states(self) -> int:
         """Clear all current 'addressed' insight_states. Used at the

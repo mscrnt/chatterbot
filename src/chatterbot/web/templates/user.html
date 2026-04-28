@@ -82,6 +82,15 @@
           {% include "components/_pill.html" %}
         {% endwith %}
       {% endif %}
+      {% if user.followed_at %}
+        {# Follow-date pill — Helix-derived. Computes "Nd" (days) for
+           recent follows, "Nmo" otherwise. Lightweight; no extra Python
+           filter needed. #}
+        {% set _f_iso = user.followed_at[:10] %}
+        {% with label='followed ' ~ (user.followed_at | short_ts | replace(' ', ' @ ')), tone='success', icon='fa-heart' %}
+          {% include "components/_pill.html" %}
+        {% endwith %}
+      {% endif %}
       <div id="opt-out-area" class="contents">
         {% include "partials/opt_out_badge.html" %}
       </div>
