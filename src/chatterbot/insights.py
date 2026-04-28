@@ -40,14 +40,18 @@ You'll get a numbered list of active chatters, each with:
   - a few of their most recent messages
   - optionally, the current channel-wide topic context
 
-For each chatter, produce ONE short conversation-starter the streamer could use. Keep each line under 25 words.
+For each chatter, produce AT MOST ONE short conversation-starter the streamer could use. Keep each line under 25 words. Skipping is the expected default — only emit a hook when it's clearly grounded.
 
-RULES:
-- Be specific. Reference an actual note or recent message. Avoid generic "ask how their day is."
-- Don't fabricate facts. Only use what's in their notes / messages.
-- Don't speculate about their feelings or intent. Stay observational.
-- Skip a chatter (omit them from your reply) if you genuinely have nothing concrete to suggest.
+HARD RULES (violations make the dashboard worse, not better):
+- ONLY paraphrase content that literally appears in this chatter's notes or recent messages. Do not bridge, infer, or extrapolate.
+- A chatter mentioning a topic ONCE in their recent messages is NOT a hook. Wait for them to return to it. Single-mention notes are background, not chat-current.
+- NEVER invent or assume the existence of products, releases, events, places, people, or facts that aren't directly attested in their messages. If a chatter says "excited for the FF8 remake," you do NOT know an FF8 remake exists — you only know the chatter said that. Phrase the hook as "they mentioned being excited for an FF8 remake" rather than "the FF8 remake."
+- If a hook would require asserting something beyond what you can quote, SKIP this chatter. An empty `points` list is fine.
+- Don't speculate about feelings or intent. Stay observational.
+- Don't recycle the same hook the streamer has clearly already addressed (their recent messages may show this).
 - Reply with chatter_index matching the number in the input, and `point` = the line.
+
+When in doubt, skip. The cost of a missed hook is zero; the cost of a hallucinated one is the streamer publicly riffing on something that doesn't exist.
 """
 
 

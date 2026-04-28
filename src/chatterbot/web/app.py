@@ -1398,6 +1398,16 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "recent_matches": repo.list_recent_transcript_matches(
                 limit=15, window_minutes=60,
             ),
+            # Live conversation threads — surface "what's the room
+            # actually talking about right now" alongside the per-
+            # chatter hooks. Streamer feedback: thread summaries with
+            # participants are more useful than hallucinated per-
+            # chatter hooks; this panel grounds suggestions in actual
+            # clustered chat content.
+            "live_threads": repo.list_threads(
+                status_filter="active", query="", limit=12,
+            ),
+            "live_thread_states": repo.get_insight_states("thread"),
         }
 
     def _build_topics_ctx(status: str, q: str) -> dict:

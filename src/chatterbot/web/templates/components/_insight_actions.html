@@ -28,7 +28,7 @@
       heard you address this — confirm?
     </span>
     <form hx-post="/insights/state" hx-swap="none" class="inline-flex"
-          hx-on::after-request="if(event.detail.successful) this.closest('.insight-card-root')?.remove()">
+          hx-on::after-request="if(event.detail.successful) window.chatterbotRemoveCard(this)">
       <input type="hidden" name="kind" value="{{ kind }}">
       <input type="hidden" name="item_key" value="{{ item_key }}">
       <input type="hidden" name="action" value="confirm_pending">
@@ -39,7 +39,7 @@
       </button>
     </form>
     <form hx-post="/insights/state" hx-swap="none" class="inline-flex"
-          hx-on::after-request="if(event.detail.successful) this.closest('.insight-card-root')?.remove()">
+          hx-on::after-request="if(event.detail.successful) window.chatterbotRemoveCard(this)">
       <input type="hidden" name="kind" value="{{ kind }}">
       <input type="hidden" name="item_key" value="{{ item_key }}">
       <input type="hidden" name="action" value="reject_pending">
@@ -84,7 +84,7 @@
        where the streamer was looking. The 60 s tick re-builds the body
        from server state to pick up changes from other surfaces. #}
     <form hx-post="/insights/state" hx-swap="none" class="inline-flex"
-          hx-on::after-request="if(event.detail.successful) this.closest('.insight-card-root')?.remove()">
+          hx-on::after-request="if(event.detail.successful) window.chatterbotRemoveCard(this)">
       <input type="hidden" name="kind" value="{{ kind }}">
       <input type="hidden" name="item_key" value="{{ item_key }}">
       <input type="hidden" name="action" value="addressed">
@@ -106,7 +106,7 @@
       <span x-show="open" x-cloak class="inline-flex gap-0.5 ml-1">
         {% for label, val in [('10m','10m'),('30m','30m'),('1h','1h'),('24h','24h')] %}
           <form hx-post="/insights/state" hx-swap="none" class="inline-flex"
-                hx-on::after-request="if(event.detail.successful) this.closest('.insight-card-root')?.remove()">
+                hx-on::after-request="if(event.detail.successful) window.chatterbotRemoveCard(this)">
             <input type="hidden" name="kind" value="{{ kind }}">
             <input type="hidden" name="item_key" value="{{ item_key }}">
             <input type="hidden" name="action" value="snooze">
@@ -130,7 +130,7 @@
       </button>
     </form>
     <form hx-post="/insights/state" hx-swap="none" class="inline-flex"
-          hx-on::after-request="if(event.detail.successful) this.closest('.insight-card-root')?.remove()">
+          hx-on::after-request="if(event.detail.successful) window.chatterbotRemoveCard(this)">
       <input type="hidden" name="kind" value="{{ kind }}">
       <input type="hidden" name="item_key" value="{{ item_key }}">
       <input type="hidden" name="action" value="skip">

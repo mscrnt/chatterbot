@@ -5,12 +5,15 @@
 <div id="insights-body" class="space-y-5"
      hx-get="/insights?view=engagement&partial=1&window={{ window }}"
      hx-trigger="every 60s"
-     hx-swap="outerHTML">
+     hx-swap="outerHTML"
+     hx-on::before-swap="window.__chatterbotPreserveScroll = window.scrollY"
+     hx-on::after-swap="if(typeof window.__chatterbotPreserveScroll === 'number') window.scrollTo(0, window.__chatterbotPreserveScroll)">
 {# Note: insights-state-changed is intentionally NOT listed as a trigger.
    Clicking "addressed" on a card does a client-side remove (see the
    action forms in components/_insight_actions.html), so the page stays
    anchored where the streamer was looking. The 60 s tick pulls in any
-   server-side changes from other surfaces. #}
+   server-side changes from other surfaces — and the scroll-preserve
+   handlers above keep the viewport pinned across the full-body swap. #}
 
   {# ---------------- Live transcript strip (whisper) ---------------- #}
   {% if transcript_status and (transcript_status.enabled or transcript_chunks) %}
@@ -185,6 +188,68 @@
              class="text-accent hover:underline font-medium shrink-0">{{ m.name }}</a>
           <span class="text-primary break-words flex-1">{{ m.content }}</span>
         </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  {# ---------------- Live conversation threads ---------------- #}
+  {# Streamer feedback: per-chatter "talking points" sometimes hallucinate
+     facts (e.g. inventing an FF8 remake from one chatter's mention).
+     This panel grounds suggestions in actually-clustered chat content
+     and surfaces participants. Each thread has a per-card action row
+     so you can mark hallucinated ones as 'skip'. #}
+  {% if live_threads %}
+  <section class="space-y-2">
+    <header class="flex items-baseline justify-between gap-2">
+      <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+        <i class="fa-solid fa-comments text-accent"></i> Live conversations
+        <span class="text-[11px] text-muted font-normal">grounded in actual chat — click skip if Qwen's drunk</span>
+      </h2>
+      <a href="/insights?view=topics"
+         class="text-[11px] text-muted hover:text-primary hover:underline">
+        all threads →
+      </a>
+    </header>
+    <ul class="divide-y divide-subtle rounded-xl border border-subtle bg-surface overflow-hidden">
+      {% for t in live_threads %}
+        {% set _ts = (live_thread_states.get(t.id|string) if live_thread_states else None) %}
+        {% if not _ts or _ts.state not in ('skipped', 'addressed') %}
+          {% set _is_pending = _ts and _ts.state == 'auto_pending' %}
+          <li class="insight-card-root px-3 py-2 sm:py-3 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3
+                     {% if _is_pending %}bg-warning/5 ring-1 ring-warning/30{% endif %}
+                     hover:bg-surface-raised transition-all duration-150 ease-out">
+            <button type="button"
+                    class="flex-1 text-left min-w-0"
+                    hx-get="/modals/thread/{{ t.id }}"
+                    hx-target="#modal-root"
+                    hx-swap="innerHTML"
+                    title="Open with snapshots + drivers">
+              <div class="flex items-baseline gap-2 flex-wrap">
+                <span class="font-medium text-primary text-sm sm:text-base">{{ t.title }}</span>
+                {% if t.category and t.category != 'other' %}
+                  <span class="text-[10px] uppercase tracking-wide text-muted">{{ t.category }}</span>
+                {% endif %}
+                {% if t.member_count > 1 %}
+                  <span class="text-[10px] text-accent">↻ {{ t.member_count }}</span>
+                {% endif %}
+                <span class="text-[10px] text-muted ml-auto">{{ t.last_ts | short_ts }}</span>
+              </div>
+              {% if t.drivers %}
+                <p class="text-[11px] text-muted mt-1 inline-flex items-center gap-1">
+                  <i class="fa-solid fa-users text-[9px]"></i>
+                  {{ t.drivers | join(', ') }}
+                </p>
+              {% endif %}
+            </button>
+            <div class="shrink-0">
+              {% with kind='thread', item_key=t.id|string,
+                      state=(_ts.state if _ts else None) %}
+                {% include "components/_insight_actions.html" %}
+              {% endwith %}
+            </div>
+          </li>
+        {% endif %}
       {% endfor %}
     </ul>
   </section>

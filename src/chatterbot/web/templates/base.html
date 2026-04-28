@@ -21,6 +21,42 @@
       const root = document.getElementById('modal-root');
       if (root) root.innerHTML = '';
     };
+    // Smoothly remove an insight card after a state-change action so
+    // the page stays anchored where the streamer was looking. Without
+    // this, removing a card above the viewport shifts everything below
+    // upward — perceived as the page "jumping."
+    //
+    //   1. Capture the card's height + position relative to viewport.
+    //   2. Animate height/opacity to 0 over 180 ms (CSS transition).
+    //   3. After the animation, remove() the node — and if the card
+    //      was above the viewport, scrollBy(-cardHeight) to compensate
+    //      so the visible content doesn't shift.
+    window.chatterbotRemoveCard = function (formEl) {
+      const card = formEl && formEl.closest && formEl.closest('.insight-card-root');
+      if (!card) return;
+      const h = card.offsetHeight;
+      const topRel = card.getBoundingClientRect().top;
+      const aboveViewport = topRel < 0;
+      // Pin the current height so the transition has something to
+      // animate from — `auto` -> `0` is not animatable.
+      card.style.maxHeight = h + 'px';
+      card.style.overflow = 'hidden';
+      card.style.transition = 'max-height 180ms ease-out, opacity 180ms ease-out, margin 180ms ease-out, padding 180ms ease-out';
+      // Force a reflow so the browser registers the start state.
+      void card.offsetHeight;
+      card.style.maxHeight = '0px';
+      card.style.opacity = '0';
+      card.style.marginTop = '0';
+      card.style.marginBottom = '0';
+      card.style.paddingTop = '0';
+      card.style.paddingBottom = '0';
+      window.setTimeout(function () {
+        card.remove();
+        if (aboveViewport) {
+          window.scrollBy(0, -h);
+        }
+      }, 200);
+    };
   </script>
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
