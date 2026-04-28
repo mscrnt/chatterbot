@@ -158,16 +158,25 @@ class TwitchService:
                     return False
                 self._client_id = cid
                 token_owner_login = (data or {}).get("login") or "?"
+                token_owner_id = (data or {}).get("user_id") or None
 
-                # Resolve the *watched* channel's broadcaster_id. The
-                # validate response only carries the token-owner's id,
-                # which is a different user when the streamer is using
-                # their personal token to read someone else's chat.
-                # /helix/channels needs the channel's id, not the
-                # token's, or content_classification_labels comes back
-                # for the wrong account.
+                # Resolve the *watched* channel's broadcaster_id.
+                #   - Self-streaming case (token owner == watched
+                #     channel): the validate response already carries
+                #     the user_id we need. Skip the extra Helix call.
+                #   - Watching-someone-else case: the token's user_id
+                #     would route /helix/channels at the wrong account
+                #     (the bug we just fixed); resolve the channel's
+                #     own id via /helix/users?login=<channel>.
                 self._broadcaster_id = None
-                if login:
+                self_streaming = (
+                    bool(login)
+                    and bool(token_owner_login)
+                    and login.lower() == token_owner_login.lower()
+                )
+                if self_streaming:
+                    self._broadcaster_id = token_owner_id
+                elif login:
                     try:
                         r2 = await client.get(
                             "https://api.twitch.tv/helix/users",
