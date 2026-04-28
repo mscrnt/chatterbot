@@ -27,7 +27,7 @@ import sqlite3
 import struct
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -222,6 +222,13 @@ class Message:
     # Cross-platform attribution. Pulled from users.source via JOIN. Default
     # 'twitch' so old call-sites that build Message() directly stay sane.
     source: str = "twitch"
+    # Spam score in [0.0, 1.0] (0.0 = clean) and a list of reason codes
+    # that fired. Score is the max across signals at ingest, optionally
+    # bumped by the post-embedding flood detector. Consumers filter by
+    # threshold; see `spam.py` for `SPAM_THRESHOLD_DEFAULT` /
+    # `SPAM_THRESHOLD_LLM`.
+    spam_score: float = 0.0
+    spam_reasons: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -521,6 +528,25 @@ class ChatterRepo:
                 cur.execute(
                     "CREATE INDEX IF NOT EXISTS idx_messages_emote_only "
                     "ON messages(is_emote_only)"
+                )
+            # Spam scoring — score (REAL 0..1) plus a JSON array of
+            # reason codes that fired. Score lets each consumer pick
+            # its own threshold (stats / word cloud at ~0.5, LLM
+            # prompts at ~0.2). Reasons array is for transparency in
+            # audit views — "filtered: 12 repetition, 2 caps_flood".
+            # See `spam.py` for the detector contract.
+            if "spam_score" not in _mcols:
+                cur.execute(
+                    "ALTER TABLE messages ADD COLUMN spam_score "
+                    "REAL NOT NULL DEFAULT 0"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_messages_spam_score "
+                    "ON messages(spam_score)"
+                )
+            if "spam_reasons" not in _mcols:
+                cur.execute(
+                    "ALTER TABLE messages ADD COLUMN spam_reasons TEXT"
                 )
             cur.execute(
                 """
@@ -1085,23 +1111,34 @@ class ChatterRepo:
         reply_parent_login: str | None = None,
         reply_parent_body: str | None = None,
         is_emote_only: bool = False,
+        spam_score: float = 0.0,
+        spam_reasons: list[str] | None = None,
     ) -> int:
         """Insert a chat message and return its rowid. `reply_parent_*` are
         populated when the platform reports the message used a native Reply.
         `is_emote_only` is set when the message text is just emotes +
-        whitespace; summarizer and moderator skip those."""
+        whitespace; summarizer and moderator skip those.
+
+        `spam_score` (0.0..1.0) and `spam_reasons` come from the
+        ingest-time spam detector (see `spam.py`). Stored as a score so
+        each consumer can pick its own threshold; reasons array is for
+        audit transparency."""
+        from .spam import encode_reasons
         with self._cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO messages(user_id, ts, content,
                                      reply_parent_login, reply_parent_body,
-                                     is_emote_only)
-                VALUES (?, ?, ?, ?, ?, ?)
+                                     is_emote_only,
+                                     spam_score, spam_reasons)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id, _now_iso(), content,
                     reply_parent_login, reply_parent_body,
                     1 if is_emote_only else 0,
+                    float(spam_score),
+                    encode_reasons(list(spam_reasons or [])),
                 ),
             )
             return int(cur.lastrowid)
@@ -1303,7 +1340,7 @@ class ChatterRepo:
                 """
                 SELECT id, content
                 FROM messages
-                WHERE user_id = ? AND id > ? AND is_emote_only = 0
+                WHERE user_id = ? AND id > ? AND is_emote_only = 0 AND spam_score < 0.5
                 ORDER BY id ASC
                 """,
                 (user_id, wm),
@@ -1315,7 +1352,7 @@ class ChatterRepo:
         with self._cursor() as cur:
             cur.execute(
                 "SELECT COUNT(*) AS c FROM messages "
-                "WHERE user_id = ? AND id > ? AND is_emote_only = 0",
+                "WHERE user_id = ? AND id > ? AND is_emote_only = 0 AND spam_score < 0.5",
                 (user_id, wm),
             )
             return int(cur.fetchone()["c"])
@@ -1329,7 +1366,7 @@ class ChatterRepo:
                 JOIN users u ON u.twitch_id = m.user_id
                 LEFT JOIN summarization_state s ON s.user_id = m.user_id
                 WHERE u.opt_out = 0
-                  AND m.is_emote_only = 0
+                  AND m.is_emote_only = 0 AND m.spam_score < 0.5
                   AND m.id > COALESCE(s.last_summarized_msg_id, 0)
                 GROUP BY m.user_id
                 HAVING COUNT(*) >= ?
@@ -1349,7 +1386,7 @@ class ChatterRepo:
                 JOIN users u ON u.twitch_id = m.user_id
                 LEFT JOIN summarization_state s ON s.user_id = m.user_id
                 WHERE u.opt_out = 0
-                  AND m.is_emote_only = 0
+                  AND m.is_emote_only = 0 AND m.spam_score < 0.5
                   AND m.id > COALESCE(s.last_summarized_msg_id, 0)
                 GROUP BY m.user_id
                 HAVING MAX(m.ts) <= datetime('now', ?)
@@ -1503,7 +1540,7 @@ class ChatterRepo:
                 JOIN users u ON u.twitch_id = m.user_id
                 JOIN vec_messages v ON v.message_id = m.id
                 WHERE u.opt_out = 0
-                  AND m.is_emote_only = 0
+                  AND m.is_emote_only = 0 AND m.spam_score < 0.5
                   AND datetime(m.ts) >= datetime('now', ?)
                 ORDER BY m.id DESC
                 LIMIT ?
@@ -1542,7 +1579,7 @@ class ChatterRepo:
                 FROM messages m
                 JOIN users u ON u.twitch_id = m.user_id
                 WHERE u.opt_out = 0
-                  AND m.is_emote_only = 0
+                  AND m.is_emote_only = 0 AND m.spam_score < 0.5
                   AND datetime(m.ts) >= datetime('now', ?)
                 ORDER BY m.id DESC
                 LIMIT ?
@@ -2568,7 +2605,7 @@ class ChatterRepo:
                 """
                 SELECT strftime('%Y-%m-%dT%H:%M:00', ts) AS slot, COUNT(*) AS c
                 FROM messages
-                WHERE is_emote_only = 0
+                WHERE is_emote_only = 0 AND spam_score < 0.5
                   AND ts >= datetime('now', ?)
                 GROUP BY slot
                 """,
@@ -2653,7 +2690,7 @@ class ChatterRepo:
                        m.reply_parent_login, m.reply_parent_body
                 FROM messages m
                 JOIN users u ON u.twitch_id = m.user_id
-                WHERE m.is_emote_only = 0
+                WHERE m.is_emote_only = 0 AND m.spam_score < 0.5
                   AND u.opt_out = 0
                   AND m.ts >= datetime('now', ?)
                   AND (
@@ -3069,12 +3106,16 @@ class ChatterRepo:
         return out
 
     def stats_longest_message(self) -> tuple[str, str, int] | None:
-        """Pull the single longest message ever logged. (name, content, len)."""
+        """Pull the single longest message ever logged. (name, content, len).
+        Filters out emote-only and spam (score >= 0.5) messages so the
+        "longest" stat doesn't get hijacked by emote walls or
+        copy-paste floods."""
         with self._cursor() as cur:
             row = cur.execute(
                 """
                 SELECT u.name, m.content, length(m.content) AS L
                 FROM messages m JOIN users u ON u.twitch_id = m.user_id
+                WHERE m.is_emote_only = 0 AND m.spam_score < 0.5
                 ORDER BY L DESC LIMIT 1
                 """
             ).fetchone()
@@ -3083,9 +3124,13 @@ class ChatterRepo:
             return (row["name"], row["content"], int(row["L"]))
 
     def stats_avg_message_length(self) -> float:
+        """Average message length, excluding emote-only and spammy
+        messages so a single 1k-char repetition flood doesn't shift
+        the channel-wide average."""
         with self._cursor() as cur:
             row = cur.execute(
-                "SELECT AVG(length(content)) AS a FROM messages"
+                "SELECT AVG(length(content)) AS a FROM messages "
+                "WHERE is_emote_only = 0 AND spam_score < 0.5"
             ).fetchone()
             return float(row["a"] or 0.0)
 
@@ -5347,7 +5392,7 @@ class ChatterRepo:
         word_re = _re.compile(r"\b[a-z]{3,20}\b")
         counter: _Counter[str] = _Counter()
         with self._cursor() as cur:
-            cur.execute("SELECT content FROM messages WHERE is_emote_only = 0")
+            cur.execute("SELECT content FROM messages WHERE is_emote_only = 0 AND spam_score < 0.5")
             for r in cur.fetchall():
                 text = (r["content"] or "").lower()
                 text = url_re.sub("", text)
@@ -5438,7 +5483,7 @@ class ChatterRepo:
                 FROM messages m
                 JOIN users u ON u.twitch_id = m.user_id
                 WHERE m.user_id IN ({id_placeholders})
-                  AND m.is_emote_only = 0
+                  AND m.is_emote_only = 0 AND m.spam_score < 0.5
                   AND datetime(m.ts) >= datetime('now', ?)
                 ORDER BY m.id DESC
                 LIMIT ?
@@ -5584,6 +5629,109 @@ class ChatterRepo:
                 (message_id, blob),
             )
 
+    def find_near_duplicate_flood(
+        self,
+        focal_message_id: int,
+        embedding: list[float],
+        *,
+        within_seconds: int = 60,
+        cosine_distance_max: float = 0.05,
+        knn_top_k: int = 20,
+    ) -> list[tuple[int, str]]:
+        """Look for a copy-paste brigade around a freshly-embedded
+        message. Returns `(message_id, user_id)` for the focal message
+        plus every other message within `within_seconds` whose
+        embedding is closer than `cosine_distance_max` (cosine
+        distance, so 0.05 ≈ 0.95 similarity) and that came from a
+        DIFFERENT user.
+
+        Returns [] when the focal message itself can't be found (e.g.
+        deleted) or when sqlite-vec isn't available. Caller decides
+        whether the cluster size justifies bumping spam scores."""
+        blob = _vec_to_blob(embedding)
+        with self._cursor() as cur:
+            # Resolve focal message metadata first so we can filter by
+            # arrival time and exclude same-user matches.
+            cur.execute(
+                "SELECT user_id, ts FROM messages WHERE id = ?",
+                (int(focal_message_id),),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return []
+            focal_user = row["user_id"]
+            try:
+                cur.execute(
+                    """
+                    SELECT v.message_id, v.distance, m.user_id, m.ts
+                    FROM vec_messages v
+                    JOIN messages m ON m.id = v.message_id
+                    WHERE v.embedding MATCH ? AND k = ?
+                      AND v.distance <= ?
+                      AND datetime(m.ts) >= datetime('now', ?)
+                      AND m.user_id != ?
+                    ORDER BY v.distance ASC
+                    """,
+                    (
+                        blob, int(knn_top_k),
+                        float(cosine_distance_max),
+                        f"-{int(within_seconds)} seconds",
+                        focal_user,
+                    ),
+                )
+                rows = cur.fetchall()
+            except sqlite3.OperationalError:
+                return []
+        # Always include the focal message in the cluster — it's the
+        # one that just arrived and triggered the check, and the
+        # caller wants to bump it too if a flood is confirmed.
+        out: list[tuple[int, str]] = [(int(focal_message_id), focal_user)]
+        for r in rows:
+            out.append((int(r["message_id"]), r["user_id"]))
+        return out
+
+    def bump_spam_score(
+        self,
+        message_ids: list[int],
+        *,
+        score: float,
+        reason: str,
+    ) -> int:
+        """Raise `spam_score` toward `score` (only if higher) for the
+        given message ids, and append `reason` to the JSON array in
+        `spam_reasons` (idempotent — won't add duplicates).
+
+        Used by the flood detector to retroactively flag messages
+        that, on their own, looked clean but were part of a copy-
+        paste brigade. Returns the count of rows updated."""
+        if not message_ids:
+            return 0
+        from .spam import decode_reasons, encode_reasons
+        score = max(0.0, min(1.0, float(score)))
+        with self._cursor() as cur:
+            placeholders = ",".join("?" * len(message_ids))
+            cur.execute(
+                f"SELECT id, spam_score, spam_reasons FROM messages "
+                f"WHERE id IN ({placeholders})",
+                [int(mid) for mid in message_ids],
+            )
+            rows = cur.fetchall()
+            updated = 0
+            for r in rows:
+                cur_score = float(r["spam_score"] or 0.0)
+                cur_reasons = decode_reasons(r["spam_reasons"])
+                new_score = max(cur_score, score)
+                if reason not in cur_reasons:
+                    cur_reasons = cur_reasons + [reason]
+                if new_score == cur_score and reason in decode_reasons(r["spam_reasons"]):
+                    continue  # already at or above this score with this reason
+                cur.execute(
+                    "UPDATE messages SET spam_score = ?, spam_reasons = ? WHERE id = ?",
+                    (new_score, encode_reasons(cur_reasons), int(r["id"])),
+                )
+                updated += 1
+        return updated
+
     def messages_missing_embedding(self, user_id: str, limit: int) -> list[Message]:
         """Return messages for a user that don't yet have a vec_messages row."""
         with self._cursor() as cur:
@@ -5624,7 +5772,7 @@ class ChatterRepo:
         the vec0 KNN score (lower = closer match)."""
         blob = _vec_to_blob(query_embedding)
         ann_k = max(k * 4, 80)
-        emote_clause = "AND m.is_emote_only = 0" if exclude_emote_only else ""
+        emote_clause = "AND m.is_emote_only = 0 AND m.spam_score < 0.5" if exclude_emote_only else ""
         with self._cursor() as cur:
             cur.execute(
                 f"""
@@ -5664,7 +5812,7 @@ class ChatterRepo:
         rows since those aren't candidates for embedding."""
         with self._cursor() as cur:
             cur.execute(
-                "SELECT COUNT(*) AS c FROM messages WHERE is_emote_only = 0"
+                "SELECT COUNT(*) AS c FROM messages WHERE is_emote_only = 0 AND spam_score < 0.5"
             )
             total = int(cur.fetchone()["c"])
             cur.execute("SELECT COUNT(*) AS c FROM vec_messages")
@@ -5683,7 +5831,7 @@ class ChatterRepo:
                 JOIN users u ON u.twitch_id = m.user_id
                 LEFT JOIN vec_messages v ON v.message_id = m.id
                 WHERE v.message_id IS NULL
-                  AND m.is_emote_only = 0
+                  AND m.is_emote_only = 0 AND m.spam_score < 0.5
                   AND u.opt_out = 0
                 ORDER BY m.id ASC
                 LIMIT ?
@@ -5785,7 +5933,7 @@ class ChatterRepo:
                 SELECT m.id, m.user_id, u.name, m.ts, m.content, m.reply_parent_login, m.reply_parent_body
                 FROM messages m
                 JOIN users u ON u.twitch_id = m.user_id
-                WHERE m.id > ? AND m.is_emote_only = 0
+                WHERE m.id > ? AND m.is_emote_only = 0 AND m.spam_score < 0.5
                 ORDER BY m.id ASC
                 LIMIT ?
                 """,
@@ -5820,7 +5968,7 @@ class ChatterRepo:
             cur.execute(
                 """
                 SELECT id FROM messages
-                WHERE user_id = ? AND is_emote_only = 0
+                WHERE user_id = ? AND is_emote_only = 0 AND spam_score < 0.5
                 ORDER BY id DESC LIMIT ?
                 """,
                 (user_id, int(user_limit)),
@@ -5860,7 +6008,7 @@ class ChatterRepo:
                 cur.execute(
                     """
                     SELECT m.id FROM messages m
-                    WHERE m.id < ? AND m.is_emote_only = 0
+                    WHERE m.id < ? AND m.is_emote_only = 0 AND m.spam_score < 0.5
                     ORDER BY m.id DESC LIMIT ?
                     """,
                     (mid, int(before)),
@@ -5870,7 +6018,7 @@ class ChatterRepo:
                 cur.execute(
                     """
                     SELECT m.id FROM messages m
-                    WHERE m.id > ? AND m.is_emote_only = 0
+                    WHERE m.id > ? AND m.is_emote_only = 0 AND m.spam_score < 0.5
                     ORDER BY m.id ASC LIMIT ?
                     """,
                     (mid, int(after)),

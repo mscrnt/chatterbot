@@ -517,7 +517,7 @@ RULES:
                     cur.execute(
                         "SELECT COUNT(*), COUNT(DISTINCT user_id) "
                         "FROM messages WHERE id BETWEEN ? AND ? "
-                        "AND is_emote_only = 0",
+                        "AND is_emote_only = 0 AND spam_score < 0.5",
                         (message_id_lo, message_id_hi),
                     )
                     row = cur.fetchone()
@@ -582,6 +582,7 @@ RULES:
                 if not rows:
                     continue
                 wrote = 0
+                flooded = 0
                 for m in rows:
                     try:
                         vec = await self.llm.embed(m.content)
@@ -592,14 +593,48 @@ RULES:
                         self.repo.upsert_message_embedding, m.id, vec
                     )
                     wrote += 1
+                    # Copy-paste brigade detection — piggybacks on the
+                    # embedding pass we already do. If 4+ OTHER users
+                    # said something cosine-near-identical in the last
+                    # 60 s, bump everyone in the cluster (focal + the
+                    # near-dups). Threshold 0.85 keeps the cluster
+                    # firmly above SPAM_THRESHOLD_DEFAULT (0.5) so all
+                    # consumers filter it out.
+                    try:
+                        cluster = await asyncio.to_thread(
+                            self.repo.find_near_duplicate_flood,
+                            m.id, vec,
+                        )
+                        # Need at least 4 distinct *other* users (5 with the
+                        # focal). Same user copy-pasting themselves is annoying
+                        # but not brigading; we let the per-message detector
+                        # handle that.
+                        other_users = {uid for mid, uid in cluster if mid != m.id}
+                        if len(other_users) >= 4:
+                            ids = [mid for mid, _ in cluster]
+                            bumped = await asyncio.to_thread(
+                                self.repo.bump_spam_score,
+                                ids, score=0.85, reason="near_dup_flood",
+                            )
+                            flooded += bumped
+                            logger.info(
+                                "embed_loop: near-dup flood detected — "
+                                "bumped %d msgs (focal=%d, other_users=%d)",
+                                bumped, m.id, len(other_users),
+                            )
+                    except Exception:
+                        logger.exception(
+                            "embed_loop: flood-check failed for msg %d", m.id,
+                        )
                 if wrote:
                     indexed, total = await asyncio.to_thread(
                         self.repo.messages_embedding_coverage
                     )
                     logger.info(
-                        "embed_loop: +%d → %d/%d indexed (%.1f%%)",
+                        "embed_loop: +%d → %d/%d indexed (%.1f%%, flood-bumped=%d)",
                         wrote, indexed, total,
                         100 * indexed / total if total else 0.0,
+                        flooded,
                     )
             except asyncio.CancelledError:
                 raise

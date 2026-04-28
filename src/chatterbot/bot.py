@@ -25,6 +25,7 @@ from twitchio.ext import commands
 
 from .config import Settings
 from .repo import ChatterRepo
+from .spam import score_message
 from .summarizer import Summarizer
 
 logger = logging.getLogger(__name__)
@@ -184,12 +185,23 @@ class ChatterListener(commands.Bot):
             except Exception:
                 logger.exception("reminder: fire-pending failed for %s", name)
 
+            # Spam scoring at ingest. Pure function; doesn't touch the
+            # DB, just scores the text. Score is the max across signals
+            # (repetition / compression / caps / symbol). The post-
+            # embedding flood detector can bump the score later when a
+            # copy-paste brigade is detected; this pass alone catches
+            # the obvious single-message cases. `account_age_days` is
+            # left None for now — once Helix enrichment carries the
+            # real Twitch account-creation date we'll plumb it in.
+            spam_score, spam_reasons = score_message(content)
             await asyncio.to_thread(
                 self.repo.insert_message,
                 twitch_id, content,
                 reply_parent_login=reply_parent_login,
                 reply_parent_body=reply_parent_body,
                 is_emote_only=is_emote_only,
+                spam_score=spam_score,
+                spam_reasons=spam_reasons,
             )
             unsummarized = await asyncio.to_thread(
                 self.repo.unsummarized_count, twitch_id
