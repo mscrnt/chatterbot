@@ -72,6 +72,10 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "engaging_subjects_interval_seconds",
     "engaging_subjects_lookback_minutes",
     "engaging_subjects_max_messages",
+    "high_impact_active_within_minutes",
+    "high_impact_lookback_days",
+    "high_impact_min_overlap",
+    "high_impact_limit",
 )
 
 # Subset that should be rendered as password inputs. Blank submissions for
@@ -268,6 +272,15 @@ class Settings(BaseSettings):
     engaging_subjects_lookback_minutes: int = 20
     engaging_subjects_max_messages: int = 250
 
+    # "What to say" / high-impact subjects panel — ranks topic_threads
+    # by how many of the chatters CURRENTLY in chat have historically
+    # driven that thread. Streamer pivots to a high-rank subject for
+    # maximum engagement of the live audience.
+    high_impact_active_within_minutes: int = 30
+    high_impact_lookback_days: int = 14
+    high_impact_min_overlap: int = 2
+    high_impact_limit: int = 6
+
     # Moderation mode — opt-in. When enabled, the bot batches recent
     # messages through a strict-rubric LLM classifier and persists
     # flagged ones as incidents for streamer review. Advisory only —
@@ -325,6 +338,10 @@ def _coerce(key: str, value: str) -> Any:
         "engaging_subjects_interval_seconds",
         "engaging_subjects_lookback_minutes",
         "engaging_subjects_max_messages",
+        "high_impact_active_within_minutes",
+        "high_impact_lookback_days",
+        "high_impact_min_overlap",
+        "high_impact_limit",
     ):
         try:
             return int(value)
@@ -351,6 +368,10 @@ def _coerce(key: str, value: str) -> Any:
                 "engaging_subjects_interval_seconds": 180,
                 "engaging_subjects_lookback_minutes": 20,
                 "engaging_subjects_max_messages": 250,
+                "high_impact_active_within_minutes": 30,
+                "high_impact_lookback_days": 14,
+                "high_impact_min_overlap": 2,
+                "high_impact_limit": 6,
             }[key]
     if key in (
         "streamelements_enabled", "mod_mode_enabled",

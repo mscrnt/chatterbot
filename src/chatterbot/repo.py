@@ -4434,6 +4434,130 @@ class ChatterRepo:
             )
             return int(cur.fetchone()["c"])
 
+    def list_high_impact_subjects(
+        self,
+        *,
+        active_within_minutes: int = 30,
+        lookback_days: int = 14,
+        min_overlap: int = 2,
+        limit: int = 6,
+    ) -> list[dict]:
+        """Subjects that would engage the chatters currently in chat.
+
+        Cross-references chatters active in the last `active_within_minutes`
+        against the historical drivers of every topic_thread (within the
+        `lookback_days` window). Threads where the most current chatters
+        have driven that thread historically rise to the top.
+
+        Use case: the streamer wants to know which subject to pivot to
+        for maximum live audience engagement, given who's actually
+        watching right now.
+
+        Returns dicts:
+          thread            — TopicThread (with recap if any)
+          overlap_drivers   — list of {name, twitch_id} for currently-
+                              active chatters who have driven this
+                              thread historically
+          overlap_count     — len(overlap_drivers)
+          unique_drivers    — total distinct drivers across all snapshots
+                              (channel-wide reach, beyond the active set)
+        """
+        # Step 1 — pull the active set of chatter names (lowercased)
+        # alongside their twitch_id, so we can de-dup correctly across
+        # alias hits below.
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT u.twitch_id, u.name
+                FROM users u
+                JOIN messages m ON m.user_id = u.twitch_id
+                WHERE u.opt_out = 0
+                  AND datetime(m.ts) >= datetime('now', ?)
+                """,
+                (f"-{int(active_within_minutes)} minutes",),
+            )
+            active_rows = cur.fetchall()
+        if not active_rows:
+            return []
+        active_names_lc = {r["name"].lower(): r["twitch_id"] for r in active_rows if r["name"]}
+        if not active_names_lc:
+            return []
+
+        # Step 2 — for each thread in the lookback window, find drivers
+        # whose name (case-insensitive) matches any active chatter.
+        # `json_each` expands the drivers JSON array into rows so we
+        # can join on it.
+        sql = f"""
+            SELECT t.id, t.title, t.first_ts, t.last_ts, t.category,
+                   t.recap, t.recap_updated_at,
+                   (SELECT COUNT(*) FROM topic_thread_members
+                    WHERE thread_id = t.id) AS mc,
+                   {self._STATUS_CASE} AS status,
+                   COUNT(DISTINCT j.value) AS unique_drivers
+            FROM topic_threads t
+            JOIN topic_thread_members m ON m.thread_id = t.id
+            JOIN json_each(m.drivers) AS j
+            WHERE datetime(t.last_ts) >= datetime('now', ?)
+            GROUP BY t.id
+            ORDER BY unique_drivers DESC, t.last_ts DESC
+            LIMIT 200
+        """
+        with self._cursor() as cur:
+            cur.execute(sql, (f"-{int(lookback_days)} days",))
+            thread_rows = cur.fetchall()
+
+        # Step 3 — for each candidate thread, walk its drivers JSON via
+        # the same JOIN and collect those that overlap with the active
+        # set. Cheaper to do this in a separate small query per thread
+        # than to push it into the GROUP BY (which has trouble preserving
+        # the matched names alongside the count).
+        out: list[dict] = []
+        for trow in thread_rows:
+            tid = int(trow["id"])
+            with self._cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT j.value AS name
+                    FROM topic_thread_members m
+                    JOIN json_each(m.drivers) AS j
+                    WHERE m.thread_id = ?
+                    """,
+                    (tid,),
+                )
+                driver_names = [r["name"] for r in cur.fetchall() if r["name"]]
+            overlap: list[dict] = []
+            seen_uids: set[str] = set()
+            for n in driver_names:
+                uid = active_names_lc.get(n.lower())
+                if uid and uid not in seen_uids:
+                    seen_uids.add(uid)
+                    overlap.append({"name": n, "twitch_id": uid})
+            if len(overlap) < int(min_overlap):
+                continue
+            thread = TopicThread(
+                id=tid,
+                title=trow["title"],
+                first_ts=trow["first_ts"],
+                last_ts=trow["last_ts"],
+                drivers=self._collect_thread_drivers(tid),
+                member_count=int(trow["mc"]),
+                status=trow["status"],
+                category=trow["category"],
+                recap=trow["recap"],
+                recap_updated_at=trow["recap_updated_at"],
+            )
+            out.append({
+                "thread": thread,
+                "overlap_drivers": overlap,
+                "overlap_count": len(overlap),
+                "unique_drivers": int(trow["unique_drivers"]),
+            })
+            if len(out) >= int(limit):
+                break
+        # Sort: highest overlap first; tiebreak by total channel reach.
+        out.sort(key=lambda d: (-d["overlap_count"], -d["unique_drivers"]))
+        return out[:int(limit)]
+
     def subjects_engaging_chatter(
         self, twitch_id: str, *, limit: int = 10,
     ) -> list[dict]:

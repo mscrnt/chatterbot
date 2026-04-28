@@ -1481,6 +1481,23 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 if insights.subjects_cache.refreshed_at is not None else None
             ),
             "engaging_subjects_error": insights.subjects_cache.error,
+            # High-impact subjects — cross-references currently-active
+            # chatters against topic_thread driver history. Identifies
+            # which subject would re-engage the most of THIS audience.
+            "high_impact_subjects": repo.list_high_impact_subjects(
+                active_within_minutes=int(getattr(
+                    settings, "high_impact_active_within_minutes", 30,
+                )),
+                lookback_days=int(getattr(
+                    settings, "high_impact_lookback_days", 14,
+                )),
+                min_overlap=int(getattr(
+                    settings, "high_impact_min_overlap", 2,
+                )),
+                limit=int(getattr(
+                    settings, "high_impact_limit", 6,
+                )),
+            ),
             "quiet_cohorts": repo.list_quiet_thread_cohorts(
                 silence_minutes=int(getattr(settings, "quiet_cohort_silence_minutes", 15)),
                 lookback_hours=int(getattr(settings, "quiet_cohort_lookback_hours", 24)),

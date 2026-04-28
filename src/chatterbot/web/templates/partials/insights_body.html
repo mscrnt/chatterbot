@@ -235,6 +235,13 @@
   </section>
   {% endif %}
 
+  {# ---------------- What to say next (high-impact subjects) ----------------
+     Cross-references active chatters against topic_thread driver
+     history — finds subjects the LIVE audience would re-engage with.
+     Different from Engaging Subjects (what chat is saying NOW) and
+     Quiet Cohorts (groups that just went silent). #}
+  {% include "partials/high_impact_subjects.html" %}
+
   {# ---------------- Engaging subjects ----------------
      LLM-curated distinct conversation subjects from recent chat —
      replaces the cosine-clustered "Live conversations" panel as the

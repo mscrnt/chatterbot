@@ -21,7 +21,7 @@
   <header class="flex items-baseline justify-between gap-2">
     <h2 class="font-semibold text-primary inline-flex items-center gap-2">
       <i class="fa-solid fa-fire text-accent"></i> Engaging subjects
-      <span class="text-[11px] text-muted font-normal">click a row to expand · "wrong" tells the LLM to drop it</span>
+      <span class="text-[11px] text-muted font-normal">click a row to expand · "dismiss" tells the LLM to drop it from future passes</span>
     </h2>
     <span class="text-[11px] text-muted">
       {% if _subjects_age is not none %}refreshed {{ _subjects_age }}s ago{% else %}warming up…{% endif %}
@@ -61,12 +61,12 @@
                blocklist for future passes. #}
             <button type="button"
                     class="ml-auto tap inline-flex items-center justify-center px-2 py-0.5 rounded text-[10px] uppercase tracking-wider bg-danger/10 hover:bg-danger/25 text-danger border border-danger/30 transition-all duration-150 ease-out"
-                    title="The LLM got this wrong / hallucinated. Adds it to the blocklist so it stops re-extracting it."
+                    title="Dismiss this subject — the LLM got it wrong, or chat has moved on. Adds it to the blocklist so future extraction passes skip it."
                     hx-post="/insights/subject/{{ s.slug }}/reject"
                     hx-swap="outerHTML"
                     hx-target="#subject-row-{{ s.slug }}"
                     @click.stop>
-              <i class="fa-solid fa-xmark text-[9px]"></i> wrong
+              <i class="fa-solid fa-xmark text-[9px]"></i> dismiss
             </button>
           </div>
 
