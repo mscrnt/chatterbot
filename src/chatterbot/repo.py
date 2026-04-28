@@ -506,6 +506,79 @@ class ChatterRepo:
             ):
                 if col not in _ucols:
                     cur.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
+            # ============================================================
+            # USER PROFILE EXTENSION TABLE
+            # ------------------------------------------------------------
+            # Sparse / streamer-set / LLM-extracted fields live here so
+            # the hot core users table stays narrow. Pattern: every read
+            # that needs profile data LEFT JOINs; every write that
+            # touches profile data UPSERTs into user_profiles by user_id.
+            # The migration below copies any pre-split data over and
+            # drops the old columns so there's a single source of truth.
+            # ============================================================
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_profiles (
+                    user_id            TEXT PRIMARY KEY
+                        REFERENCES users(twitch_id) ON DELETE CASCADE,
+                    pronouns           TEXT,
+                    location           TEXT,
+                    demeanor           TEXT,
+                    interests          TEXT,
+                    profile_updated_at TEXT,
+                    is_starred         INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_user_profiles_starred "
+                "ON user_profiles(is_starred) WHERE is_starred = 1"
+            )
+
+            # One-time migration: detect old profile columns still on
+            # users, copy non-null rows into user_profiles, then drop
+            # the columns. Re-running on an already-migrated DB is a
+            # no-op because the columns are gone.
+            cur.execute("PRAGMA table_info(users)")
+            _ucols2 = {r["name"] for r in cur.fetchall()}
+            _profile_cols = (
+                "pronouns", "location", "demeanor", "interests",
+                "profile_updated_at", "is_starred",
+            )
+            _to_move = [c for c in _profile_cols if c in _ucols2]
+            if _to_move:
+                # Copy from users → user_profiles. INSERT OR REPLACE so
+                # a partial migration (or re-run during dev) is safe.
+                copy_cols = ", ".join(_to_move)
+                # is_starred has a NOT NULL default 0 on the new table;
+                # if it's not in _to_move (older schema lacked it),
+                # the SELECT NULL → DEFAULT 0 path keeps things correct.
+                # All other moved cols accept NULL so a sparse SELECT
+                # works without coercion.
+                cur.execute(
+                    f"""
+                    INSERT OR REPLACE INTO user_profiles
+                        (user_id, {copy_cols})
+                    SELECT twitch_id, {copy_cols}
+                    FROM users
+                    WHERE {' OR '.join(f'{c} IS NOT NULL' for c in _to_move if c != 'is_starred')}
+                       OR is_starred = 1
+                    """
+                    if "is_starred" in _to_move
+                    else f"""
+                    INSERT OR REPLACE INTO user_profiles
+                        (user_id, {copy_cols})
+                    SELECT twitch_id, {copy_cols}
+                    FROM users
+                    WHERE {' OR '.join(f'{c} IS NOT NULL' for c in _to_move)}
+                    """
+                )
+                # Drop the old columns. Requires SQLite 3.35+ (March
+                # 2021); chatterbot ships against Python 3.11+ which
+                # carries 3.40+. If a deployment somehow has older
+                # SQLite, the ALTER raises and we surface the error.
+                for col in _to_move:
+                    cur.execute(f"ALTER TABLE users DROP COLUMN {col}")
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS messages (
@@ -1059,27 +1132,37 @@ class ChatterRepo:
         interests: list[str] | None = None,
         max_interests: int = 12,
     ) -> None:
-        """Merge LLM-extracted profile signals into the users row. Never
-        overwrites a known value with None — the extractor only emits a
-        field when it sees a clear signal, so silence on a field means
-        "no new information," not "clear it." Interests are union-merged
-        with existing entries (case-insensitive dedup) and capped."""
+        """Merge LLM-extracted profile signals into the user_profiles
+        row. Never overwrites a known value with None — the extractor
+        only emits a field when it sees a clear signal, so silence on
+        a field means "no new information," not "clear it." Interests
+        are union-merged with existing entries (case-insensitive
+        dedup) and capped.
+
+        Writes go to the user_profiles extension table; the parent
+        users row must already exist (the chat-message ingest path
+        upserts it before any profile work happens)."""
         with self._cursor() as cur:
+            # Read prior values from user_profiles (sparse — the row
+            # may not exist yet for a newly-seen user).
             cur.execute(
                 "SELECT pronouns, location, demeanor, interests "
-                "FROM users WHERE twitch_id = ?",
+                "FROM user_profiles WHERE user_id = ?",
                 (twitch_id,),
             )
             row = cur.fetchone()
-            if not row:
-                return
-            new_pronouns = pronouns.strip() if pronouns and pronouns.strip() else row["pronouns"]
-            new_location = location.strip() if location and location.strip() else row["location"]
-            new_demeanor = demeanor.strip() if demeanor and demeanor.strip() else row["demeanor"]
+            prior_pronouns  = row["pronouns"]  if row else None
+            prior_location  = row["location"]  if row else None
+            prior_demeanor  = row["demeanor"]  if row else None
+            prior_interests = row["interests"] if row else None
+
+            new_pronouns = pronouns.strip() if pronouns and pronouns.strip() else prior_pronouns
+            new_location = location.strip() if location and location.strip() else prior_location
+            new_demeanor = demeanor.strip() if demeanor and demeanor.strip() else prior_demeanor
             existing_interests: list[str] = []
-            if row["interests"]:
+            if prior_interests:
                 try:
-                    parsed = json.loads(row["interests"])
+                    parsed = json.loads(prior_interests)
                     if isinstance(parsed, list):
                         existing_interests = [str(x) for x in parsed if x]
                 except (TypeError, ValueError):
@@ -1098,18 +1181,26 @@ class ChatterRepo:
                 # Newest first when over cap — keep most recent signals.
                 if len(new_interests) > max_interests:
                     new_interests = new_interests[-max_interests:]
+            # UPSERT the profile row. ON CONFLICT preserves is_starred
+            # so a streamer-set favorite isn't clobbered by an LLM
+            # profile pass.
             cur.execute(
                 """
-                UPDATE users SET
-                    pronouns = ?, location = ?, demeanor = ?,
-                    interests = ?, profile_updated_at = ?
-                WHERE twitch_id = ?
+                INSERT INTO user_profiles
+                    (user_id, pronouns, location, demeanor, interests, profile_updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    pronouns           = excluded.pronouns,
+                    location           = excluded.location,
+                    demeanor           = excluded.demeanor,
+                    interests          = excluded.interests,
+                    profile_updated_at = excluded.profile_updated_at
                 """,
                 (
+                    twitch_id,
                     new_pronouns, new_location, new_demeanor,
                     json.dumps(new_interests) if new_interests else None,
                     _now_iso(),
-                    twitch_id,
                 ),
             )
 
@@ -3378,15 +3469,25 @@ class ChatterRepo:
     # ============================ Streamer-personal favorites =============
 
     def set_user_starred(self, twitch_id: str, starred: bool) -> None:
+        """Toggle the streamer-personal star flag. Stored on the
+        user_profiles extension table (UPSERT) so a user with no
+        prior profile data still gets a star without needing a
+        separate "create profile" step."""
         with self._cursor() as cur:
             cur.execute(
-                "UPDATE users SET is_starred = ? WHERE twitch_id = ?",
-                (1 if starred else 0, twitch_id),
+                """
+                INSERT INTO user_profiles (user_id, is_starred)
+                VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET is_starred = excluded.is_starred
+                """,
+                (twitch_id, 1 if starred else 0),
             )
 
     def count_starred(self) -> int:
         with self._cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS c FROM users WHERE is_starred = 1")
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM user_profiles WHERE is_starred = 1"
+            )
             return int(cur.fetchone()["c"])
 
     def list_starred_active(
@@ -3397,13 +3498,15 @@ class ChatterRepo:
         with self._cursor() as cur:
             cur.execute(
                 f"""
-                SELECT twitch_id, name, first_seen, last_seen, opt_out,
-                       sub_tier, sub_months, is_mod, is_vip, is_founder,
-                       source, merged_into,
-                       pronouns, location, demeanor, interests,
-                       profile_updated_at, is_starred
+                SELECT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out,
+                       u.sub_tier, u.sub_months, u.is_mod, u.is_vip, u.is_founder,
+                       u.source, u.merged_into, u.followed_at,
+                       p.pronouns, p.location, p.demeanor, p.interests,
+                       p.profile_updated_at,
+                       COALESCE(p.is_starred, 0) AS is_starred
                 FROM users u
-                WHERE u.is_starred = 1
+                JOIN user_profiles p ON p.user_id = u.twitch_id
+                WHERE p.is_starred = 1
                   AND u.opt_out = 0
                   AND EXISTS (
                     SELECT 1 FROM messages m
@@ -3468,10 +3571,12 @@ class ChatterRepo:
                 f"""
                 SELECT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out,
                        u.sub_tier, u.sub_months, u.is_mod, u.is_vip, u.is_founder,
-                       u.source, u.merged_into,
-                       u.pronouns, u.location, u.demeanor, u.interests,
-                       u.profile_updated_at, u.is_starred
+                       u.source, u.merged_into, u.followed_at,
+                       p.pronouns, p.location, p.demeanor, p.interests,
+                       p.profile_updated_at,
+                       COALESCE(p.is_starred, 0) AS is_starred
                 FROM users u
+                LEFT JOIN user_profiles p ON p.user_id = u.twitch_id
                 WHERE u.opt_out = 0
                   AND u.merged_into IS NULL
                   AND EXISTS (
@@ -3853,11 +3958,13 @@ class ChatterRepo:
                 f"""
                 SELECT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out,
                        u.sub_tier, u.sub_months, u.is_mod, u.is_vip, u.is_founder,
-                       u.is_starred,
+                       u.followed_at,
+                       COALESCE(p.is_starred, 0) AS is_starred,
                        (SELECT COUNT(*) FROM notes n WHERE n.user_id = u.twitch_id) AS note_count,
                        (SELECT COUNT(*) FROM messages m WHERE m.user_id = u.twitch_id) AS msg_count,
                        (SELECT MAX(ts) FROM messages m WHERE m.user_id = u.twitch_id) AS last_msg_ts
                 FROM users u
+                LEFT JOIN user_profiles p ON p.user_id = u.twitch_id
                 {where}
                 ORDER BY {order}
                 LIMIT ? OFFSET ?
@@ -3951,12 +4058,15 @@ class ChatterRepo:
     def get_user(self, twitch_id: str) -> User | None:
         with self._cursor() as cur:
             cur.execute(
-                "SELECT twitch_id, name, first_seen, last_seen, opt_out, "
-                "sub_tier, sub_months, is_mod, is_vip, is_founder, "
-                "source, merged_into, "
-                "pronouns, location, demeanor, interests, profile_updated_at, "
-                "is_starred, followed_at "
-                "FROM users WHERE twitch_id = ?",
+                "SELECT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out, "
+                "u.sub_tier, u.sub_months, u.is_mod, u.is_vip, u.is_founder, "
+                "u.source, u.merged_into, u.followed_at, "
+                "p.pronouns, p.location, p.demeanor, p.interests, "
+                "p.profile_updated_at, "
+                "COALESCE(p.is_starred, 0) AS is_starred "
+                "FROM users u "
+                "LEFT JOIN user_profiles p ON p.user_id = u.twitch_id "
+                "WHERE u.twitch_id = ?",
                 (twitch_id,),
             )
             r = cur.fetchone()
@@ -4026,12 +4136,15 @@ class ChatterRepo:
         placeholders = ",".join("?" * len(ids))
         with self._cursor() as cur:
             cur.execute(
-                f"SELECT twitch_id, name, first_seen, last_seen, opt_out, "
-                f"sub_tier, sub_months, is_mod, is_vip, is_founder, "
-                f"source, merged_into, "
-                f"pronouns, location, demeanor, interests, profile_updated_at, "
-                f"is_starred, followed_at "
-                f"FROM users WHERE twitch_id IN ({placeholders})",
+                f"SELECT u.twitch_id, u.name, u.first_seen, u.last_seen, u.opt_out, "
+                f"u.sub_tier, u.sub_months, u.is_mod, u.is_vip, u.is_founder, "
+                f"u.source, u.merged_into, u.followed_at, "
+                f"p.pronouns, p.location, p.demeanor, p.interests, "
+                f"p.profile_updated_at, "
+                f"COALESCE(p.is_starred, 0) AS is_starred "
+                f"FROM users u "
+                f"LEFT JOIN user_profiles p ON p.user_id = u.twitch_id "
+                f"WHERE u.twitch_id IN ({placeholders})",
                 ids,
             )
             out: dict[str, User] = {}
@@ -4343,14 +4456,20 @@ class ChatterRepo:
         with self._cursor() as cur:
             cur.execute(
                 """
-                UPDATE users SET
-                  pronouns = ?, location = ?, demeanor = ?,
-                  interests = ?, profile_updated_at = ?
-                WHERE twitch_id = ?
+                INSERT INTO user_profiles
+                    (user_id, pronouns, location, demeanor, interests, profile_updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    pronouns           = excluded.pronouns,
+                    location           = excluded.location,
+                    demeanor           = excluded.demeanor,
+                    interests          = excluded.interests,
+                    profile_updated_at = excluded.profile_updated_at
                 """,
                 (
+                    twitch_id,
                     norm_pronouns, norm_location, norm_demeanor,
-                    norm_interests, _now_iso(), twitch_id,
+                    norm_interests, _now_iso(),
                 ),
             )
 
