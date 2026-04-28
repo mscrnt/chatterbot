@@ -1580,6 +1580,12 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         if not user:
             raise HTTPException(404, "user not found")
         rows, focal_ids = repo.recent_user_messages_with_context(twitch_id)
+        # Subjects this chatter has driven across topic_threads —
+        # ranked by drive count + recency. Replaces the previous
+        # LLM-streamed "what to say" prescription with an
+        # observational data view: "here are the subjects they engage
+        # with; you (the streamer) decide what to lean into."
+        engaging_subjects = repo.subjects_engaging_chatter(twitch_id, limit=10)
         return TEMPLATES.TemplateResponse(
             request,
             "modals/_insight_chatter.html",
@@ -1590,6 +1596,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "meta": meta,
                 "rows": rows,
                 "focal_ids": focal_ids,
+                "engaging_subjects_for_user": engaging_subjects,
             },
         )
 

@@ -4,10 +4,16 @@
 {% set modal_size = 'lg' %}
 {% extends "components/_modal.html" %}
 {% block modal_body %}
+{# Per-chatter context surface. Streamer feedback: the previous
+   "Analyze + suggest an angle" LLM stream got too prescriptive
+   ("ask them about X, mention Y…"). Replaced with pure observation:
+   the subjects this chatter has demonstrably engaged with, ranked
+   by drive count + recency. The streamer reads the list, picks a
+   subject, comes up with their own line. #}
 <div class="space-y-4 text-sm">
-  {# 1. Kind-specific framing — talking point text, anniversary milestone,
-       newcomer first-seen, regular window, lapsed last-seen, etc.
-       Hidden if the caller didn't pass any meta. #}
+  {# 1. Kind-specific framing — talking point text, anniversary
+       milestone, newcomer first-seen, regular window, lapsed
+       last-seen, etc. Hidden if the caller didn't pass any meta. #}
   {% if meta %}
   <section class="rounded-lg border border-accent/40 bg-accent/5 p-3">
     <div class="flex items-baseline gap-2 mb-1">
@@ -29,7 +35,108 @@
   </div>
   {% endif %}
 
-  {# 2. Recent transcript with channel context, focal lines highlighted #}
+  {# 2. Profile snapshot — pronouns, location, demeanor, interests.
+        Built up by the LLM extractor over time and editable on the
+        chatter's profile page. Read-only here; included so this modal
+        reads as "a profile around the person", not just a transcript
+        dump. Hidden when the LLM has no clear signal yet to avoid an
+        empty-state. #}
+  {% set _has_profile = user.pronouns or user.location or user.demeanor or user.interests %}
+  {% if _has_profile %}
+    {% set _dem_tone = {
+      'hype':       'danger',
+      'chill':      'success',
+      'supportive': 'success',
+      'snarky':     'warning',
+      'quiet':      'neutral',
+      'analytical': 'accent',
+      'unknown':    'neutral',
+    }.get(user.demeanor or 'unknown', 'neutral') %}
+  <section class="rounded-lg border border-subtle bg-surface p-3">
+    <div class="flex items-baseline justify-between gap-2 mb-2">
+      <p class="text-[11px] uppercase tracking-wider text-muted">profile</p>
+      {% if user.profile_updated_at %}
+        <span class="text-[10px] text-muted">refreshed {{ user.profile_updated_at | short_ts }}</span>
+      {% endif %}
+    </div>
+    <div class="flex flex-wrap items-center gap-2 text-[12px]">
+      {% if user.pronouns %}
+        <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-subtle bg-canvas text-primary">
+          <i class="fa-solid fa-user text-[9px] text-muted"></i> {{ user.pronouns }}
+        </span>
+      {% endif %}
+      {% if user.location %}
+        <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-subtle bg-canvas text-primary">
+          <i class="fa-solid fa-location-dot text-[9px] text-muted"></i> {{ user.location }}
+        </span>
+      {% endif %}
+      {% if user.demeanor and user.demeanor != 'unknown' %}
+        {% with label=user.demeanor, tone=_dem_tone, icon='fa-face-smile' %}
+          {% include "components/_pill.html" %}
+        {% endwith %}
+      {% endif %}
+    </div>
+    {% if user.interests %}
+      <div class="mt-2 flex flex-wrap gap-1">
+        {% for tag in user.interests %}
+          <span class="inline-flex items-center px-2 py-0.5 text-[10px] rounded-full border border-accent/30 bg-accent/10 text-accent">
+            {{ tag }}
+          </span>
+        {% endfor %}
+      </div>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {# 3. Subjects this chatter engages with — observational, ranked.
+        Replaces the LLM "what to say" stream. Each row links into the
+        thread modal so the streamer can see what was actually said. #}
+  <section>
+    <div class="flex items-baseline justify-between gap-2 mb-1">
+      <p class="text-[11px] uppercase tracking-wider text-muted">subjects {{ user.name }} engages with</p>
+      <span class="text-[10px] text-muted">ranked by how often they've driven the thread</span>
+    </div>
+    {% if not engaging_subjects_for_user %}
+      <p class="text-muted italic text-xs">
+        No clustered topic-thread activity for this chatter yet — the
+        threader needs a few snapshots showing them as a driver before
+        subjects show up here.
+      </p>
+    {% else %}
+    <ul class="divide-y divide-subtle rounded-xl border border-subtle bg-surface overflow-hidden">
+      {% for s in engaging_subjects_for_user %}
+        {% set t = s.thread %}
+        {% set _stat_tone = {'active': 'success', 'dormant': 'warning', 'archived': 'neutral'}[t.status] %}
+        <li>
+          <button type="button"
+                  class="w-full px-3 py-2 text-left flex flex-col gap-1 hover:bg-surface-raised transition-all duration-150 ease-out"
+                  hx-get="/modals/thread/{{ t.id }}"
+                  hx-target="#modal-root"
+                  hx-swap="innerHTML"
+                  title="Open the thread with snapshots + drivers">
+            <div class="flex items-baseline gap-2 flex-wrap">
+              <span class="font-medium text-primary">{{ t.title }}</span>
+              {% with label=t.status, tone=_stat_tone %}
+                {% include "components/_pill.html" %}
+              {% endwith %}
+              {% if t.category and t.category != 'other' %}
+                <span class="text-[10px] uppercase tracking-wide text-muted">{{ t.category }}</span>
+              {% endif %}
+              <span class="ml-auto text-[10px] text-muted tabular-nums">
+                drove {{ s.drive_count }}× · last {{ s.last_drove_at | short_ts }}
+              </span>
+            </div>
+            {% if t.recap %}
+              <p class="text-[12px] text-primary leading-snug">{{ t.recap }}</p>
+            {% endif %}
+          </button>
+        </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </section>
+
+  {# 3. Recent transcript with channel context, focal lines highlighted #}
   <section>
     <div class="flex items-baseline justify-between gap-2 mb-1">
       <p class="text-[11px] uppercase tracking-wider text-muted">recent transcript</p>
@@ -57,50 +164,5 @@
     </ul>
     {% endif %}
   </section>
-
-  {# 3. LLM analysis — streamed on demand, kind-specific prompt #}
-  <section class="border-t border-subtle pt-3">
-    <button type="button" id="insight-explain-btn"
-            class="tap inline-flex items-center justify-center gap-2 px-4 rounded bg-accent hover:bg-accent-600 text-white font-medium text-sm transition-all duration-150 ease-out">
-      <i class="fa-solid fa-robot"></i> Analyze + suggest an angle
-    </button>
-    <p id="insight-explain-status" class="text-xs text-muted mt-2 hidden"></p>
-    <div id="insight-explain-answer"
-         class="whitespace-pre-wrap text-primary leading-relaxed text-sm mt-2"></div>
-  </section>
 </div>
-
-<script>
-  (function () {
-    const btn    = document.getElementById('insight-explain-btn');
-    const status = document.getElementById('insight-explain-status');
-    const answer = document.getElementById('insight-explain-answer');
-    let es = null;
-    btn.addEventListener('click', function () {
-      if (es) es.close();
-      answer.textContent = '';
-      status.textContent = 'thinking…';
-      status.classList.remove('hidden');
-      btn.disabled = true;
-      const url = `/insights/insight/{{ kind }}/{{ user.twitch_id }}/explain?meta=${encodeURIComponent({{ meta | tojson }})}`;
-      es = new EventSource(url);
-      es.addEventListener('chunk', e => {
-        answer.textContent += e.data.replace(/\\n/g, '\n');
-      });
-      es.addEventListener('done', () => {
-        status.classList.add('hidden');
-        btn.disabled = false;
-        es.close();
-      });
-      es.addEventListener('error', e => {
-        if (e.data) answer.textContent += `\n[error: ${e.data}]`;
-      });
-      es.onerror = () => {
-        status.textContent = 'connection lost';
-        btn.disabled = false;
-        if (es) es.close();
-      };
-    });
-  })();
-</script>
 {% endblock %}

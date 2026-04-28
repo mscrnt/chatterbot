@@ -120,7 +120,7 @@ _KIND_PROMPTS: dict[str, str] = {
 # Display config consumed by the modal template + nav title. Keep here so
 # adding a new kind only touches this file + the route enum.
 KIND_DISPLAY: dict[str, dict[str, str]] = {
-    "adhoc":         {"title": "What to say right now", "icon": "fa-comment-dots",
+    "adhoc":         {"title": "Engaged by", "icon": "fa-bookmark",
                       "meta_label": "context"},
     "talking_point": {"title": "Active right now", "icon": "fa-fire",
                       "meta_label": "talking point"},

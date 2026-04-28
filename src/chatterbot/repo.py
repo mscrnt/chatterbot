@@ -4434,6 +4434,85 @@ class ChatterRepo:
             )
             return int(cur.fetchone()["c"])
 
+    def subjects_engaging_chatter(
+        self, twitch_id: str, *, limit: int = 10,
+    ) -> list[dict]:
+        """Topic threads this chatter has driven, ranked by drive count
+        + recency. Used by the per-chatter modal to answer "what
+        subjects engage this person?" — observational only, no LLM
+        prescription.
+
+        Resolves the chatter's current name + every historical alias,
+        so a renamed user still gets credit for threads they drove
+        under their old name.
+
+        Returns dicts with: thread (TopicThread), drive_count,
+        last_drove_at. Ordered most-driven first, then most-recent.
+        """
+        # Pull current name + every alias (lowercased) so renamed
+        # chatters still match.
+        names: set[str] = set()
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT name FROM users WHERE twitch_id = ?",
+                (twitch_id,),
+            )
+            r = cur.fetchone()
+            if r and r["name"]:
+                names.add(r["name"].lower())
+            cur.execute(
+                "SELECT name FROM user_aliases WHERE user_id = ?",
+                (twitch_id,),
+            )
+            for row in cur.fetchall():
+                if row["name"]:
+                    names.add(row["name"].lower())
+        if not names:
+            return []
+
+        placeholders = ",".join("?" for _ in names)
+        sql = f"""
+            SELECT t.id, t.title, t.first_ts, t.last_ts, t.category,
+                   t.recap, t.recap_updated_at,
+                   (SELECT COUNT(*) FROM topic_thread_members
+                    WHERE thread_id = t.id) AS mc,
+                   {self._STATUS_CASE} AS status,
+                   COUNT(DISTINCT m.snapshot_id) AS drive_count,
+                   MAX(m.ts) AS last_drove_at
+            FROM topic_threads t
+            JOIN topic_thread_members m ON m.thread_id = t.id
+            JOIN json_each(m.drivers) AS j
+            WHERE LOWER(j.value) IN ({placeholders})
+            GROUP BY t.id
+            ORDER BY drive_count DESC, last_drove_at DESC
+            LIMIT ?
+        """
+        with self._cursor() as cur:
+            cur.execute(sql, list(names) + [int(limit)])
+            rows = [dict(r) for r in cur.fetchall()]
+
+        out: list[dict] = []
+        for row in rows:
+            tid = int(row["id"])
+            thread = TopicThread(
+                id=tid,
+                title=row["title"],
+                first_ts=row["first_ts"],
+                last_ts=row["last_ts"],
+                drivers=self._collect_thread_drivers(tid),
+                member_count=int(row["mc"]),
+                status=row["status"],
+                category=row["category"],
+                recap=row["recap"],
+                recap_updated_at=row["recap_updated_at"],
+            )
+            out.append({
+                "thread": thread,
+                "drive_count": int(row["drive_count"]),
+                "last_drove_at": row["last_drove_at"],
+            })
+        return out
+
     def list_quiet_thread_cohorts(
         self,
         *,

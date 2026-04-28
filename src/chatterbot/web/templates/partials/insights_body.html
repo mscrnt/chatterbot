@@ -182,8 +182,8 @@
                     hx-get="/modals/insight/adhoc/{{ u.twitch_id }}"
                     hx-target="#modal-root"
                     hx-swap="innerHTML"
-                    title="Ad-hoc engagement angle">
-              <i class="fa-solid fa-comment-dots text-[10px]"></i> what to say
+                    title="Subjects this chatter engages with">
+              <i class="fa-solid fa-bookmark text-[10px]"></i> engaged by
             </button>
             {% with kind='neglected_lurker', item_key=u.twitch_id,
                     state=(_s.state if _s else None) %}

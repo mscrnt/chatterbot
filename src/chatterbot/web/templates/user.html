@@ -91,9 +91,9 @@
               hx-get="/modals/insight/adhoc/{{ user.twitch_id }}"
               hx-target="#modal-root"
               hx-swap="innerHTML"
-              aria-label="What to say"
-              title="Ad-hoc — what should I say to this chatter right now?">
-        <i class="fa-solid fa-comment-dots"></i>
+              aria-label="Engaged by"
+              title="Subjects this chatter engages with — so you know what they like talking about">
+        <i class="fa-solid fa-bookmark"></i>
       </button>
       <form hx-post="/users/{{ user.twitch_id }}/opt-out" hx-target="#opt-out-area" hx-swap="innerHTML">
         <button class="tap inline-flex items-center justify-center w-9 h-9 rounded bg-surface-raised hover:bg-subtle text-primary text-sm transition-all duration-150 ease-out"
