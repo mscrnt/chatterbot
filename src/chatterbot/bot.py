@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import httpx
 from twitchio.ext import commands
 
 from .config import Settings
@@ -97,6 +98,39 @@ class ChatterListener(commands.Bot):
         self.settings = settings
         self.repo = repo
         self.summarizer = summarizer
+        # Persistent HTTP client for cross-process notifications to the
+        # dashboard's SSE bus. Keep-alive saves the TCP setup cost on
+        # every message. Notifications are fire-and-forget — failures
+        # are logged once per error type and don't block ingest.
+        self._notify_url = (settings.dashboard_internal_url or "").rstrip("/")
+        self._notify_secret = settings.internal_notify_secret or ""
+        self._notify_client: httpx.AsyncClient | None = None
+        self._last_notify_error: str | None = None
+
+    async def _notify(self, channel: str, version: str = "") -> None:
+        """POST a notification to the dashboard's /internal/notify
+        endpoint. No-op if `dashboard_internal_url` isn't set; the
+        dashboard's watermark poll fallback covers that case."""
+        if not self._notify_url:
+            return
+        if self._notify_client is None:
+            self._notify_client = httpx.AsyncClient(timeout=2.0)
+        headers = {}
+        if self._notify_secret:
+            headers["X-Internal-Secret"] = self._notify_secret
+        try:
+            await self._notify_client.post(
+                f"{self._notify_url}/internal/notify",
+                json={"channel": channel, "version": version},
+                headers=headers,
+            )
+        except Exception as e:
+            err = type(e).__name__
+            if err != self._last_notify_error:
+                logger.info("bot: notify(%s) failed: %s", channel, err)
+                self._last_notify_error = err
+        else:
+            self._last_notify_error = None
 
     async def event_ready(self) -> None:
         logger.info(
@@ -194,7 +228,7 @@ class ChatterListener(commands.Bot):
             # left None for now — once Helix enrichment carries the
             # real Twitch account-creation date we'll plumb it in.
             spam_score, spam_reasons = score_message(content)
-            await asyncio.to_thread(
+            new_msg_id = await asyncio.to_thread(
                 self.repo.insert_message,
                 twitch_id, content,
                 reply_parent_login=reply_parent_login,
@@ -203,6 +237,15 @@ class ChatterListener(commands.Bot):
                 spam_score=spam_score,
                 spam_reasons=spam_reasons,
             )
+            # Fire-and-forget cross-process notification to the
+            # dashboard's SSE bus so connected clients see the
+            # message within ~10 ms instead of waiting for the
+            # 10 s watermark-poll fallback.
+            asyncio.create_task(self._notify("messages", str(new_msg_id)))
+            # `chatters` channel covers any user-table change (new
+            # arrival, badge update, last_seen tick) — the upsert
+            # above touches at least last_seen, so always notify.
+            asyncio.create_task(self._notify("chatters", twitch_id))
             unsummarized = await asyncio.to_thread(
                 self.repo.unsummarized_count, twitch_id
             )

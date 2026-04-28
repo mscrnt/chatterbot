@@ -2413,6 +2413,41 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         tpl = "partials/live_rows.html" if partial else "live.html"
         return TEMPLATES.TemplateResponse(request, tpl, ctx)
 
+    @app.post("/internal/notify")
+    async def internal_notify(request: Request):
+        """Cross-process notification endpoint. The bot posts here
+        when state changes so the dashboard's SSE stream can fan out
+        to connected clients with ~10 ms latency instead of waiting
+        for the watermark poll.
+
+        Auth: optional shared secret in `X-Internal-Secret`. When
+        `settings.internal_notify_secret` is set, requests without
+        a matching header are rejected. Empty secret = unauth (dev
+        only — fine on a localhost-bound dashboard).
+
+        Body: `{"channel": "<name>", "version": "<opaque>"}`. Channel
+        must be one of the registered `/events/stream` channels;
+        unknown channels are silently dropped (avoids letting a
+        misconfigured publisher spam the bus)."""
+        from ..eventbus import get_bus
+        secret = settings.internal_notify_secret or ""
+        if secret:
+            sent = request.headers.get("x-internal-secret") or ""
+            if sent != secret:
+                raise HTTPException(401, "internal secret mismatch")
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(400, "invalid JSON body")
+        ch = (payload.get("channel") or "").strip() if isinstance(payload, dict) else ""
+        if not ch:
+            raise HTTPException(400, "channel required")
+        version = ""
+        if isinstance(payload, dict) and payload.get("version") is not None:
+            version = str(payload["version"])
+        get_bus().publish(ch, version)
+        return Response(status_code=204)
+
     @app.get("/events/stream")
     async def events_stream(request: Request):
         """Multiplexed change-notification SSE for HTMX-driven panels.
@@ -2461,42 +2496,77 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         }
         last: dict[str, object] = {ch: None for ch in channels}
 
+        # Hybrid push + poll. Cross-process events come from the bot
+        # via /internal/notify (low-latency, ~10 ms). Same-process
+        # services publish to the bus directly. The watermark poll is
+        # a slower fallback (10 s) for state changes not broadcast —
+        # e.g. SQL writes from a future TUI / external tool.
+        from ..eventbus import get_bus
+        bus = get_bus()
+
         async def gen():
-            # Send a hello so the client knows the connection is up
-            # before any state changes.
             yield _sse("hello", "")
-            poll_every = 1.5
-            heartbeat_every = 15  # ticks of poll_every (~22 s)
-            ticks_since_heartbeat = 0
-            while True:
-                if await request.is_disconnected():
-                    return
-                emitted = 0
-                for ch, vfn in channels.items():
+            poll_every = 10.0       # fallback poll cadence
+            heartbeat_every = 15.0  # seconds of silence before ping
+
+            # Single shared queue. Both push (bus subscriber) and
+            # poll (watermark loop) write into it; the main gen
+            # loop reads from it with a heartbeat timeout.
+            outq: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=128)
+
+            async def push_pump():
+                """Forward bus publications into outq."""
+                async for ch, version in bus.subscribe():
+                    if ch not in channels:
+                        continue
+                    if version and version == last.get(ch):
+                        continue
+                    last[ch] = version
                     try:
-                        v = await asyncio.to_thread(vfn)
-                    except Exception:
-                        logger.exception("events_stream: watermark %s failed", ch)
-                        continue
-                    if last[ch] is None:
-                        # First read — record it but don't emit. The
-                        # initial page render already reflects this
-                        # state; sending an event now would cause an
-                        # immediate redundant refetch.
-                        last[ch] = v
-                        continue
-                    if v != last[ch]:
-                        last[ch] = v
-                        yield _sse(ch, str(v))
-                        emitted += 1
-                if emitted:
-                    ticks_since_heartbeat = 0
-                else:
-                    ticks_since_heartbeat += 1
-                    if ticks_since_heartbeat >= heartbeat_every:
+                        outq.put_nowait((ch, version))
+                    except asyncio.QueueFull:
+                        pass  # client behind; drop
+
+            async def poll_pump():
+                """Slow watermark fallback for changes the bus missed."""
+                while True:
+                    for ch, vfn in channels.items():
+                        try:
+                            v = await asyncio.to_thread(vfn)
+                        except Exception:
+                            logger.exception(
+                                "events_stream: watermark %s failed", ch,
+                            )
+                            continue
+                        v_str = str(v)
+                        if last.get(ch) is None:
+                            last[ch] = v_str
+                            continue
+                        if v_str != last[ch]:
+                            last[ch] = v_str
+                            try:
+                                outq.put_nowait((ch, v_str))
+                            except asyncio.QueueFull:
+                                pass
+                    await asyncio.sleep(poll_every)
+
+            push_task = asyncio.create_task(push_pump())
+            poll_task = asyncio.create_task(poll_pump())
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        return
+                    try:
+                        ch, v = await asyncio.wait_for(
+                            outq.get(), timeout=heartbeat_every,
+                        )
+                        yield _sse(ch, v)
+                    except asyncio.TimeoutError:
                         yield ": ping\n\n"
-                        ticks_since_heartbeat = 0
-                await asyncio.sleep(poll_every)
+            finally:
+                for t in (push_task, poll_task):
+                    if not t.done():
+                        t.cancel()
 
         return StreamingResponse(
             gen(),

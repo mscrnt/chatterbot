@@ -127,6 +127,21 @@ class Settings(BaseSettings):
     # bypass this cap.
     ollama_max_concurrent_generations: int = 1
 
+    # Cross-process notification bus. The bot fires HTTP POSTs to
+    # `dashboard_internal_url + /internal/notify` whenever something
+    # changes (new chat message, new event, etc.) so the dashboard's
+    # SSE stream pushes to clients with ~10 ms latency instead of
+    # waiting for the watermark poll. Both halves run inside the
+    # same docker-compose network by default.
+    #   dashboard_internal_url — where the bot reaches the dashboard.
+    #     Empty disables push notifications; the dashboard falls
+    #     back to its watermark poll loop and everything still works.
+    #   internal_notify_secret — shared secret. The dashboard
+    #     rejects /internal/notify calls without a matching
+    #     X-Internal-Secret header. Empty disables auth (dev only).
+    dashboard_internal_url: str = "http://dashboard:8765"
+    internal_notify_secret: str = ""
+
     # OBS (read-only status: live state + current scene). Disabled by default.
     obs_enabled: bool = False
     obs_host: str = "localhost"
