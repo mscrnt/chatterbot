@@ -280,6 +280,18 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 name="transcript_screenshot_loop",
             )
         )
+        # Chat-lag auto-tuner — every ~10 min, re-run the
+        # cross-correlation between transcript text and chat content
+        # and silently update `chat_lag_seconds` if the result is
+        # confident. No streamer action needed; converges over the
+        # course of a stream. Set the interval to 0 in /settings →
+        # Whisper to disable.
+        _bg_tasks.add(
+            asyncio.create_task(
+                transcript_service.chat_lag_calibration_loop(),
+                name="chat_lag_auto_tune",
+            )
+        )
         try:
             yield
         finally:
@@ -888,6 +900,8 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "whisper_group_min_chunks",
                 "thread_recap_interval_seconds",
                 "thread_recap_max_messages_per_thread",
+                "chat_lag_seconds",
+                "chat_lag_auto_tune_interval_seconds",
                 "screenshot_interval_seconds",
                 "screenshot_max_age_hours",
                 "screenshot_jpeg_quality",
@@ -978,6 +992,16 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "groups": grouped,
                 "saved": bool(saved),
                 "github_issue_url": make_github_issue_url(),
+                # Initial state for the chat-lag calibrator partial:
+                # current setting, no calibration result yet (the
+                # streamer hits "Run" to populate it).
+                "chat_lag_current": int(getattr(live, "chat_lag_seconds", 6)),
+                "calibration": None,
+                "chat_lag_lookback": 5,
+                "chat_lag_lookback_options": (5, 15, 30),
+                "chat_lag_auto_tuned_at": repo.get_app_setting("chat_lag_auto_tuned_at"),
+                "chat_lag_auto_tuned_value": repo.get_app_setting("chat_lag_auto_tuned_value"),
+                "chat_lag_auto_tune_enabled": int(getattr(live, "chat_lag_auto_tune_interval_seconds", 600)) > 0,
             },
         )
 
@@ -1015,6 +1039,177 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         tab = (form.get("_tab") or "").strip()
         url = f"/settings?saved=1&tab={tab}" if tab else "/settings?saved=1"
         return RedirectResponse(url=url, status_code=303)
+
+    _CHAT_LAG_LOOKBACK_OPTIONS = (5, 15, 30)
+
+    @app.post(
+        "/settings/calibrate-chat-lag",
+        response_class=HTMLResponse,
+    )
+    async def settings_calibrate_chat_lag(request: Request):
+        """Run chat-lag cross-correlation. Default lookback dropped
+        to 5 min so the calibration is useful within a couple minutes
+        of going live; streamer can widen via the panel selector when
+        chat is too thin to clear the activity guard at 5 min.
+
+        `lookback` is read from EITHER the URL query string (the
+        manual Run button hardcodes it there) OR the form body (the
+        dropdown sends it via hx-include='this'). Falling back across
+        both keeps a single endpoint serving both call shapes."""
+        from ..latency import calibrate_chat_lag
+        lookback_raw = request.query_params.get("lookback")
+        if not lookback_raw:
+            try:
+                form = await request.form()
+                lookback_raw = form.get("lookback")
+            except Exception:
+                lookback_raw = None
+        try:
+            lookback = int(lookback_raw or 5)
+        except (TypeError, ValueError):
+            lookback = 5
+        # Snap to the supported options so a tampered value can't
+        # trigger an unbounded run.
+        lookback = min(_CHAT_LAG_LOOKBACK_OPTIONS, key=lambda x: abs(x - lookback))
+        try:
+            result = await asyncio.to_thread(
+                calibrate_chat_lag, repo, lookback_minutes=lookback,
+            )
+        except Exception as e:
+            logger.exception("chat-lag calibration failed")
+            result = {
+                "ok": False,
+                "reason": f"{type(e).__name__}: {e}",
+                "samples": {"chunks": 0, "messages": 0},
+                "lookback_minutes": lookback,
+                "offsets": [],
+                "best_offset": None,
+                "second_best_offset": None,
+            }
+        live, _ = get_settings_with_sources()
+        return TEMPLATES.TemplateResponse(
+            request,
+            "partials/chat_lag_calibrator.html",
+            {
+                "calibration": result,
+                "chat_lag_current": int(getattr(live, "chat_lag_seconds", 6)),
+                "chat_lag_lookback": lookback,
+                "chat_lag_lookback_options": _CHAT_LAG_LOOKBACK_OPTIONS,
+                "chat_lag_auto_tuned_at": repo.get_app_setting("chat_lag_auto_tuned_at"),
+                "chat_lag_auto_tuned_value": repo.get_app_setting("chat_lag_auto_tuned_value"),
+                "chat_lag_auto_tune_enabled": int(getattr(live, "chat_lag_auto_tune_interval_seconds", 600)) > 0,
+            },
+        )
+
+    @app.post(
+        "/settings/calibrate-chat-lag/apply",
+        response_class=HTMLResponse,
+    )
+    async def settings_calibrate_chat_lag_apply(
+        request: Request,
+        offset: int = Query(..., ge=0, le=60),
+        lookback: int = Query(5, ge=1, le=60),
+    ):
+        """Save the picked offset to chat_lag_seconds and re-render
+        the calibrator partial so the streamer sees the new "current"
+        value reflected immediately. Re-runs calibration so the bar
+        chart is preserved across the swap."""
+        repo.set_app_setting("chat_lag_seconds", str(int(offset)))
+        lookback = min(_CHAT_LAG_LOOKBACK_OPTIONS, key=lambda x: abs(x - lookback))
+        from ..latency import calibrate_chat_lag
+        try:
+            result = await asyncio.to_thread(
+                calibrate_chat_lag, repo, lookback_minutes=lookback,
+            )
+        except Exception:
+            logger.exception("chat-lag calibration after apply failed")
+            result = None
+        live, _ = get_settings_with_sources()
+        return TEMPLATES.TemplateResponse(
+            request,
+            "partials/chat_lag_calibrator.html",
+            {
+                "calibration": result,
+                "chat_lag_current": int(getattr(live, "chat_lag_seconds", 6)),
+                "chat_lag_lookback": lookback,
+                "chat_lag_lookback_options": _CHAT_LAG_LOOKBACK_OPTIONS,
+                "chat_lag_auto_tuned_at": repo.get_app_setting("chat_lag_auto_tuned_at"),
+                "chat_lag_auto_tuned_value": repo.get_app_setting("chat_lag_auto_tuned_value"),
+                "chat_lag_auto_tune_enabled": int(getattr(live, "chat_lag_auto_tune_interval_seconds", 600)) > 0,
+            },
+        )
+
+    @app.post(
+        "/settings/chat-lag/save",
+        response_class=HTMLResponse,
+    )
+    async def settings_chat_lag_save(request: Request):
+        """Save manual override + auto-tune toggle from the calibrator
+        panel without going through the full /settings form. Two
+        controls, both optional in the body:
+
+          - chat_lag_seconds: int (manual override)
+          - chat_lag_auto_tune: 'on' | absent (checkbox)
+
+        Saving a manual override clears the auto-tuned-at timestamp
+        so the panel doesn't keep showing a stale "auto-tuned" pill
+        next to a streamer-overridden value. Toggling auto-tune
+        just sets the interval to 0 (disabled) or back to its
+        previous value (re-enabled) — we cache the last enabled
+        interval in `chat_lag_auto_tune_last_enabled` so re-enabling
+        respects whatever the streamer had configured."""
+        form = await request.form()
+        manual = form.get("chat_lag_seconds")
+        auto_on = form.get("chat_lag_auto_tune") is not None
+        if manual is not None and str(manual).strip():
+            try:
+                v = max(0, min(60, int(str(manual).strip())))
+            except (TypeError, ValueError):
+                v = None
+            if v is not None:
+                repo.set_app_setting("chat_lag_seconds", str(v))
+                # Streamer's manual pick overrides any prior auto-tune.
+                repo.delete_app_setting("chat_lag_auto_tuned_at")
+                repo.delete_app_setting("chat_lag_auto_tuned_value")
+        # Toggle: store last-enabled interval before disabling so we
+        # can restore it (defaults to 600 if never set).
+        cur_interval = repo.get_app_setting("chat_lag_auto_tune_interval_seconds")
+        try:
+            cur_interval_n = int(cur_interval) if cur_interval else 600
+        except (TypeError, ValueError):
+            cur_interval_n = 600
+        if auto_on and cur_interval_n == 0:
+            last_enabled = repo.get_app_setting(
+                "chat_lag_auto_tune_last_enabled",
+            )
+            try:
+                restore = int(last_enabled) if last_enabled else 600
+            except (TypeError, ValueError):
+                restore = 600
+            repo.set_app_setting(
+                "chat_lag_auto_tune_interval_seconds", str(restore),
+            )
+        elif not auto_on and cur_interval_n != 0:
+            repo.set_app_setting(
+                "chat_lag_auto_tune_last_enabled", str(cur_interval_n),
+            )
+            repo.set_app_setting(
+                "chat_lag_auto_tune_interval_seconds", "0",
+            )
+        live, _ = get_settings_with_sources()
+        return TEMPLATES.TemplateResponse(
+            request,
+            "partials/chat_lag_calibrator.html",
+            {
+                "calibration": None,
+                "chat_lag_current": int(getattr(live, "chat_lag_seconds", 6)),
+                "chat_lag_lookback": 5,
+                "chat_lag_lookback_options": _CHAT_LAG_LOOKBACK_OPTIONS,
+                "chat_lag_auto_tuned_at": repo.get_app_setting("chat_lag_auto_tuned_at"),
+                "chat_lag_auto_tuned_value": repo.get_app_setting("chat_lag_auto_tuned_value"),
+                "chat_lag_auto_tune_enabled": int(getattr(live, "chat_lag_auto_tune_interval_seconds", 600)) > 0,
+            },
+        )
 
     # ---------------- moderation (opt-in via MOD_MODE_ENABLED) ----------------
 

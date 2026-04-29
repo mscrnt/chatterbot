@@ -60,6 +60,8 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "whisper_group_min_chunks",
     "thread_recap_interval_seconds",
     "thread_recap_max_messages_per_thread",
+    "chat_lag_seconds",
+    "chat_lag_auto_tune_interval_seconds",
     "screenshot_interval_seconds",
     "screenshot_max_age_hours",
     "screenshot_jpeg_quality",
@@ -297,6 +299,25 @@ class Settings(BaseSettings):
     whisper_group_interval_seconds: int = 60
     whisper_group_min_chunks: int = 2
 
+    # Twitch broadcast latency. The streamer's mic captures into OBS
+    # in real time, but viewers don't hear it until ~3-15s later
+    # depending on Twitch's "Low Latency" vs "Standard" mode + CDN +
+    # player buffer + viewer reaction time. Chat is reacting to what
+    # they HEARD, so when we pair transcript chunks with chat for the
+    # group-summary call, we offset the chat window backwards by this
+    # many seconds. 0 = pair by wall-clock (correct for the test setup
+    # where chatterbot ingests playback audio); 5-8 typical for
+    # streamers using Low Latency; 12-15 for Standard/DVR.
+    # The /settings → Whisper page exposes a calibration tool that
+    # auto-detects this from cross-correlation of transcript text vs
+    # chat token overlap.
+    chat_lag_seconds: int = 6
+    # How often the background auto-tuner re-runs the calibration.
+    # 0 disables. Default 600 (10 min) — frequent enough to converge
+    # within the first few panels of a stream, infrequent enough to
+    # not dominate CPU when chat is hot.
+    chat_lag_auto_tune_interval_seconds: int = 600
+
     # Topic-thread recap loop. Periodically summarises each active
     # thread's recent messages into a 1-2 sentence observational line
     # for the engagement-view "Live conversations" panel. Set
@@ -424,6 +445,7 @@ def _coerce(key: str, value: str) -> Any:
         "whisper_auto_confirm_seconds",
         "whisper_group_interval_seconds", "whisper_group_min_chunks",
         "thread_recap_interval_seconds", "thread_recap_max_messages_per_thread",
+        "chat_lag_seconds", "chat_lag_auto_tune_interval_seconds",
         "youtube_min_poll_seconds", "youtube_max_poll_seconds",
         "screenshot_interval_seconds", "screenshot_max_age_hours",
         "screenshot_jpeg_quality", "screenshot_width", "screenshot_grid_max",
@@ -452,6 +474,8 @@ def _coerce(key: str, value: str) -> Any:
                 "whisper_group_min_chunks": 2,
                 "thread_recap_interval_seconds": 300,
                 "thread_recap_max_messages_per_thread": 30,
+                "chat_lag_seconds": 6,
+                "chat_lag_auto_tune_interval_seconds": 600,
                 "youtube_min_poll_seconds": 10,
                 "youtube_max_poll_seconds": 30,
                 "screenshot_interval_seconds": 15,

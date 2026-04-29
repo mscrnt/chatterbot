@@ -1,0 +1,244 @@
+{# Chat-lag calibration tool, embedded in /settings → Whisper.
+
+   The button POSTs to /settings/calibrate-chat-lag which renders THIS
+   same partial back with `calibration` populated. Pure HTMX — no JS.
+
+   Lookback selector: 5 min by default so calibration is useful early
+   in a stream. Wider options (15 / 30 min) for thinner chat that
+   needs more samples to clear the activity guard.
+
+   Auto-tune indicator: when the background loop has updated the
+   value, we show "auto-tuned to Ns · X min ago" so the streamer
+   knows what's in use without needing to dig through logs.
+
+   Apply button: POSTs to /settings/calibrate-chat-lag/apply?offset=N
+   to save the pick + re-render. The surrounding /settings form is
+   NOT submitted by either button (type=button + HTMX target). #}
+<div id="chat-lag-calibrator-root"
+     class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 space-y-3">
+  <header class="space-y-2">
+    <div class="flex items-center justify-between gap-2 flex-wrap">
+      <h3 class="font-semibold text-primary inline-flex items-center gap-2">
+        <i class="fa-solid fa-stopwatch text-accent"></i>
+        Chat-lag calibration
+      </h3>
+      <span class="text-[11px] text-muted">
+        Currently:
+        <strong class="text-primary">{{ chat_lag_current }}s</strong>
+        {% if chat_lag_auto_tuned_at and chat_lag_auto_tuned_value %}
+          <span class="text-success" title="last auto-tune">
+            · auto-tuned to {{ chat_lag_auto_tuned_value }}s
+            ({{ chat_lag_auto_tuned_at | short_ts }})
+          </span>
+        {% endif %}
+      </span>
+    </div>
+    <p class="text-xs text-muted">
+      Auto-detects Twitch broadcast latency by cross-correlating
+      transcript text against chat. Override below if you'd rather
+      set it by hand, or toggle auto-calibration off entirely.
+    </p>
+
+    {# Manual override + auto-tune toggle row. Both POST to the
+       /settings/chat-lag/save endpoint which re-renders this same
+       partial, so the form-stuck bug from the lookback dropdown
+       can't repeat here — the auto-tune checkbox uses hx-vals to
+       pin the value in the URL, and the manual input has its own
+       Save button. #}
+    <form class="flex flex-col sm:flex-row sm:items-center gap-2"
+          hx-post="/settings/chat-lag/save"
+          hx-target="#chat-lag-calibrator-root"
+          hx-swap="outerHTML">
+      <label class="inline-flex items-center gap-2 text-xs text-muted">
+        Manual override:
+        <input type="number" name="chat_lag_seconds"
+               value="{{ chat_lag_current }}"
+               min="0" max="60" step="1"
+               class="tap w-20 bg-canvas border border-subtle rounded px-2 py-1 text-sm text-primary tabular-nums focus:outline-none focus:ring-2 focus:ring-accent"
+               title="Skip the calibration and pin this exact offset.">
+        <span class="text-muted">seconds</span>
+      </label>
+      <label class="inline-flex items-center gap-2 text-xs text-muted cursor-pointer"
+             title="When on, the dashboard re-runs calibration every ~10 min and silently updates this value when the result is confident.">
+        <input type="checkbox" name="chat_lag_auto_tune"
+               {% if chat_lag_auto_tune_enabled %}checked{% endif %}
+               class="h-4 w-4 accent-accent">
+        Auto-calibrate every ~10 min
+      </label>
+      <button type="submit"
+              class="tap ml-auto inline-flex items-center justify-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary text-sm whitespace-nowrap">
+        <i class="fa-solid fa-floppy-disk text-xs"></i>
+        Save
+      </button>
+    </form>
+
+    {# Calibration runner controls — separate row from the override
+       so it's clear these are different actions. #}
+    <div class="flex items-center gap-2 pt-1">
+      <span class="text-[11px] text-muted">Or run a calibration now:</span>
+      <select name="lookback"
+              hx-post="/settings/calibrate-chat-lag"
+              hx-include="this"
+              hx-target="#chat-lag-calibrator-root"
+              hx-swap="outerHTML"
+              hx-trigger="change"
+              class="tap bg-canvas border border-subtle rounded px-2 py-1 text-xs text-primary"
+              title="How far back to sample. 5 min is enough on busy chats; widen for quieter channels.">
+        {% for opt in (chat_lag_lookback_options or [5, 15, 30]) %}
+          <option value="{{ opt }}"
+                  {% if opt == (chat_lag_lookback or 5) %}selected{% endif %}>
+            {{ opt }} min
+          </option>
+        {% endfor %}
+      </select>
+      <button type="button"
+              class="tap inline-flex items-center justify-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary text-sm whitespace-nowrap"
+              hx-post="/settings/calibrate-chat-lag?lookback={{ chat_lag_lookback or 5 }}"
+              hx-target="#chat-lag-calibrator-root"
+              hx-swap="outerHTML"
+              hx-indicator="#chat-lag-spinner">
+        <i class="fa-solid fa-bolt text-xs"></i>
+        Run
+        <span id="chat-lag-spinner" class="htmx-indicator">
+          <i class="fa-solid fa-spinner fa-spin text-xs"></i>
+        </span>
+      </button>
+    </div>
+  </header>
+
+  {% if calibration %}
+    {% if not calibration.ok %}
+      <div class="rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-primary">
+        <i class="fa-solid fa-triangle-exclamation text-warning mr-1"></i>
+        Couldn't calibrate: {{ calibration.reason }}.
+        Wait for more chat activity, then try again. Or widen the
+        lookback above. (Sampled
+        {{ calibration.samples.chunks }} transcript chunks ·
+        {{ calibration.samples.messages }} chat messages over the last
+        {{ calibration.lookback_minutes }} min.)
+      </div>
+    {% else %}
+      {% set _max_score = (calibration.offsets | map(attribute='score') | max) or 1 %}
+      <div class="space-y-1">
+        {% for o in calibration.offsets %}
+          {% set _is_best = o.seconds == calibration.best_offset %}
+          {% set _pct = (o.score / _max_score * 100) | round %}
+          <div class="flex items-center gap-2 text-[11px]">
+            <span class="w-10 tabular-nums text-muted text-right">
+              {{ o.seconds }}s
+            </span>
+            <div class="flex-1 h-5 bg-canvas rounded relative overflow-hidden">
+              <div class="absolute inset-y-0 left-0 transition-all duration-300 ease-out
+                          {% if _is_best %}bg-accent{% else %}bg-accent/30{% endif %}"
+                   style="width: {{ _pct }}%;"></div>
+              <span class="absolute inset-0 flex items-center px-2 tabular-nums
+                           {% if _is_best %}text-white font-semibold{% else %}text-muted{% endif %}">
+                {{ o.score }} matched / chunk
+                {% if _is_best %}
+                  <i class="fa-solid fa-check ml-1 text-[10px]"></i>
+                {% endif %}
+              </span>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pt-1">
+        <p class="text-[11px] text-muted">
+          Best fit:
+          <strong class="text-accent">{{ calibration.best_offset }}s</strong>
+          {% if calibration.second_best_offset is not none %}
+            · runner-up {{ calibration.second_best_offset }}s
+          {% endif %}
+          · confidence
+          {% set _conf_pct = (calibration.confidence * 100) | round %}
+          {% if calibration.confidence >= 0.15 %}
+            <span class="text-success font-semibold">{{ _conf_pct }}%</span>
+          {% elif calibration.confidence >= 0.05 %}
+            <span class="text-warning">{{ _conf_pct }}% (low — verify with evidence below)</span>
+          {% else %}
+            <span class="text-danger">{{ _conf_pct }}% (flat curve — wait for more chat)</span>
+          {% endif %}
+          · {{ calibration.samples.chunks }} chunks /
+          {{ calibration.samples.messages }} msgs over
+          {{ calibration.lookback_minutes }} min ·
+          {{ calibration.weighted_token_universe }} distinctive tokens
+        </p>
+        {% if calibration.best_offset is not none and calibration.best_offset != chat_lag_current %}
+          <button type="button"
+                  class="tap inline-flex items-center justify-center gap-2 px-3 rounded bg-accent hover:bg-accent-600 text-white text-sm font-medium whitespace-nowrap"
+                  hx-post="/settings/calibrate-chat-lag/apply?offset={{ calibration.best_offset }}&lookback={{ chat_lag_lookback or 5 }}"
+                  hx-target="#chat-lag-calibrator-root"
+                  hx-swap="outerHTML">
+            <i class="fa-solid fa-check"></i>
+            Apply {{ calibration.best_offset }}s
+          </button>
+        {% else %}
+          <span class="text-[11px] text-success inline-flex items-center gap-1">
+            <i class="fa-solid fa-circle-check"></i>
+            Already at the best fit
+          </span>
+        {% endif %}
+      </div>
+
+      {# "Show your work" — top chunk-chat pairs that drove the
+         winning offset. Each pair: streamer utterance on top, the
+         matching chat replies below with their shared tokens
+         pill-highlighted. Collapsed by default to keep the panel
+         compact; expanding gives the streamer everything they need
+         to verify the calibration is real, not noise. #}
+      {% if calibration.evidence %}
+        <details class="mt-2 group">
+          <summary class="cursor-pointer text-[11px] text-muted hover:text-primary inline-flex items-center gap-1.5 select-none">
+            <i class="fa-solid fa-chevron-right text-[9px] transition-transform group-open:rotate-90"></i>
+            Show evidence — top {{ calibration.evidence | length }} streamer-chat pairs that aligned at {{ calibration.best_offset }}s
+          </summary>
+          <div class="mt-2 space-y-2 border-l-2 border-accent/40 pl-3">
+            {% for ev in calibration.evidence %}
+              <div class="text-[11px] space-y-1">
+                <div class="flex items-baseline gap-2">
+                  <span class="tabular-nums text-muted shrink-0">{{ ev.chunk_ts }}</span>
+                  <i class="fa-solid fa-microphone-lines text-accent text-[9px] mt-0.5"></i>
+                  <span class="text-primary leading-snug flex-1">{{ ev.chunk_text }}</span>
+                  <span class="text-[10px] text-muted whitespace-nowrap shrink-0">weight {{ ev.weight }}</span>
+                </div>
+                {% if ev.chat %}
+                  <ul class="ml-4 space-y-0.5">
+                    {% for c in ev.chat %}
+                      <li class="flex items-baseline gap-2 leading-snug">
+                        <span class="tabular-nums text-muted shrink-0">{{ c.ts }}</span>
+                        <span class="text-accent shrink-0">{{ c.name }}:</span>
+                        <span class="text-primary flex-1 break-words">{{ c.content }}</span>
+                        {% if c.matched %}
+                          <span class="shrink-0 inline-flex flex-wrap gap-0.5">
+                            {% for tok in c.matched %}
+                              <span class="px-1 rounded bg-accent/20 text-accent text-[10px] font-mono">{{ tok }}</span>
+                            {% endfor %}
+                          </span>
+                        {% endif %}
+                      </li>
+                    {% endfor %}
+                  </ul>
+                {% endif %}
+              </div>
+            {% endfor %}
+          </div>
+          <p class="text-[10px] text-muted mt-2">
+            Score = sum of IDF weights for shared tokens across all
+            chunk-chat pairs in the offset's window. Distinctive
+            tokens (game names, proper nouns) count more; common
+            chat words count less. The offset that maximises this
+            sum across all chunks wins.
+          </p>
+        </details>
+      {% endif %}
+    {% endif %}
+  {% else %}
+    <p class="text-xs text-muted italic">
+      Click <strong>Run</strong> to score offsets from 0 to 18 seconds
+      in 2-second steps. Or just leave it — the dashboard auto-tunes
+      this in the background every ~10 minutes once enough chat
+      activity has accumulated.
+    </p>
+  {% endif %}
+</div>

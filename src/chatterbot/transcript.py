@@ -864,6 +864,123 @@ HARD RULES:
 Reply with `summary` = the line(s) (or empty string).
 """
 
+    async def chat_lag_calibration_loop(self) -> None:
+        """Background task: periodically auto-tune `chat_lag_seconds`.
+
+        Runs every ~10 min with a 15-min lookback. Silently updates
+        the setting when the cross-correlation is confident (best
+        score has a clear margin over the runner-up AND we sampled
+        enough activity to trust it). Otherwise skips the iteration
+        — better to keep the manual / previously-applied value than
+        chase noise.
+
+        The streamer sees the auto-tuned value + timestamp in the
+        calibrator panel on /settings → Whisper. Set
+        `chat_lag_auto_tune_interval_seconds` to 0 to disable."""
+        from .latency import calibrate_chat_lag
+
+        await asyncio.sleep(120)  # let the dashboard settle + accumulate data
+        while True:
+            # Read fresh — the auto-tune toggle in the calibrator
+            # writes app_settings, and we want a flip from on→off (or
+            # interval change) to take effect within one cycle, not
+            # require a dashboard restart.
+            interval_raw = await asyncio.to_thread(
+                self.repo.get_app_setting,
+                "chat_lag_auto_tune_interval_seconds",
+            )
+            try:
+                interval = int(
+                    interval_raw if interval_raw is not None
+                    else getattr(
+                        self.settings,
+                        "chat_lag_auto_tune_interval_seconds", 600,
+                    )
+                )
+            except (TypeError, ValueError):
+                interval = 600
+            if interval <= 0:
+                # Disabled — sleep a fixed window then re-check, so
+                # toggling back on doesn't need a restart either.
+                await asyncio.sleep(60)
+                continue
+            try:
+                result = await asyncio.to_thread(
+                    calibrate_chat_lag, self.repo, lookback_minutes=15,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("chat-lag auto-calibration iteration failed")
+                result = None
+
+            if result and result.get("ok") and result.get("best_offset") is not None:
+                # Confidence gate: the winning offset must beat the
+                # runner-up by at least 10% AND we must have non-trivial
+                # sample sizes. Loose enough to converge once chat picks
+                # up; tight enough that a flat curve can't sneak through.
+                offsets = result.get("offsets") or []
+                samples = result.get("samples") or {}
+                scores = sorted(
+                    (o.get("score", 0.0) for o in offsets), reverse=True,
+                )
+                best_score = scores[0] if scores else 0.0
+                second_score = scores[1] if len(scores) > 1 else 0.0
+                samples_ok = (
+                    samples.get("chunks", 0) >= 15
+                    and samples.get("messages", 0) >= 50
+                )
+                margin_ok = (
+                    second_score == 0.0
+                    or best_score >= second_score * 1.1
+                )
+                if samples_ok and margin_ok:
+                    new_value = int(result["best_offset"])
+                    try:
+                        current = int(self.repo.get_app_setting(
+                            "chat_lag_seconds",
+                        ) or getattr(self.settings, "chat_lag_seconds", 6))
+                    except (TypeError, ValueError):
+                        current = getattr(self.settings, "chat_lag_seconds", 6)
+                    if new_value != current:
+                        try:
+                            from datetime import datetime as _dt
+                            ts_iso = _dt.utcnow().isoformat(timespec="seconds")
+                            self.repo.set_app_setting(
+                                "chat_lag_seconds", str(new_value),
+                            )
+                            self.repo.set_app_setting(
+                                "chat_lag_auto_tuned_at", ts_iso,
+                            )
+                            self.repo.set_app_setting(
+                                "chat_lag_auto_tuned_value", str(new_value),
+                            )
+                            logger.info(
+                                "chat-lag auto-tune: %ds → %ds "
+                                "(samples chunks=%d msgs=%d, best=%.2f vs "
+                                "second=%.2f)",
+                                current, new_value,
+                                samples.get("chunks", 0),
+                                samples.get("messages", 0),
+                                best_score, second_score,
+                            )
+                        except Exception:
+                            logger.exception("chat-lag auto-tune: persist failed")
+                    else:
+                        logger.debug(
+                            "chat-lag auto-tune: already at %ds (no change)",
+                            current,
+                        )
+                else:
+                    logger.debug(
+                        "chat-lag auto-tune: skipped — samples_ok=%s "
+                        "margin_ok=%s (best=%.2f second=%.2f chunks=%d msgs=%d)",
+                        samples_ok, margin_ok, best_score, second_score,
+                        samples.get("chunks", 0), samples.get("messages", 0),
+                    )
+
+            await asyncio.sleep(interval)
+
     async def transcript_group_loop(self) -> None:
         """Background task: every `whisper_group_interval_seconds`,
         pull new chunks since the last group's watermark and write one
@@ -980,22 +1097,74 @@ Reply with `summary` = the line(s) (or empty string).
         # plus a few minutes of pre-roll (chat triggers a streamer
         # reaction that lasts a while). Capped to 60 messages so a
         # very busy chat doesn't blow the context budget.
+        # Twitch broadcast latency offset. Streamer's mic captures into
+        # OBS in real time, but viewers don't hear it until ~3-15s
+        # later (Low Latency vs Standard mode + CDN + player buffer +
+        # viewer reaction). Chat is reacting to what they HEARD, so
+        # the chat window is offset BACKWARDS from the audio window
+        # by `chat_lag_seconds`. Default 6s ≈ Low Latency Twitch.
+        # 0 disables the offset (correct for the test setup where
+        # chatterbot ingests the same playback audio chat is reacting
+        # to). Calibrate via /settings → Whisper.
+        #
+        # Read fresh from app_settings rather than `self.settings` so
+        # that "Apply Ns" in the calibrator + the auto-tune loop both
+        # take effect on the NEXT group summary, not after a restart.
+        chat_lag_raw = await asyncio.to_thread(
+            self.repo.get_app_setting, "chat_lag_seconds",
+        )
+        try:
+            chat_lag = max(0, int(
+                chat_lag_raw if chat_lag_raw is not None
+                else getattr(self.settings, "chat_lag_seconds", 6)
+            ))
+        except (TypeError, ValueError):
+            chat_lag = 6
+
         chat_block = ""
         try:
-            from datetime import datetime as _dt
+            from datetime import datetime as _dt, timedelta as _td
             now = _dt.utcnow()
             try:
                 first_ts = _dt.fromisoformat(
                     chunks[0].ts.replace("Z", "+00:00")
                 ).replace(tzinfo=None)
+                last_ts = _dt.fromisoformat(
+                    chunks[-1].ts.replace("Z", "+00:00")
+                ).replace(tzinfo=None)
                 window_min = max(3, int((now - first_ts).total_seconds() / 60) + 2)
             except Exception:
+                first_ts = None
+                last_ts = None
                 window_min = 5
             window_min = min(window_min, 12)
-            chat_msgs = await asyncio.to_thread(
+            raw_chat_msgs = await asyncio.to_thread(
                 self.repo.recent_messages,
-                limit=60, within_minutes=window_min,
+                limit=120, within_minutes=window_min,
             )
+            # Filter to the lag-adjusted window: chat that arrived
+            # between (chunks[0].ts + chat_lag - 30s) and
+            # (chunks[-1].ts + chat_lag + 30s). The +chat_lag shifts
+            # the chat window FORWARD relative to audio because chat
+            # arrives AFTER the audio it's reacting to. The ±30s
+            # padding catches messages straddling the boundary.
+            chat_msgs: list = []
+            if first_ts is not None and last_ts is not None and chat_lag > 0:
+                lag_low = first_ts + _td(seconds=chat_lag - 30)
+                lag_high = last_ts + _td(seconds=chat_lag + 30)
+                for m in raw_chat_msgs:
+                    try:
+                        m_ts = _dt.fromisoformat(
+                            m.ts.replace("Z", "+00:00")
+                        ).replace(tzinfo=None)
+                    except Exception:
+                        continue
+                    if lag_low <= m_ts <= lag_high:
+                        chat_msgs.append(m)
+                # Cap at 60 to keep prompt size bounded.
+                chat_msgs = chat_msgs[-60:]
+            else:
+                chat_msgs = raw_chat_msgs[-60:]
         except Exception:
             logger.exception("transcript: chat fetch for group summary failed")
             chat_msgs = []

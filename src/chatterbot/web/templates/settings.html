@@ -111,6 +111,13 @@
           <p class="text-muted italic text-sm">No settings in this section yet.</p>
         {% endif %}
 
+        {# Whisper tab — surface the chat-lag calibration tool right
+           below the explanatory blurb so the streamer can run it
+           without scrolling past every other whisper field first. #}
+        {% if g.id == 'whisper' %}
+          {% include "partials/chat_lag_calibrator.html" %}
+        {% endif %}
+
         {% for r in g.rows %}
           <div class="rounded-xl border border-subtle bg-surface p-3 sm:p-4">
             <label class="flex items-baseline justify-between gap-2 mb-2">
