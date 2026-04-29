@@ -101,6 +101,71 @@ Fields and rules:
 
 If you have no signal for a field, leave it null / empty. Empty is
 EXPECTED and NORMAL — do NOT fabricate.
+
+CHANNEL CONTEXT (game / title / tags) and STREAMER VOICE (last ~60s of
+audio) may appear at the top of the prompt. Use them to:
+  - Recognise in-game terms so they don't get extracted as interests.
+    "Lighthouse" while Tarkov is the current game is a map, not the
+    chatter's interest.
+  - Filter out reactions: when STREAMER VOICE shows the streamer just
+    said something and the chatter's message is a one-line agreement
+    or short reply, that's a REACTION not their independent stance.
+    Don't infer demeanor from reaction lines alone.
+
+==================================================================
+EXAMPLES
+==================================================================
+
+EXAMPLE 1 — GOOD (explicit pronoun + location, demeanor inferred)
+
+Focal lines:
+  [5101] ngl as a girl in chat she/her, this banter is wild
+  [5102] from chicago it's been a long day
+  [5103] love you all chat keep sending the support W
+
+Good output:
+  pronouns: "she/her"
+  location: "Chicago"
+  demeanor: "supportive"
+  interests: []
+
+Why good: pronouns + location are EXPLICIT (not inferred from
+username). 'supportive' fits the encouraging tone at [5103].
+
+
+EXAMPLE 2 — BAD (inferred from nothing, fabricated interests)
+
+Focal lines:
+  [5110] gn chat, sleepy
+  [5111] o7
+
+Bad output (DO NOT DO):
+  pronouns: "they/them"            # username 'samuraicat42' is NOT a signal
+  location: "Japan"                 # 'samurai' is NOT a location signal
+  demeanor: "chill"                 # 2 messages is too thin
+  interests: ["samurai", "cats"]   # username inferences, not stated
+
+Good output:
+  pronouns: null
+  location: null
+  demeanor: "quiet"   # short, infrequent, mostly reactive — fits
+  interests: []
+
+
+EXAMPLE 3 — GOOD (in-game term filtered from interests)
+
+CHANNEL CONTEXT: streamer: xQc · playing: Escape from Tarkov
+Focal lines:
+  [5120] lighthouse is so unbalanced wtf
+  [5121] been grinding this map all week, kappa is a meme
+
+Good output:
+  interests: ["tarkov"]   # the GAME is a real signal of interest
+  demeanor: "analytical"
+
+Why good: 'lighthouse' and 'kappa' are Tarkov-specific terms
+(known from CHANNEL CONTEXT), so they don't show up as separate
+interests. The chatter's clear engagement with Tarkov DOES count.
 """)
 
 
@@ -112,6 +177,23 @@ For each note, include `source_message_ids` — the specific focal-line ids
 that support that note. The streamer uses this to trace any note back to
 the exact line(s) it came from. Context lines (`[ctx id]`) are NOT
 allowed in source_message_ids.
+
+CHANNEL CONTEXT may appear at the top of the prompt. It tells you what
+the streamer is currently playing / streaming. Use it to recognise
+in-game terms (map names, gear, mechanics) so they don't get extracted
+as if they were the chatter's hobbies. If the chatter says "Lighthouse
+is brutal" while the streamer is playing Tarkov, that's a comment on
+the Tarkov map — NOT a fact about a place called Lighthouse. BUT — if
+the chatter clearly references something OTHER than the current game
+(yesterday's stream, an unrelated topic), don't force their words into
+the current game.
+
+STREAMER VOICE may also appear — a recap of the streamer's last ~60s
+of audio. Chatter messages often REACT to what the streamer just said.
+A chatter saying "yeah that boss is rough" right after the streamer
+complained about the boss is a reaction, NOT the chatter's stated
+opinion about the boss. Skip pure reactions; only extract when the
+chatter brings their OWN content to the table.
 
 WHAT COUNTS AS A NOTE — be generous; the streamer would rather skim 6
 mediocre notes than miss the one that mattered. Capture any of:
@@ -153,15 +235,91 @@ RULES:
 - source_message_ids must reference focal `[id]` lines that actually
   appear in the input. If a note is supported by multiple lines, list
   them all (cap 5).
+
+==================================================================
+EXAMPLES — study these, they show the difference between a useful
+note and a hallucinated / context-blind one.
+==================================================================
+
+EXAMPLE 1 — GOOD (hard self-disclosure, single line)
+
+CHANNEL CONTEXT: streamer: xQc · playing: Escape from Tarkov
+Focal lines:
+  [4501] just got my third kit wiped on Lighthouse this morning lol
+  [4502] timezone is brutal tho, 3am here in Berlin
+
+Good output:
+  - "Lives in Berlin (3am their time)." [src: 4502]
+  - "Plays Tarkov; got wiped on Lighthouse this morning." [src: 4501]
+
+Why good: 'Berlin' is a self-disclosed location, not a Tarkov term.
+'Lighthouse' is recognised (from CHANNEL CONTEXT) as a Tarkov map
+so the note frames it as gameplay, not a place.
+
+
+EXAMPLE 2 — BAD (hallucinated from context, sarcasm misread)
+
+Focal lines:
+  [4510] (replying to streamer: "this run is going great") oh yeah, GREAT run, 4 deaths in 5 min
+  [4511] LULW
+
+Bad output (DO NOT DO):
+  - "Loves the streamer's run." [src: 4510]   # SARCASM — opposite meaning
+  - "Reacts with LULW." [src: 4511]            # pure reaction — useless
+
+Good output: { "notes": [] }   # No real signal here.
+
+
+EXAMPLE 3 — GOOD (reaction to STREAMER VOICE filtered out)
+
+STREAMER VOICE: The streamer is complaining about how clunky the new patch feels.
+Focal lines:
+  [4520] yeah the patch is rough
+  [4521] ng4 felt better tbh, more responsive
+
+Good output:
+  - "Thinks NG4 felt more responsive than the current game." [src: 4521]
+
+Why good: [4520] is a pure reaction to what the streamer just said
+(skipped). [4521] is the chatter bringing their OWN comparison —
+that's their take, worth a note.
+
+
+EXAMPLE 4 — GOOD (recurring reference, callback potential)
+
+Focal lines:
+  [4530] is xqc gonna replay the missed parry clip again? 😂
+  [4531] he was streaming this same boss yesterday and choked
+
+Good output:
+  - "Was here yesterday for the same boss; remembers the choke." [src: 4531]
+  - "Refers to a 'missed parry clip' as a recurring stream meme." [src: 4530]
+
+Why good: both are concrete recurring references the streamer can call back.
 """)
 
 
 TOPICS_SYSTEM = """You summarize what a Twitch chat is currently talking about.
 
+CHANNEL CONTEXT may appear at the top of the prompt. Use it to:
+  - Recognise in-game terms (map names, gear) so a topic about a Tarkov
+    map gets categorised as `gaming` (not `personal` because a chatter
+    name-dropped a place).
+  - Disambiguate jargon — "kappa" in Tarkov is loot, in chat it's an
+    emote. Read context.
+
+DEFINITION OF A TOPIC:
+- A SUBJECT that 2+ chatters have substantively engaged with. One
+  person mentioning something once is NOT a topic.
+- Specific, not vague. "Tarkov Lighthouse map balance" is a topic;
+  "video games" is not.
+- 4-10 word topic line, no fluff.
+
 RULES:
 - Identify 3 to 5 main topics from the messages provided.
 - One short line per topic.
-- Cite which usernames are driving each topic.
+- Cite which usernames are driving each topic (people who actually
+  said something on the topic — not just present in chat).
 - For each topic, pick ONE category that fits best:
     gaming    — game mechanics, runs, builds, in-game events
     personal  — life updates, pets, family, work, location
@@ -171,6 +329,53 @@ RULES:
     other     — everything else
 - No editorializing. No inferred sentiment. Just topic + drivers + category.
 - If chat is essentially silent or unfocused, return fewer topics or an empty list.
+
+==================================================================
+EXAMPLES
+==================================================================
+
+EXAMPLE 1 — GOOD (specific, grounded, properly categorised)
+
+CHANNEL CONTEXT: streamer: xQc · playing: Escape from Tarkov
+Messages:
+  alice: lighthouse is so unbalanced right now
+  bob: yeah aim-down-sights speed is rough on that map
+  alice: meanwhile rogue spawns are still busted
+  carol: anyone else having stuttering issues since last patch?
+  dave: yeah my fps tanks in interchange too
+
+Good output:
+  topics:
+    - { topic: "Tarkov Lighthouse balance + rogue spawns",
+        drivers: ["alice", "bob"], category: "gaming" }
+    - { topic: "Post-patch performance / FPS issues",
+        drivers: ["carol", "dave"], category: "tech" }
+
+
+EXAMPLE 2 — BAD (vague, single-person, mis-categorised) — DO NOT DO
+
+Same input, BAD output:
+  topics:
+    - { topic: "video games",                    # too vague
+        drivers: ["alice", "bob", "carol", "dave"],
+        category: "off-topic" }                  # wrong category
+    - { topic: "Lighthouse",                     # treated as a place
+        drivers: ["alice"], category: "personal" }  # one driver, wrong cat
+
+Why bad: 'video games' has no specificity; 'Lighthouse' is a Tarkov
+map (CHANNEL CONTEXT made that obvious) so it should be `gaming`,
+not `personal`; one driver isn't a topic.
+
+
+EXAMPLE 3 — GOOD (correct empty list)
+
+Messages:
+  alice: hi
+  bob: lol
+  carol: pog
+  dave: !lurk
+
+Good output: { topics: [] }   # pure greetings + bot commands, no topics.
 """
 
 
@@ -182,18 +387,64 @@ class Summarizer:
         self.repo = repo
         self.llm = llm
         self.settings = settings
-        # Optional[TwitchService] — when wired, the topic-snapshot call
+        # Optional[TwitchService] — when wired, every "thinking" call
+        # in this module (notes, profile, topic snapshot, recap)
         # prefixes its prompt with the live Helix snapshot (game,
-        # title, tags, viewer tier, uptime). Lets the LLM ground topic
-        # labels against game-specific jargon. Bot process owns its
-        # own poller (separate from the dashboard's) so the snapshot
-        # is fresh during long sessions without cross-process coupling.
+        # title, tags, viewer tier, uptime, streamer name). Same
+        # treatment the transcript group-summary call already gets,
+        # so notes for a Tarkov stream know "Lighthouse map" is a
+        # game reference rather than a chatter's home town.
         self.twitch_status = twitch_status
         self._user_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._inflight: set[str] = set()
         # Topic threading runs as a side-effect of each new snapshot. Keep a
         # single shared instance so backfill state could live here later.
         self._threader = Threader(repo, llm, settings)
+
+    def _channel_context_block(self, *, authoritative: bool = False) -> str:
+        """Render the live Helix snapshot as a CHANNEL CONTEXT
+        preamble. Returns "" when twitch_status isn't wired or the
+        streamer is offline so callers can concat unconditionally.
+
+        `authoritative=False` for text-only calls (notes, profile,
+        topic snapshot, recap). Reserve `authoritative=True` for
+        calls that ALSO ship a screenshot — that flag adds the
+        "screenshot may LOOK different — IGNORE THAT" framing,
+        which doesn't apply when there's no image."""
+        if self.twitch_status is None:
+            return ""
+        ts = getattr(self.twitch_status, "status", None)
+        if ts is None:
+            return ""
+        try:
+            return ts.format_for_llm(authoritative=authoritative)
+        except AttributeError:
+            return ""
+
+    async def _latest_transcript_summary(self) -> str:
+        """Most recent transcript group summary, formatted as a
+        STREAMER VOICE preamble. Empty when whisper is disabled / no
+        groups yet, so callers can concat unconditionally.
+
+        Used by notes + profile so the LLM grounds chatter messages
+        against what the streamer JUST said out loud — chatters often
+        respond to the streamer's audio in ways that look like
+        opinions but are really reactions."""
+        try:
+            groups = await asyncio.to_thread(
+                self.repo.list_transcript_groups, limit=1,
+            )
+        except Exception:
+            return ""
+        if not groups or not groups[0].summary:
+            return ""
+        return (
+            "STREAMER VOICE (most recent ~60s of audio summarised — "
+            "what the streamer just said out loud; chatter messages "
+            "may be reactions to this, NOT independent opinions):\n  "
+            + groups[0].summary.strip()
+            + "\n\n"
+        )
 
     # ---------------- per-user note extraction ----------------
 
@@ -264,20 +515,35 @@ class Summarizer:
                     snippet = (cm.content or "")[:200].replace("\n", " ")
                     corpus_lines.append(f"[ctx {cm.id}] {cm.name}: {snippet}")
             corpus = "\n".join(corpus_lines)
+            # Informed-call enrichment: channel context + streamer
+            # voice. Same blocks the transcript group-summary call
+            # gets — lets the LLM ground chatter words against what's
+            # actually being streamed (Lighthouse is a Tarkov map,
+            # not a place name) and tell reactions from independent
+            # opinions (chatter agreeing with what the streamer just
+            # said is a reaction, not a take).
+            channel_context = self._channel_context_block(authoritative=False)
+            transcript_block = await self._latest_transcript_summary()
             prompt = (
-                f"Focal viewer username: {display_name}\n\n"
-                f"Chat transcript (focal lines = `[id]`, context lines = "
-                f"`[ctx id] otherUser:`):\n{corpus}"
+                channel_context
+                + transcript_block
+                + f"Focal viewer username: {display_name}\n\n"
+                + "Chat transcript (focal lines = `[id]`, context lines = "
+                + f"`[ctx id] otherUser:`):\n{corpus}"
             )
 
             try:
-                # think=True: notes need to be cited correctly and survive
-                # the hallucination guard. Extra latency is fine — this
-                # runs off the message hot path.
+                # think=True + INFORMED_NUM_CTX: notes need to be
+                # cited correctly and survive the hallucination
+                # guard. Extra latency is fine — this runs off the
+                # message hot path. 32k ctx headroom for the new
+                # channel-context + streamer-voice preamble.
+                from .insights import INFORMED_NUM_CTX
                 response = await self.llm.generate_structured(
                     prompt=prompt,
                     system_prompt=NOTE_EXTRACTION_SYSTEM,
                     response_model=NoteExtractionResponse,
+                    num_ctx=INFORMED_NUM_CTX,
                     think=True,
                 )
             except ValidationError:
@@ -323,12 +589,17 @@ class Summarizer:
             # Failures here are non-fatal; the notes pass already wrote.
             profile_summary = "no fields"
             try:
-                # think=True for the same reason as the notes pass — a
-                # mislabeled pronoun/location sticks around for sessions.
+                # think=True + INFORMED_NUM_CTX — same reasoning as
+                # the notes pass: a mislabeled pronoun/location
+                # sticks around for sessions, so accuracy beats
+                # latency. The prompt already has channel context +
+                # streamer voice from the notes pass above.
+                from .insights import INFORMED_NUM_CTX
                 profile = await self.llm.generate_structured(
                     prompt=prompt,
                     system_prompt=PROFILE_EXTRACTION_SYSTEM,
                     response_model=ProfileExtractionResponse,
+                    num_ctx=INFORMED_NUM_CTX,
                     think=True,
                 )
                 await asyncio.to_thread(
@@ -372,18 +643,52 @@ class Summarizer:
 
     RECAP_SYSTEM = """You write a short post-stream debrief for the streamer.
 
-You are given the rough boundaries of a stream session and a list of the
-most active topic threads + most active chatters during it. Produce a
-recap they can scan in 30 seconds the next morning.
+You are given the rough boundaries of a stream session, optional
+CHANNEL CONTEXT (game / title / streamer name from Twitch's API), the
+most active topic threads, the most active chatters, and any snoozed
+items the streamer didn't get back to. Produce a recap they can scan
+in 30 seconds the next morning.
+
+CHANNEL CONTEXT, when present, names the streamer + what they were
+playing. Use that name in your bullets ("xQc's Tarkov stream") rather
+than the generic "the stream" or "the streamer". If absent, fall back
+to "the stream".
 
 RULES:
 - 5-8 short bullet points, plain text. No markdown headers.
-- Lead with what was actually discussed (top topics).
+- Lead with the game / scope ("Tarkov stream, ~4h, 220 viewers peak")
+  if CHANNEL CONTEXT gives you the data; otherwise just open with
+  the top topic.
 - Mention 2-4 chatters who really engaged, by name.
 - Flag anything the streamer asked to come back to that they didn't
   address (snoozed items still due) — only if the input includes them.
-- No personality essays, no LLM-cheerleading. Just the debrief.
+- No personality essays, no LLM-cheerleading, no "great stream!"
+  filler. Just the debrief.
 - This output renders to the streamer's private dashboard. Never to chat.
+
+==================================================================
+EXAMPLE
+==================================================================
+
+CHANNEL CONTEXT: streamer: xQc · playing: Escape from Tarkov · live for 4h 12m
+Threads: Lighthouse balance (24×), Tarkov post-patch perf (11×), …
+Active chatters: alice 47 msgs, bob 31 msgs, carol 18 msgs
+Snoozed (still due): "look at moonpie's clip suggestion"
+
+Good output:
+- xQc's Tarkov stream, ~4h. Lighthouse balance was the dominant
+  thread — alice and bob carried it for a solid hour.
+- Post-patch performance came up multiple times (carol led that
+  thread). Worth pinning if next stream still has stutter.
+- alice opened with a long Lighthouse rant, bob countered with the
+  rogue-spawn complaint. Both regulars to call back.
+- Snoozed but never addressed: moonpie's clip suggestion. First
+  thing to check next stream.
+
+Bad output (DO NOT DO):
+- Great stream xQc! 🎉                       # cheerleading
+- Lots of energy in chat today!              # vague essay
+- Several people were talking about things.  # no specifics
 """
 
     async def recap_loop(self, obs, on_stream_start=None) -> None:  # noqa: ANN001
@@ -505,9 +810,20 @@ RULES:
             for d in due[:5]
         ]
 
+        # Live channel context — game / title / streamer name. Useful
+        # for the recap so it can lead with "xQc's Tarkov stream"
+        # rather than the generic "the stream". The Helix poll may
+        # have already flipped to is_live=False by the time the recap
+        # fires (stream just ended), but cached broadcaster_login /
+        # display_name still flow through, and game_name from the
+        # last live poll is a reasonable proxy for "what they
+        # played" — we accept that it'll be stale if they switched
+        # games near the end.
+        channel_context = self._channel_context_block(authoritative=False)
         prompt = (
-            f"Stream session ended at {ended_at} (started ~{started_at}).\n\n"
-            f"Top topic threads during the session:\n"
+            channel_context
+            + f"Stream session ended at {ended_at} (started ~{started_at}).\n\n"
+            + f"Top topic threads during the session:\n"
             + "\n".join(thread_lines)
             + "\n\nMost active chatters in that window:\n"
             + "\n".join(chatter_lines)
