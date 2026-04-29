@@ -263,6 +263,61 @@ FIELDS: dict[str, dict[str, Any]] = {
     },
 
     # ============================================================
+    # VOICE → ACCURACY TUNING (decoder + vocabulary bias)
+    # ============================================================
+    "whisper_beam_size": {
+        "label": "Decoder beam size",
+        "tooltip": "How many alternative transcriptions Whisper considers (1 = greedy, 5 = thorough).",
+        "help": "Higher = more accurate on hard audio (yelling, mumbling, stammering, fast speech) because Whisper can recover from a wrong first guess. Lower = faster. Default 3 is the sweet spot for streamer-style speech; bump to 5 if you stream very emotional content and have GPU headroom.",
+        "type": "number",
+        "min": 1, "max": 10, "step": 1,
+        "suffix": "1-10",
+        "depends_on": ("whisper_enabled", True),
+    },
+    "whisper_no_speech_threshold": {
+        "label": "Silence detection strictness",
+        "tooltip": "How sure Whisper has to be that audio is silent before dropping it (0-1).",
+        "help": "Whisper's default of 0.6 sometimes misclassifies sustained yelling as silence and drops it. Lowered to 0.4 here so emotional moments stay in the transcript. Raise toward 0.6 if you see Whisper hallucinating text on truly quiet passages.",
+        "type": "number",
+        "min": 0, "max": 1, "step": 0.05,
+        "suffix": "0-1",
+        "depends_on": ("whisper_enabled", True),
+    },
+    "whisper_log_prob_threshold": {
+        "label": "Quality fallback threshold",
+        "tooltip": "Below this avg log-probability, Whisper retries with higher randomness.",
+        "help": "Whisper's default of -1.0 triggers a retry-with-randomness fallback on any low-confidence segment. Emotional / distorted audio has worse log-prob naturally, so the default fires too often and produces 'you you you' style hallucinations. -1.5 here keeps the fallback for genuinely garbled audio only.",
+        "type": "number",
+        "min": -3.0, "max": 0.0, "step": 0.1,
+        "suffix": "(negative)",
+        "depends_on": ("whisper_enabled", True),
+    },
+    "whisper_vad_threshold": {
+        "label": "VAD onset sensitivity",
+        "tooltip": "How loud audio has to be before VAD flags it as speech (0-1, lower = more sensitive).",
+        "help": "Voice-activity-detection threshold. Whisper's default of 0.5 sometimes skips the first word of a yelled clause because of breath noise on the onset. 0.3 catches those moments. Raise toward 0.5 if VAD is firing on background music / game audio.",
+        "type": "number",
+        "min": 0.1, "max": 0.9, "step": 0.05,
+        "suffix": "0-1",
+        "depends_on": ("whisper_enabled", True),
+    },
+    "whisper_initial_prompt_enabled": {
+        "label": "Bias Whisper with stream vocabulary",
+        "tooltip": "Auto-build a vocabulary hint from the streamer's name, current game, active chatters, top chat words, and streamer_facts.md.",
+        "help": "Whisper accepts an 'initial prompt' it treats as vocabulary bias — words present in the prompt are far more likely to be transcribed correctly. When on, the dashboard auto-builds this from runtime context every ~30s: streamer name, current game, active chatters' handles, the top words from chat in the last week (same source as the wordcloud), and streamer_facts.md contents. Massive accuracy boost on niche game terms, character names, and chatter handles. Recommended on. Free at runtime.",
+        "type": "bool",
+        "depends_on": ("whisper_enabled", True),
+    },
+    "whisper_initial_prompt_extra": {
+        "label": "Additional vocabulary hint",
+        "tooltip": "Free-form text appended to the auto-built prompt — list any specific terms you want Whisper to recognise.",
+        "help": "Optional. Comma-separated terms or short sentences appended to the auto-built initial prompt. Use for streamer-specific lingo not captured in streamer_facts.md or the live channel context. Keep brief — anything beyond ~80 names/terms gets ignored by Whisper anyway.",
+        "type": "text",
+        "placeholder": "e.g. 'Ratones, GIGACAEDREL, Caps, Hans Sama'",
+        "depends_on": ("whisper_initial_prompt_enabled", True),
+    },
+
+    # ============================================================
     # VOICE → CARD MATCHING
     # ============================================================
     "whisper_match_threshold": {
@@ -802,6 +857,28 @@ SECTIONS: list[dict[str, Any]] = [
                     "whisper_buffer_seconds", "whisper_min_silence_ms",
                 ],
                 "default_open": True,
+            },
+            {
+                "id": "voice-accuracy",
+                "title": "Accuracy tuning",
+                "icon": "fa-solid fa-wand-sparkles",
+                "blurb": (
+                    "Tune Whisper for fast, emotional, mumbled, or "
+                    "yelled streamer speech. The vocabulary-bias "
+                    "feature auto-builds from runtime context (your "
+                    "name, current game, active chatters, top chat "
+                    "words, streamer_facts.md) and dramatically "
+                    "improves accuracy on niche game terms and "
+                    "chatter handles."
+                ),
+                "fields": [
+                    "whisper_initial_prompt_enabled",
+                    "whisper_initial_prompt_extra",
+                    "whisper_beam_size",
+                    "whisper_no_speech_threshold",
+                    "whisper_log_prob_threshold",
+                    "whisper_vad_threshold",
+                ],
             },
             {
                 "id": "voice-matching",

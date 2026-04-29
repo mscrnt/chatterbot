@@ -50,6 +50,12 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "whisper_buffer_seconds",
     "whisper_match_threshold",
     "whisper_min_silence_ms",
+    "whisper_beam_size",
+    "whisper_no_speech_threshold",
+    "whisper_log_prob_threshold",
+    "whisper_vad_threshold",
+    "whisper_initial_prompt_enabled",
+    "whisper_initial_prompt_extra",
     "whisper_unnamed_match_threshold",
     "whisper_llm_match_enabled",
     "whisper_llm_match_interval_seconds",
@@ -259,6 +265,39 @@ class Settings(BaseSettings):
     # for natural conversational pacing; drop to 500-1000 if you want
     # tighter per-clause splits.
     whisper_min_silence_ms: int = 5000
+    # Beam-search width for the whisper decode. 1 = greedy (faster,
+    # worse on hard audio: yelling, mumbling, stammered words).
+    # 3 = sweet spot for streamer-style speech — recovers from a
+    # bad first guess without doubling latency. 5 = slower but
+    # squeezes a little more accuracy on very emotional content.
+    whisper_beam_size: int = 3
+    # Lowered from whisper's 0.6 default. Sustained yelling can
+    # register as silence on the no-speech-prob detector and get
+    # dropped — a conservative threshold keeps emotional moments
+    # in the transcript. Raise (toward 0.6) if you're seeing
+    # whisper hallucinate text on truly silent passages.
+    whisper_no_speech_threshold: float = 0.4
+    # Lowered from whisper's -1.0 default for the same reason —
+    # emotional / distorted audio has worse avg log-prob and the
+    # default triggers a temperature-backoff fallback loop that
+    # produces "you you you" hallucinations.
+    whisper_log_prob_threshold: float = -1.5
+    # VAD threshold (0-1, lower = more sensitive). High-energy
+    # breath noise can mask speech onset on yelling; 0.3 catches
+    # those clauses where 0.5 would skip the first word.
+    whisper_vad_threshold: float = 0.3
+    # When on, build an `initial_prompt` for whisper from runtime
+    # context: streamer display-name, current game, recently-active
+    # chatter handles, and the contents of streamer_facts.md. Whisper
+    # treats this as vocabulary bias — accuracy on niche game terms
+    # (Tarkov maps, RE bosses, LoL champion names) and chatter
+    # handles improves dramatically. Free at runtime; toggle off
+    # only if you suspect it's causing unwanted bias.
+    whisper_initial_prompt_enabled: bool = True
+    # Optional extra text appended to the auto-built initial_prompt.
+    # Use for streamer-specific terms not in streamer_facts.md or
+    # the live channel context.
+    whisper_initial_prompt_extra: str = ""
     # Talking-point cards are short and generic enough that vague
     # utterances ("why that happened") repeatedly clear the regular
     # threshold against unrelated cards. To gate that, we apply a
@@ -440,6 +479,26 @@ def _coerce(key: str, value: str) -> Any:
             return float(value)
         except (TypeError, ValueError):
             return 0.65
+    if key == "whisper_no_speech_threshold":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.4
+    if key == "whisper_log_prob_threshold":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return -1.5
+    if key == "whisper_vad_threshold":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.3
+    if key == "whisper_beam_size":
+        try:
+            return max(1, min(10, int(value)))
+        except (TypeError, ValueError):
+            return 3
     if key in (
         "whisper_llm_match_interval_seconds", "whisper_llm_match_min_chunks",
         "whisper_auto_confirm_seconds",
@@ -504,6 +563,7 @@ def _coerce(key: str, value: str) -> Any:
         "obs_enabled", "live_widget_enabled",
         "youtube_enabled", "discord_enabled",
         "whisper_enabled", "whisper_llm_match_enabled",
+        "whisper_initial_prompt_enabled",
     ):
         return value.strip().lower() in ("true", "1", "yes", "on")
     if key == "obs_port":

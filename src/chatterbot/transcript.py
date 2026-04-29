@@ -187,6 +187,23 @@ class TranscriptService:
         self.twitch_status = twitch_status
         self._buffer = _IngestBuffer()
         self._lock = asyncio.Lock()
+        # Cached initial_prompt for whisper. Rebuilt every
+        # _initial_prompt_ttl_s seconds so it stays current as
+        # chatters come and go and the streamer changes games. Null
+        # when whisper_initial_prompt_enabled=False.
+        self._initial_prompt: str | None = None
+        self._initial_prompt_built_at: float = 0.0
+        self._initial_prompt_ttl_s: float = 30.0
+        # streamer_facts.md mtime — separate from the prompt cache
+        # so we re-read the file only when it actually changes.
+        self._streamer_facts_text: str = ""
+        self._streamer_facts_mtime: float = 0.0
+        # Cached top-words list from the wordcloud query. Heavier
+        # query (full message scan + regex), so a 5-min TTL is plenty
+        # — chat vocabulary doesn't shift faster than that.
+        self._top_chat_words: list[str] = []
+        self._top_chat_words_built_at: float = 0.0
+        self._top_chat_words_ttl_s: float = 300.0
         self._model = None  # lazy-loaded WhisperModel
         self._model_load_attempted = False
         self._model_load_error: str | None = None
@@ -293,6 +310,139 @@ class TranscriptService:
         if should_flush:
             asyncio.create_task(self._transcribe_and_match())
 
+    def _load_streamer_facts_text(self) -> str:
+        """Read the streamer-authored facts file with an mtime cache.
+        Returns the file's contents (capped to ~1500 chars) or '' if
+        the file is missing / unreadable / disabled.
+
+        Same file the engaging-subjects extractor + insights service
+        read; here we use it as vocabulary bias for whisper. Cache
+        survives across transcribe calls so the disk read happens
+        at most once per file change."""
+        from pathlib import Path
+        path_str = getattr(self.settings, "streamer_facts_path", "") or ""
+        if not path_str:
+            return ""
+        p = Path(path_str)
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            self._streamer_facts_text = ""
+            self._streamer_facts_mtime = 0.0
+            return ""
+        if mtime != self._streamer_facts_mtime:
+            try:
+                text = p.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError):
+                text = ""
+            # Cap at 1500 chars so the prompt stays in vocabulary-hint
+            # territory rather than crowding the audio context.
+            self._streamer_facts_text = text[:1500]
+            self._streamer_facts_mtime = mtime
+        return self._streamer_facts_text
+
+    def _build_initial_prompt(self) -> str | None:
+        """Construct an `initial_prompt` for faster-whisper from
+        runtime context. Whisper treats this as vocabulary bias —
+        words present in the prompt are more likely to be transcribed
+        correctly when they appear in the audio. Massive accuracy
+        boost on niche terms (game-specific vocabulary, chatter
+        handles, the streamer's own name).
+
+        Cached for `_initial_prompt_ttl_s` seconds so we don't rebuild
+        on every 5 s buffer flush. Returns None when the feature is
+        disabled or the prompt would be empty.
+
+        Bounded at ~250 chars total — too long and whisper starts
+        treating it as a transcript prefix instead of vocabulary
+        seed, which produces hallucinated continuations of the
+        prompt text."""
+        if not bool(getattr(
+            self.settings, "whisper_initial_prompt_enabled", True,
+        )):
+            return None
+        now = time.time()
+        if (
+            self._initial_prompt is not None
+            and (now - self._initial_prompt_built_at) < self._initial_prompt_ttl_s
+        ):
+            return self._initial_prompt
+
+        parts: list[str] = []
+
+        # Streamer name + current game from the live Helix poll.
+        ts = getattr(self.twitch_status, "status", None) if self.twitch_status else None
+        if ts is not None:
+            name = (
+                (getattr(ts, "broadcaster_display_name", None) or "").strip()
+                or (getattr(ts, "broadcaster_login", None) or "").strip()
+            )
+            game = (getattr(ts, "game_name", None) or "").strip()
+            if name and game:
+                parts.append(f"Streamer {name} is playing {game}.")
+            elif name:
+                parts.append(f"Streamer: {name}.")
+            elif game:
+                parts.append(f"Currently playing {game}.")
+
+        # Active chatter handles — Whisper biases toward names it sees,
+        # so even a comma-separated list works. Cap at 25 names to
+        # keep the prompt under whisper's effective vocab budget.
+        try:
+            active = self.repo.list_active_chatters(20, 25)
+            names = [u.name for u in active if u.name]
+            if names:
+                parts.append("Chatters: " + ", ".join(names) + ".")
+        except Exception:
+            pass
+
+        # Top chat-frequent words from the last week — game terms,
+        # character names, recurring topics chat returns to. Reuses
+        # the same stats_top_words query that backs /stats/wordcloud.
+        # Cached separately (5min) since the query is heavier than
+        # the chatter-list lookup.
+        if (now - self._top_chat_words_built_at) >= self._top_chat_words_ttl_s:
+            try:
+                words = self.repo.stats_top_words(
+                    limit=60, min_count=3, lookback_days=7,
+                )
+                # Drop words shorter than 4 chars — whisper doesn't
+                # need help with "yes" / "the" / etc, and short tokens
+                # bias too aggressively toward common syllables.
+                self._top_chat_words = [
+                    w for w, _c in words if len(w) >= 4
+                ][:60]
+            except Exception:
+                self._top_chat_words = []
+            self._top_chat_words_built_at = now
+        if self._top_chat_words:
+            parts.append("Common terms: " + ", ".join(self._top_chat_words) + ".")
+
+        # Streamer-authored facts (terms / inside jokes / recurring bits).
+        facts = self._load_streamer_facts_text()
+        if facts:
+            parts.append(facts)
+
+        # Streamer-supplied free-form extra (settings field).
+        extra = (
+            getattr(self.settings, "whisper_initial_prompt_extra", "") or ""
+        ).strip()
+        if extra:
+            parts.append(extra)
+
+        prompt = " ".join(parts).strip()
+        if not prompt:
+            self._initial_prompt = None
+        else:
+            # Hard cap: whisper's prompt tokenizer cuts off around 200
+            # tokens; anything beyond that is dropped. 1200 chars
+            # ≈ 250 tokens, comfortably within budget.
+            self._initial_prompt = prompt[:1200]
+        self._initial_prompt_built_at = now
+        return self._initial_prompt
+
     async def _transcribe_and_match(self) -> None:
         """Pop the buffer, transcribe the audio, embed each segment,
         match against open insight cards, persist. Runs as a fire-and-
@@ -317,15 +467,35 @@ class TranscriptService:
         # patches. Run synchronously in a thread — whisper is CPU/GPU
         # bound and isn't async-friendly.
         min_silence_ms = max(100, int(self.settings.whisper_min_silence_ms or 5000))
+        # Streamer-friendly tuning. Defaults are calibrated for fast,
+        # emotional, often-mumbled speech — see the field comments in
+        # config.py for the why behind each. All knobs are user-
+        # editable in /settings → Voice & screen → Card matching /
+        # Audio basics.
+        beam = max(1, int(getattr(self.settings, "whisper_beam_size", 3) or 3))
+        no_speech = float(getattr(
+            self.settings, "whisper_no_speech_threshold", 0.4,
+        ))
+        log_prob = float(getattr(
+            self.settings, "whisper_log_prob_threshold", -1.5,
+        ))
+        vad_thr = float(getattr(self.settings, "whisper_vad_threshold", 0.3))
+        prompt = self._build_initial_prompt()
 
         def _run() -> list[tuple[str, float, float]]:
             try:
                 segments, _info = model.transcribe(
                     audio,
                     vad_filter=True,
-                    vad_parameters={"min_silence_duration_ms": min_silence_ms},
-                    beam_size=1,
+                    vad_parameters={
+                        "min_silence_duration_ms": min_silence_ms,
+                        "threshold": vad_thr,
+                    },
+                    beam_size=beam,
+                    no_speech_threshold=no_speech,
+                    log_prob_threshold=log_prob,
                     condition_on_previous_text=False,
+                    initial_prompt=prompt,
                 )
                 return [(s.text.strip(), s.start, s.end) for s in segments]
             except Exception:
