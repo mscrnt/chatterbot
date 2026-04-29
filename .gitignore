@@ -8,6 +8,9 @@
 # logs). A .gitkeep can be added if you want the dir tracked.
 data/*
 !data/.gitkeep
+# Source-controlled template. Streamers copy to data/streamer_facts.md
+# (gitignored) and edit with their own channel-specific context.
+!data/streamer_facts.example.md
 
 # --- Python ---
 __pycache__/
