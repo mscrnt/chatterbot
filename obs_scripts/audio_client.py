@@ -81,6 +81,15 @@ import numpy as np
 
 
 TARGET_SR = 16000   # whisper's input rate
+
+
+def _now_iso() -> str:
+    """ISO 8601 UTC timestamp for the X-Captured-At header. Same
+    format the dashboard's transcript_chunks.ts uses, so server-side
+    parsing is symmetric. Matches `datetime.fromisoformat` in both
+    directions on Python 3.11+."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 CHUNK_SECONDS = 1.0
 CHUNK_SAMPLES = int(TARGET_SR * CHUNK_SECONDS)
 
@@ -102,8 +111,22 @@ class Sender(threading.Thread):
         self.auth_user = auth_user
         self.auth_pass = auth_pass
         self._stop = threading.Event()
-        self._last_err: str | None = None
+        # Connection-family error coalescing. When the dashboard
+        # restarts the OS rotates through a handful of error types
+        # (RemoteDisconnected → ConnectionAbortedError → TimeoutError
+        # → URLError), so dedup-by-error-type still produces a 4-line
+        # flood. Group all "dashboard probably down" errors into one
+        # `connection` family + rate-limit logging to once per 30s.
+        self._family_last_logged: dict[str, float] = {}
+        self._family_log_interval_s = 30.0
+        self._consecutive_failures = 0
         self._sent = 0
+        # Stale-chunk drop counter — bumped when run() skips a chunk
+        # whose capture time is older than MAX_CHUNK_AGE_SECONDS.
+        # Surfaced in the recovery log so the streamer sees the buffer
+        # flush activity ("reachable again after 11 fails (+ 47 stale
+        # drops)") instead of silent recovery.
+        self._dropped_stale = 0
 
     def stop(self):
         self._stop.set()
@@ -112,8 +135,15 @@ class Sender(threading.Thread):
         except queue.Full:
             pass
 
+    # Drop chunks older than this when sending — beyond a minute the
+    # audio is no longer useful for live UX (chat has moved on, the
+    # talking point is stale) and replaying it would just confuse the
+    # transcript timeline. Configurable so streamers who care more
+    # about completeness than live-accuracy can bump it.
+    MAX_CHUNK_AGE_SECONDS = 60.0
+
     def run(self):
-        headers = {
+        base_headers = {
             "Content-Type": "application/octet-stream",
             "X-Sample-Rate": str(TARGET_SR),
         }
@@ -121,19 +151,57 @@ class Sender(threading.Thread):
             tok = base64.b64encode(
                 f"{self.auth_user}:{self.auth_pass}".encode("utf-8")
             ).decode("ascii")
-            headers["Authorization"] = f"Basic {tok}"
+            base_headers["Authorization"] = f"Basic {tok}"
         while not self._stop.is_set():
             try:
-                payload = self.q.get(timeout=0.5)
+                item = self.q.get(timeout=0.5)
             except queue.Empty:
                 continue
-            if payload is None:
+            if item is None:
                 break
+            # Each queue item is (payload_bytes, captured_at_iso). We
+            # accept bare-bytes too for backward compat with any caller
+            # that doesn't pair the timestamp.
+            if isinstance(item, tuple) and len(item) == 2:
+                payload, captured_at_iso = item
+            else:
+                payload, captured_at_iso = item, None
+
+            # Stale-drop: skip chunks older than MAX_CHUNK_AGE_SECONDS.
+            # On a long outage the queue carries up to 64s of audio
+            # captured before the outage started, which would arrive
+            # in fast-forward and stomp the live transcript with
+            # wrong-context lines. Drop them silently — the user's
+            # audio from the moment of reconnect onwards is what
+            # matters for the live UX. Coverage: log once per drop
+            # batch so the streamer sees the reconnect activity.
+            if captured_at_iso:
+                age = self._chunk_age_seconds(captured_at_iso)
+                if age is not None and age > self.MAX_CHUNK_AGE_SECONDS:
+                    self._dropped_stale += 1
+                    if self._dropped_stale in (1, 5, 30) or (
+                        self._dropped_stale % 60 == 0
+                    ):
+                        print(
+                            f"[audio_client] dropping stale chunk "
+                            f"({age:.0f}s old) — total dropped: "
+                            f"{self._dropped_stale}",
+                            file=sys.stderr,
+                        )
+                    continue
+
+            headers = dict(base_headers)
+            if captured_at_iso:
+                headers["X-Captured-At"] = captured_at_iso
             req = urllib.request.Request(
                 self.url, data=payload, method="POST", headers=headers,
             )
             try:
-                with urllib.request.urlopen(req, timeout=2.0) as resp:
+                # 5s timeout — was 2s, but a momentarily-loaded
+                # dashboard (especially during its own restart) can
+                # take longer to respond. 5s gives more headroom
+                # without making backpressure invisible.
+                with urllib.request.urlopen(req, timeout=5.0) as resp:
                     resp.read()
                 self._sent += 1
                 if self._sent in (1, 5, 30):
@@ -141,17 +209,96 @@ class Sender(threading.Thread):
                         f"[audio_client] sent chunk #{self._sent} "
                         f"to {self.url}"
                     )
-                self._last_err = None
-            except urllib.error.URLError as e:
-                err = f"URLError: {e}"
-                if err != self._last_err:
-                    print(f"[audio_client] POST failed: {err}", file=sys.stderr)
-                    self._last_err = err
+                # Recovery: log once when the connection comes back so
+                # the streamer sees the all-clear in OBS's log.
+                if self._consecutive_failures > 0:
+                    extra = (
+                        f" (+ {self._dropped_stale} stale drops)"
+                        if self._dropped_stale else ""
+                    )
+                    print(
+                        f"[audio_client] dashboard reachable again "
+                        f"after {self._consecutive_failures} failed "
+                        f"chunk(s){extra}"
+                    )
+                    self._dropped_stale = 0
+                self._consecutive_failures = 0
+                self._family_last_logged.clear()
             except Exception as e:
-                err = f"{type(e).__name__}: {e}"
-                if err != self._last_err:
-                    print(f"[audio_client] worker error: {err}", file=sys.stderr)
-                    self._last_err = err
+                self._handle_send_error(e)
+
+
+    # --- timing helpers ---------------------------------------------
+
+    @staticmethod
+    def _chunk_age_seconds(captured_at_iso: str) -> float | None:
+        """Return seconds elapsed between the chunk's capture time
+        and now. None on any parse error — caller treats unknown age
+        as fresh (don't drop). Uses naive UTC for both sides since
+        we control both ends of the protocol."""
+        try:
+            from datetime import datetime, timezone
+            t = datetime.fromisoformat(captured_at_iso.replace("Z", "+00:00"))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - t).total_seconds()
+        except (TypeError, ValueError, AttributeError):
+            return None
+
+    # --- error logging helpers ----------------------------------------
+
+    _CONNECTION_FAMILY_TYPES = (
+        # OS-level connection drops — common when the dashboard
+        # restarts or the network briefly drops.
+        "ConnectionAbortedError", "ConnectionResetError",
+        "ConnectionRefusedError", "BrokenPipeError",
+        # urllib's wrapper around socket-level failures.
+        "URLError",
+        # http.client peer-closed-without-response (server side
+        # closed mid-keepalive). Common during dashboard restart.
+        "RemoteDisconnected", "IncompleteRead",
+        # Read / write timeouts.
+        "TimeoutError", "socket.timeout",
+    )
+
+    def _classify_error(self, exc: Exception) -> str:
+        """Group connection-family errors under one 'connection' label
+        so the log doesn't flood when the OS rotates exception types
+        during dashboard restarts. Anything else is logged under its
+        own type-name family."""
+        name = type(exc).__name__
+        if name in self._CONNECTION_FAMILY_TYPES:
+            return "connection"
+        # urllib.error.URLError already handled above; subclasses
+        # like HTTPError fall through to type-name dedup.
+        return name
+
+    def _handle_send_error(self, exc: Exception) -> None:
+        """Log a send error at most once per `_family_log_interval_s`
+        per family. Tracks consecutive-failure count for the recovery
+        message that fires once the connection returns."""
+        import time
+        family = self._classify_error(exc)
+        self._consecutive_failures += 1
+        last = self._family_last_logged.get(family, 0.0)
+        now = time.time()
+        if (now - last) < self._family_log_interval_s:
+            return
+        self._family_last_logged[family] = now
+        if family == "connection":
+            print(
+                f"[audio_client] dashboard unreachable "
+                f"({type(exc).__name__}: {exc}) — buffering audio, "
+                f"will retry silently. {self._consecutive_failures} "
+                f"failed chunk(s) so far.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[audio_client] worker error: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
 
 
 # ---------------- audio capture ------------------------------------------
@@ -384,12 +531,13 @@ def _run_loopback(args):
                 while buf.shape[0] >= CHUNK_SAMPLES:
                     chunk = buf[:CHUNK_SAMPLES]
                     buf = buf[CHUNK_SAMPLES:]
+                    item = (chunk.tobytes(), _now_iso())
                     try:
-                        q.put_nowait(chunk.tobytes())
+                        q.put_nowait(item)
                     except queue.Full:
                         try:
                             q.get_nowait()
-                            q.put_nowait(chunk.tobytes())
+                            q.put_nowait(item)
                         except queue.Empty:
                             pass
     except KeyboardInterrupt:
@@ -447,13 +595,14 @@ def _run(args):
         while buf.shape[0] >= CHUNK_SAMPLES:
             chunk = buf[:CHUNK_SAMPLES]
             buf = buf[CHUNK_SAMPLES:]
+            item = (chunk.tobytes(), _now_iso())
             try:
-                q.put_nowait(chunk.tobytes())
+                q.put_nowait(item)
             except queue.Full:
                 # Drop oldest if backed up — keep the audio stream alive.
                 try:
                     q.get_nowait()
-                    q.put_nowait(chunk.tobytes())
+                    q.put_nowait(item)
                 except queue.Empty:
                     pass
 

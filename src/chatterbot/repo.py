@@ -2296,11 +2296,19 @@ class ChatterRepo:
         matched_item_key: str | None = None,
         similarity: float | None = None,
         embedding: list[float] | None = None,
+        ts: str | None = None,
     ) -> int:
         """Persist one whisper-transcribed utterance + any auto-match
         state. The embedding (when provided) is mirrored into
         `vec_transcripts` so a chat message can later find a recent
-        utterance it semantically responded to."""
+        utterance it semantically responded to.
+
+        `ts` defaults to wall-clock now. Callers can pass an explicit
+        ISO timestamp when the audio's actual capture time is known
+        and differs from arrival time — e.g. when audio was buffered
+        on the OBS-side audio_client during a dashboard outage. Live
+        ingest (no outage) just falls through to now()."""
+        ts_value = ts or _now_iso()
         with self._cursor() as cur:
             cur.execute(
                 """
@@ -2310,7 +2318,7 @@ class ChatterRepo:
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    _now_iso(), int(duration_ms), text,
+                    ts_value, int(duration_ms), text,
                     matched_kind, matched_item_key, similarity,
                 ),
             )

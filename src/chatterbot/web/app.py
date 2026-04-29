@@ -2327,9 +2327,21 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             sr = int(request.headers.get("x-sample-rate") or 16000)
         except (TypeError, ValueError):
             sr = 16000
+        # Optional capture-time header — when the OBS audio_client
+        # buffered chunks during a dashboard outage, this is the ISO
+        # time the audio was actually recorded. Used by the buffer to
+        # timestamp the resulting transcript chunk against actual
+        # audio time instead of wall-clock arrival time, so a chunk
+        # that took 30s to be POSTed still appears at its real moment
+        # on the live transcript timeline. Older audio_client
+        # versions don't send this header — falls back to now()
+        # transparently.
+        captured_at = (request.headers.get("x-captured-at") or "").strip() or None
         body = await request.body()
         if body:
-            await transcript_service.ingest_chunk(body, sr)
+            await transcript_service.ingest_chunk(
+                body, sr, captured_at=captured_at,
+            )
         return Response(status_code=204)
 
     @app.get("/modals/transcript-group/{group_id}", response_class=HTMLResponse)

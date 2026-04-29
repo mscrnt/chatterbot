@@ -125,24 +125,47 @@ SAMPLE_BYTES = 4     # float32
 
 @dataclass
 class _IngestBuffer:
-    """In-memory audio buffer. Float32 mono PCM at 16 kHz."""
+    """In-memory audio buffer. Float32 mono PCM at 16 kHz.
+
+    Tracks the capture time of the OLDEST chunk in the current buffer
+    (`first_captured_at`) so the resulting transcript chunk can be
+    timestamped against actual audio time, not wall-clock arrival
+    time. This matters when the OBS-side audio_client buffered chunks
+    during a dashboard outage: those chunks should appear on the
+    timeline at their original capture moment, not at the moment they
+    finally got POSTed."""
 
     samples: list[np.ndarray] = field(default_factory=list)
     total_samples: int = 0
     last_flush: float = field(default_factory=time.time)
+    # ISO string of the earliest captured-at the audio_client reported
+    # for chunks in this buffer. None when no captured-at was sent
+    # (older audio_client versions / no header) — caller falls back
+    # to wall-clock now in that case.
+    first_captured_at: str | None = None
 
-    def append(self, pcm: np.ndarray) -> None:
+    def append(
+        self, pcm: np.ndarray, *, captured_at: str | None = None,
+    ) -> None:
         self.samples.append(pcm)
         self.total_samples += pcm.shape[0]
+        # First captured-at after a flush wins. Subsequent appends in
+        # the same window keep the earliest reference (so the
+        # resulting transcript chunk lines up with when the streamer
+        # started speaking, not when whisper finished processing).
+        if captured_at and self.first_captured_at is None:
+            self.first_captured_at = captured_at
 
-    def flush(self) -> np.ndarray:
+    def flush(self) -> tuple[np.ndarray, str | None]:
         if not self.samples:
-            return np.zeros(0, dtype=np.float32)
+            return np.zeros(0, dtype=np.float32), None
         out = np.concatenate(self.samples).astype(np.float32, copy=False)
+        captured_at = self.first_captured_at
         self.samples.clear()
         self.total_samples = 0
         self.last_flush = time.time()
-        return out
+        self.first_captured_at = None
+        return out, captured_at
 
 
 class TranscriptService:
@@ -228,9 +251,22 @@ class TranscriptService:
             logger.exception("transcript: failed to load whisper model")
         return self._model
 
-    async def ingest_chunk(self, payload: bytes, sample_rate: int) -> None:
+    async def ingest_chunk(
+        self,
+        payload: bytes,
+        sample_rate: int,
+        *,
+        captured_at: str | None = None,
+    ) -> None:
         """Append a raw PCM chunk to the buffer. The OBS script sends
-        16 kHz mono float32; if a different rate is supplied, we resample."""
+        16 kHz mono float32; if a different rate is supplied, we
+        resample.
+
+        `captured_at` is the ISO timestamp the audio was originally
+        captured at on the OBS side (sent via `X-Captured-At` header).
+        Optional — falls back to wall-clock now during transcription
+        when absent. Lets the dashboard place buffered audio at the
+        right point on the timeline after a long outage."""
         if not self.enabled:
             return
         if sample_rate != SAMPLE_RATE:
@@ -248,7 +284,7 @@ class TranscriptService:
             x = np.frombuffer(payload, dtype=np.float32)
 
         async with self._lock:
-            self._buffer.append(x)
+            self._buffer.append(x, captured_at=captured_at)
             should_flush = (
                 self._buffer.total_samples
                 >= int(SAMPLE_RATE * self.settings.whisper_buffer_seconds)
@@ -260,9 +296,16 @@ class TranscriptService:
     async def _transcribe_and_match(self) -> None:
         """Pop the buffer, transcribe the audio, embed each segment,
         match against open insight cards, persist. Runs as a fire-and-
-        forget task so the ingest endpoint stays snappy."""
+        forget task so the ingest endpoint stays snappy.
+
+        The buffer's earliest captured-at (when the OBS audio_client
+        sent X-Captured-At) is used as the resulting transcript
+        chunk's `ts` so buffered audio from a dashboard outage lands
+        at its actual capture moment, not at the moment whisper
+        finished processing it. None falls back to wall-clock now in
+        add_transcript_chunk."""
         async with self._lock:
-            audio = self._buffer.flush()
+            audio, buffer_captured_at = self._buffer.flush()
         if audio.shape[0] == 0:
             return
         model = await self._ensure_model()
@@ -336,6 +379,7 @@ class TranscriptService:
                 text=text, duration_ms=duration_ms,
                 matched_kind=best_kind, matched_item_key=best_key,
                 similarity=best_sim, embedding=qv,
+                ts=buffer_captured_at,
             )
             # When the batched LLM matcher is active, it owns auto-pending
             # writes — per-utterance cosine still runs to populate
