@@ -1,4 +1,4 @@
-{% macro thread_card(t, hot=False, acked_at=None, states=None, velocity=None) -%}
+{% macro thread_card(t, hot=False, states=None, velocity=None) -%}
 {% set tone = {
   'gaming':    'accent',
   'personal':  'success',
@@ -28,7 +28,6 @@
           hx-swap="innerHTML">
     <header class="flex items-baseline justify-between gap-2 flex-wrap">
       <h3 class="font-semibold text-primary text-sm sm:text-base">
-        {% with item_ts=t.last_ts, acked_at=acked_at %}{% include "components/_new_badge.html" %}{% endwith %}
         {% if _is_pinned %}<i class="fa-solid fa-thumbtack text-accent text-[10px] mr-1"></i>{% endif %}
         {% if _is_due %}<i class="fa-solid fa-bell text-warning text-[10px] mr-1 animate-pulse"></i>{% endif %}
         {{ t.title }}
@@ -146,7 +145,7 @@
       {% else %}
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         {% for t in active %}
-          {{ thread_card(t, hot=True, acked_at=acked_at, states=thread_states, velocity=thread_velocity) }}
+          {{ thread_card(t, hot=True, states=thread_states, velocity=thread_velocity) }}
         {% endfor %}
       </div>
       {% endif %}
@@ -162,7 +161,7 @@
       {% else %}
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         {% for t in dormant %}
-          {{ thread_card(t, acked_at=acked_at, states=thread_states, velocity=thread_velocity) }}
+          {{ thread_card(t, states=thread_states, velocity=thread_velocity) }}
         {% endfor %}
       </div>
       {% endif %}
@@ -178,7 +177,7 @@
       {% else %}
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         {% for t in archived %}
-          {{ thread_card(t, acked_at=acked_at, states=thread_states, velocity=thread_velocity) }}
+          {{ thread_card(t, states=thread_states, velocity=thread_velocity) }}
         {% endfor %}
       </div>
       {% endif %}

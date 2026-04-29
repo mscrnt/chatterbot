@@ -11,26 +11,10 @@
         <span class="text-xs text-muted hidden sm:inline">
           talking points refresh every ~3 min · the rest live every poll
         </span>
-        <button type="button"
-                class="tap inline-flex items-center justify-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary text-sm"
-                hx-post="/insights/mark-read"
-                hx-target="#insights-body"
-                hx-swap="outerHTML"
-                title="Clear NEW badges across this page">
-          <i class="fa-solid fa-check-double text-xs"></i> Mark all read
-        </button>
       {% else %}
         <span class="text-xs text-muted hidden sm:inline">
           recurring conversations clustered across snapshots
         </span>
-        <button type="button"
-                class="tap inline-flex items-center justify-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary text-sm"
-                hx-post="/topics/mark-read"
-                hx-target="#topics-body"
-                hx-swap="outerHTML"
-                title="Clear NEW badges on every thread">
-          <i class="fa-solid fa-check-double text-xs"></i> Mark all read
-        </button>
       {% endif %}
     </div>
   </header>

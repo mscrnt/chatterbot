@@ -3835,17 +3835,6 @@ class ChatterRepo:
     def clear_stream_goals(self) -> None:
         self.delete_app_setting(self._GOALS_KEY)
 
-    def get_surface_ack(self, surface: str) -> str | None:
-        """Last-read timestamp for a named dashboard surface (e.g. 'topics',
-        'insights'). None means the streamer has never marked it read.
-
-        Used to render a 'NEW' badge on items whose ts is newer than the
-        ack — same pattern as `count_first_timers_unacked` but generic."""
-        return self.get_app_setting(f"surface_acked_at:{surface}")
-
-    def set_surface_ack(self, surface: str, ts: str | None = None) -> None:
-        self.set_app_setting(f"surface_acked_at:{surface}", ts or _now_iso())
-
     def count_first_timers_unacked(self) -> int:
         """Newcomers in the last 24h whose first_seen is NEWER than the
         streamer's last acknowledgment. This is what the nav pill displays."""

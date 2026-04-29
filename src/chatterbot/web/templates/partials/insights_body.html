@@ -423,7 +423,6 @@
               {% with name=u.name, size='md' %}{% include "components/_avatar.html" %}{% endwith %}
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2">
-                  {% with item_ts=u.last_seen, acked_at=acked_at %}{% include "components/_new_badge.html" %}{% endwith %}
                   <span class="text-accent font-medium truncate">{{ u.name }}</span>
                   {% with label=milestone, tone='accent', icon='fa-star' %}{% include "components/_pill.html" %}{% endwith %}
                 </div>
@@ -459,7 +458,6 @@
                       hx-get="/modals/insight/newcomer/{{ u.twitch_id }}?meta={{ u.first_seen | urlencode }}"
                       hx-target="#modal-root"
                       hx-swap="innerHTML">
-                {% with item_ts=u.first_seen, acked_at=acked_at %}{% include "components/_new_badge.html" %}{% endwith %}
                 {% with name=u.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
                 <span class="text-accent">{{ u.name }}</span>
                 <span class="text-[10px] text-muted">{{ u.first_seen | short_ts }}</span>

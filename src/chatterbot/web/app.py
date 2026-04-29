@@ -1735,7 +1735,6 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "window": window,
             "window_label": label,
             "window_options": _INSIGHT_WINDOWS,
-            "acked_at": repo.get_surface_ack("insights"),
             # Per-card state, keyed for each section.
             "tp_states": repo.get_insight_states("talking_point"),
             "anniv_states": repo.get_insight_states("anniversary"),
@@ -1867,7 +1866,6 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "legacy": legacy,
             "settings": settings,
             "total": len(threads),
-            "acked_at": repo.get_surface_ack("topics"),
             "thread_states": repo.get_insight_states("thread"),
             "thread_velocity": repo.thread_velocity(),
         }
@@ -2449,14 +2447,6 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             request, "partials/health_panel.html", ctx,
         )
 
-    @app.post("/insights/mark-read", response_class=HTMLResponse)
-    async def insights_mark_read(request: Request):
-        repo.set_surface_ack("insights")
-        # Re-render the engagement body partial so HTMX can swap it in place.
-        return await insights_page(
-            request, view="engagement", partial=1, window="7d",
-        )
-
     # ---------------- live chat (widget + full page) ----------------
 
     # ---------------- semantic message search ----------------
@@ -2781,13 +2771,6 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         # auto-refresh polls + bookmark visits through the merged route.
         return await insights_page(
             request, view="topics", partial=partial, status=status, q=q,
-        )
-
-    @app.post("/topics/mark-read", response_class=HTMLResponse)
-    async def topics_mark_read(request: Request):
-        repo.set_surface_ack("topics")
-        return await insights_page(
-            request, view="topics", partial=1, status="all", q="",
         )
 
     @app.get("/modals/thread/{thread_id}", response_class=HTMLResponse)
