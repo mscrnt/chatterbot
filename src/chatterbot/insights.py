@@ -180,6 +180,14 @@ class InsightsService:
         # msg_id -> cluster_id, so a window pull can render historical
         # cluster membership without re-running the cosine match.
         self._msg_to_cluster: dict[int, str] = {}
+        # In-memory embedding cache for blocklisted subject names —
+        # populated lazily during _refresh_engaging_subjects so new
+        # subject names can be cosine-matched against rejected
+        # historical names. Catches near-dupes ("FF8 remake" vs "Final
+        # Fantasy 8 remake") that the literal slug/name blocklist
+        # would miss. Keyed by slug so it stays in sync with the
+        # blocklist's own dedupe key.
+        self._blocklist_embed_cache: dict[str, list[float]] = {}
 
     @property
     def cache(self) -> InsightsCache:
@@ -729,6 +737,74 @@ Good output:
             except Exception:
                 logger.exception("engaging-subjects iteration failed")
             await asyncio.sleep(interval)
+
+    async def _ensure_blocklist_embeddings(self, blocklist: list[dict]) -> None:
+        """Embed any blocklisted subject names that don't yet have a
+        cached embedding. Runs at the start of each extraction pass so
+        the embed cost is amortised. Failures are non-fatal — we just
+        skip the cosine dedup for that name and fall back to literal
+        slug / name matching."""
+        for entry in blocklist:
+            slug = (entry.get("slug") or "").lower()
+            name = (entry.get("name") or "").strip()
+            if not slug or not name:
+                continue
+            if slug in self._blocklist_embed_cache:
+                continue
+            try:
+                vec = await self.llm.embed(name)
+            except Exception:
+                logger.exception(
+                    "engaging-subjects: failed to embed blocklist entry %r",
+                    name,
+                )
+                continue
+            self._blocklist_embed_cache[slug] = vec
+        # Drop cache entries for entries no longer in the blocklist
+        # (clear_subject_blocklist resets it; reject can also age out
+        # past the 50-cap).
+        live_slugs = {(e.get("slug") or "").lower() for e in blocklist}
+        for stale in list(self._blocklist_embed_cache):
+            if stale not in live_slugs:
+                self._blocklist_embed_cache.pop(stale, None)
+
+    async def _is_blocked_by_embedding(
+        self, name: str, *, threshold: float = 0.85,
+    ) -> tuple[bool, str | None, float]:
+        """Check whether `name` is semantically too close to any
+        blocklisted subject. Returns (blocked, matched_slug,
+        cosine_similarity). 0.85 is the default threshold —
+        empirically distinguishes "FF8 remake" vs "Final Fantasy 8
+        remake" (>0.85) from "FF8 remake" vs "FF14 raid" (<0.85)."""
+        if not self._blocklist_embed_cache or not name.strip():
+            return False, None, 0.0
+        try:
+            import numpy as np
+        except ImportError:
+            return False, None, 0.0
+        try:
+            qv = await self.llm.embed(name.strip())
+        except Exception:
+            return False, None, 0.0
+        q = np.asarray(qv, dtype=np.float32)
+        qn = float(np.linalg.norm(q))
+        if qn == 0.0:
+            return False, None, 0.0
+        q = q / qn
+        best_slug = None
+        best_sim = 0.0
+        for slug, vec in self._blocklist_embed_cache.items():
+            if not vec:
+                continue
+            v = np.asarray(vec, dtype=np.float32)
+            vn = float(np.linalg.norm(v))
+            if vn == 0.0:
+                continue
+            sim = float(q @ (v / vn))
+            if sim > best_sim:
+                best_sim = sim
+                best_slug = slug
+        return (best_sim >= threshold, best_slug, best_sim)
 
     def _load_subject_blocklist(self) -> list[dict]:
         """Load the streamer-flagged subject blocklist from app_settings.
@@ -1336,6 +1412,12 @@ Good output:
             #      in input order.
             block_set_slug = {(b.get("slug") or "").lower() for b in blocklist}
             block_set_name = {(b.get("name") or "").lower() for b in blocklist}
+            # Pre-embed every blocklisted name so we can cosine-dedup
+            # the LLM's new picks against historical rejections — same
+            # threshold even when the model rephrases ("FF8 remake" vs
+            # "Final Fantasy 8 remake"). Cheap (capped at 50 entries,
+            # cache reused across passes).
+            await self._ensure_blocklist_embeddings(blocklist)
             applied = 0
             empty_id_count = 0
             for idx, s in enumerate(response_subjects):
@@ -1357,6 +1439,21 @@ Good output:
                     logger.info(
                         "engaging-subjects: dropped re-extracted blocklisted "
                         "subject %r", clean_name,
+                    )
+                    continue
+                # Embedding-based near-dup gate. Catches the same
+                # subject under a slightly different name. Threshold
+                # is intentionally strict (0.85) so we don't smother
+                # legitimate new subjects that share theme words.
+                blocked_by_emb, matched_slug, sim = (
+                    await self._is_blocked_by_embedding(clean_name)
+                )
+                if blocked_by_emb:
+                    logger.info(
+                        "engaging-subjects: dropped re-extracted "
+                        "blocklisted subject %r (matched %r via "
+                        "embedding sim=%.2f)",
+                        clean_name, matched_slug, sim,
                     )
                     continue
                 c = self._clusters[cid]

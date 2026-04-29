@@ -1045,7 +1045,6 @@ class ChatterRepo:
                 )
                 """
             )
-
     # ============================ WRITE surface (bot) ======================
 
     def upsert_user(self, twitch_id: str, name: str, *, source: str = "twitch") -> None:
@@ -2389,6 +2388,130 @@ class ChatterRepo:
                 for r in cur.fetchall()
             ]
         return {"focal": focal, "before": before_rows, "after": after_rows}
+
+    def search_transcripts(
+        self,
+        query_embedding: list[float],
+        *,
+        k: int = 20,
+    ) -> list[tuple[TranscriptChunk, float]]:
+        """KNN search across ALL embedded transcript chunks. Returns
+        (chunk, distance) pairs sorted nearest-first; cosine distance,
+        so 0.0 = identical and ~1.0 = unrelated.
+
+        For RETRIEVAL only — used by /search and the streamer-history
+        evidence panels. Live LLM calls (talking points, group
+        summaries, engaging subjects) explicitly DO NOT pull from this
+        method; they have their own time-windowed sources so historical
+        utterances can't pollute current-stream context."""
+        blob = _vec_to_blob(query_embedding)
+        # Pull a wider window from the index than the requested k so
+        # post-filtering (when callers want it) still has matches.
+        ann_k = max(int(k) * 2, 40)
+        with self._cursor() as cur:
+            try:
+                cur.execute(
+                    """
+                    SELECT v.chunk_id, v.distance, t.id, t.ts,
+                           t.duration_ms, t.text,
+                           t.matched_kind, t.matched_item_key, t.similarity
+                    FROM vec_transcripts v
+                    JOIN transcript_chunks t ON t.id = v.chunk_id
+                    WHERE v.embedding MATCH ? AND k = ?
+                    ORDER BY v.distance ASC
+                    LIMIT ?
+                    """,
+                    (blob, ann_k, int(k)),
+                )
+                rows = cur.fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [
+            (
+                TranscriptChunk(
+                    id=int(r["id"]), ts=r["ts"],
+                    duration_ms=int(r["duration_ms"] or 0),
+                    text=r["text"],
+                    matched_kind=r["matched_kind"],
+                    matched_item_key=r["matched_item_key"],
+                    similarity=(
+                        float(r["similarity"])
+                        if r["similarity"] is not None else None
+                    ),
+                ),
+                float(r["distance"]),
+            )
+            for r in rows
+        ]
+
+    def transcripts_missing_embedding(
+        self, limit: int = 200,
+    ) -> list[TranscriptChunk]:
+        """Transcript chunks that don't yet have a vec_transcripts row.
+        The live ingest path embeds at write time, but historical rows
+        from before vec_transcripts was wired up — or rows where the
+        embed call failed at ingest — sit here until the backfill loop
+        gets to them. Oldest-first so backfill makes monotonic progress
+        through the archive."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT t.id, t.ts, t.duration_ms, t.text,
+                       t.matched_kind, t.matched_item_key, t.similarity
+                FROM transcript_chunks t
+                LEFT JOIN vec_transcripts v ON v.chunk_id = t.id
+                WHERE v.chunk_id IS NULL
+                  AND t.text IS NOT NULL AND length(trim(t.text)) > 0
+                ORDER BY t.id ASC
+                LIMIT ?
+                """,
+                (int(limit),),
+            )
+            return [
+                TranscriptChunk(
+                    id=int(r["id"]), ts=r["ts"],
+                    duration_ms=int(r["duration_ms"] or 0),
+                    text=r["text"],
+                    matched_kind=r["matched_kind"],
+                    matched_item_key=r["matched_item_key"],
+                    similarity=(
+                        float(r["similarity"])
+                        if r["similarity"] is not None else None
+                    ),
+                )
+                for r in cur.fetchall()
+            ]
+
+    def upsert_transcript_embedding(
+        self, chunk_id: int, embedding: list[float],
+    ) -> None:
+        """Write / overwrite the embedding for one chunk. Used by the
+        backfill loop; the ingest path writes inline via
+        add_transcript_chunk(embedding=...)."""
+        blob = _vec_to_blob(embedding)
+        with self._cursor() as cur:
+            cur.execute(
+                "DELETE FROM vec_transcripts WHERE chunk_id = ?",
+                (int(chunk_id),),
+            )
+            cur.execute(
+                "INSERT INTO vec_transcripts(chunk_id, embedding) "
+                "VALUES (?, ?)",
+                (int(chunk_id), blob),
+            )
+
+    def transcripts_embedding_coverage(self) -> tuple[int, int]:
+        """(indexed, total_text). Diagnostic for /search-style coverage
+        readouts. `total_text` excludes empty / whitespace-only chunks."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM transcript_chunks "
+                "WHERE text IS NOT NULL AND length(trim(text)) > 0"
+            )
+            total = int(cur.fetchone()["c"])
+            cur.execute("SELECT COUNT(*) AS c FROM vec_transcripts")
+            indexed = int(cur.fetchone()["c"])
+        return indexed, total
 
     def find_related_transcript(
         self,

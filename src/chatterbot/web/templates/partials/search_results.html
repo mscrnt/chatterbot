@@ -1,5 +1,8 @@
-{# Results for /search. Each row clicks through to the chatter's page with
-   ?focus=<msg_id> so the message-context modal auto-opens. #}
+{# Results for /search. Two scopes:
+   - chat: each row links to the chatter's page with ?focus=<msg_id>
+     so the message-context modal auto-opens.
+   - transcripts: each row opens the transcript-context modal showing
+     the chunk + surrounding utterances. #}
 <div id="search-results" class="space-y-2">
   {% if error %}
     <div class="rounded-xl border border-danger/40 bg-danger/10 px-3 py-2 text-sm">
@@ -7,55 +10,115 @@
       Search failed: <code class="text-danger">{{ error }}</code>
     </div>
   {% elif not q %}
-    {% with icon='fa-magnifying-glass',
-            heading='Type a description above',
-            body='Examples: "someone mentioned their cat", "people raging at boss fight", "someone said they are from Australia". Embeddings catch the meaning even when the exact words aren\'t in the message.' %}
-      {% include "components/_empty_state.html" %}
-    {% endwith %}
-  {% elif not results %}
-    <p class="text-muted italic text-sm py-2">
-      No matches for "{{ q }}".
-      {% if total and indexed < total %}
-        ({{ total - indexed }} message{{ '' if total - indexed == 1 else 's' }}
-        not yet indexed — backfill may help.)
-      {% endif %}
-    </p>
-  {% else %}
-    <p class="text-xs text-muted">
-      {{ results | length }} result{{ '' if results|length == 1 else 's' }}
-      · sorted by closeness
-    </p>
-    <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
-      {% for m, dist in results %}
-        {% set _src = m.source or 'twitch' %}
-        {% set _stripe = {
-          'twitch':  'border-l-2 border-accent/40',
-          'youtube': 'border-l-2 border-danger/60',
-          'discord': 'border-l-2 border-indigo-500/60',
-        }.get(_src, 'border-l-2 border-subtle') %}
-        <li class="{{ _stripe }} hover:bg-surface-raised transition-all duration-150 ease-out">
-          <a href="/users/{{ m.user_id }}?focus={{ m.id }}"
-             class="block px-3 py-2 text-sm">
-            <div class="flex items-baseline gap-2 flex-wrap">
-              <span class="text-[11px] text-muted whitespace-nowrap w-32 shrink-0">{{ m.ts | short_ts }}</span>
-              {% with source=_src %}{% include "components/_source_mark.html" %}{% endwith %}
-              <span class="text-accent font-medium shrink-0">{{ m.name }}</span>
-              <span class="text-primary break-words flex-1">{{ m.content }}</span>
-              <span class="text-[10px] text-muted whitespace-nowrap shrink-0"
-                    title="cosine distance — lower is closer">
-                {{ "%.3f"|format(dist) }}
-              </span>
-            </div>
-            {% if m.reply_parent_body %}
-              <div class="text-[11px] text-muted mt-0.5 ml-32 inline-flex items-start gap-1">
-                <i class="fa-solid fa-reply text-[9px] mt-0.5"></i>
-                replying to <span class="text-accent">{{ m.reply_parent_login or '?' }}</span>:
-                <span class="italic truncate max-w-[28rem]">"{{ m.reply_parent_body }}"</span>
+    {% if scope == 'transcripts' %}
+      {% with icon='fa-microphone',
+              heading='Search your stream history',
+              body='Examples: "when did I talk about Tarkov balance", "the time I ranted about the patch", "anything about my new mic". Embeddings catch the meaning even when the exact words aren\'t in the audio.' %}
+        {% include "components/_empty_state.html" %}
+      {% endwith %}
+    {% else %}
+      {% with icon='fa-magnifying-glass',
+              heading='Type a description above',
+              body='Examples: "someone mentioned their cat", "people raging at boss fight", "someone said they are from Australia". Embeddings catch the meaning even when the exact words aren\'t in the message.' %}
+        {% include "components/_empty_state.html" %}
+      {% endwith %}
+    {% endif %}
+
+  {% elif scope == 'transcripts' %}
+    {# ---- Streamer voice (transcript) results ---- #}
+    {% if not transcript_results %}
+      <p class="text-muted italic text-sm py-2">
+        No matches for "{{ q }}".
+        {% if tx_total and tx_indexed < tx_total %}
+          ({{ tx_total - tx_indexed }} chunk{{ '' if tx_total - tx_indexed == 1 else 's' }}
+          not yet indexed — backfill is running in the background.)
+        {% endif %}
+      </p>
+    {% else %}
+      <p class="text-xs text-muted">
+        {{ transcript_results | length }} result{{ '' if transcript_results|length == 1 else 's' }}
+        from streamer voice · sorted by closeness
+      </p>
+      <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
+        {% for chunk, dist in transcript_results %}
+          <li class="border-l-2 border-accent/40 hover:bg-surface-raised transition-all duration-150 ease-out">
+            <button type="button"
+                    class="w-full block text-left px-3 py-2 text-sm"
+                    hx-get="/modals/transcript/{{ chunk.id }}"
+                    hx-target="#modal-root"
+                    hx-swap="innerHTML"
+                    title="Open with surrounding context + matched card">
+              <div class="flex items-baseline gap-2 flex-wrap">
+                <span class="text-[11px] text-muted whitespace-nowrap w-32 shrink-0">{{ chunk.ts | short_ts }}</span>
+                <i class="fa-solid fa-microphone text-accent text-[10px] shrink-0"></i>
+                <span class="text-primary break-words flex-1">{{ chunk.text }}</span>
+                <span class="text-[10px] text-muted whitespace-nowrap shrink-0"
+                      title="cosine distance — lower is closer">
+                  {{ "%.3f"|format(dist) }}
+                </span>
               </div>
-            {% endif %}
-          </a>
-        </li>
-      {% endfor %}
-    </ul>
+              {% if chunk.matched_kind %}
+                <div class="text-[11px] text-muted mt-0.5 ml-32 inline-flex items-start gap-1">
+                  <i class="fa-solid fa-link text-[9px] mt-0.5"></i>
+                  matched <span class="text-accent">{{ chunk.matched_kind | replace('_', ' ') }}</span>
+                  {% if chunk.similarity %}
+                    · {{ "%.2f"|format(chunk.similarity) }}
+                  {% endif %}
+                </div>
+              {% endif %}
+            </button>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+
+  {% else %}
+    {# ---- Chat-message results (default scope) ---- #}
+    {% if not results %}
+      <p class="text-muted italic text-sm py-2">
+        No matches for "{{ q }}".
+        {% if total and indexed < total %}
+          ({{ total - indexed }} message{{ '' if total - indexed == 1 else 's' }}
+          not yet indexed — backfill may help.)
+        {% endif %}
+      </p>
+    {% else %}
+      <p class="text-xs text-muted">
+        {{ results | length }} result{{ '' if results|length == 1 else 's' }}
+        · sorted by closeness
+      </p>
+      <ul class="divide-y divide-subtle rounded-xl border border-subtle overflow-hidden bg-surface">
+        {% for m, dist in results %}
+          {% set _src = m.source or 'twitch' %}
+          {% set _stripe = {
+            'twitch':  'border-l-2 border-accent/40',
+            'youtube': 'border-l-2 border-danger/60',
+            'discord': 'border-l-2 border-indigo-500/60',
+          }.get(_src, 'border-l-2 border-subtle') %}
+          <li class="{{ _stripe }} hover:bg-surface-raised transition-all duration-150 ease-out">
+            <a href="/users/{{ m.user_id }}?focus={{ m.id }}"
+               class="block px-3 py-2 text-sm">
+              <div class="flex items-baseline gap-2 flex-wrap">
+                <span class="text-[11px] text-muted whitespace-nowrap w-32 shrink-0">{{ m.ts | short_ts }}</span>
+                {% with source=_src %}{% include "components/_source_mark.html" %}{% endwith %}
+                <span class="text-accent font-medium shrink-0">{{ m.name }}</span>
+                <span class="text-primary break-words flex-1">{{ m.content }}</span>
+                <span class="text-[10px] text-muted whitespace-nowrap shrink-0"
+                      title="cosine distance — lower is closer">
+                  {{ "%.3f"|format(dist) }}
+                </span>
+              </div>
+              {% if m.reply_parent_body %}
+                <div class="text-[11px] text-muted mt-0.5 ml-32 inline-flex items-start gap-1">
+                  <i class="fa-solid fa-reply text-[9px] mt-0.5"></i>
+                  replying to <span class="text-accent">{{ m.reply_parent_login or '?' }}</span>:
+                  <span class="italic truncate max-w-[28rem]">"{{ m.reply_parent_body }}"</span>
+                </div>
+              {% endif %}
+            </a>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
   {% endif %}
 </div>

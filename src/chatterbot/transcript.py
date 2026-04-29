@@ -864,6 +864,76 @@ HARD RULES:
 Reply with `summary` = the line(s) (or empty string).
 """
 
+    async def transcript_embed_backfill_loop(self) -> None:
+        """Background task: embed historical transcript chunks that
+        don't have a vec_transcripts row.
+
+        The live ingest path writes embeddings inline, so this only
+        catches rows from BEFORE vec_transcripts was wired up plus any
+        row where the inline embed call failed. Runs slowly (small
+        batch every 30 s) since we're racing nothing — we just want
+        the search index to fill in over time. Sleeps when there's
+        nothing to do.
+
+        Persistent embeddings are RETRIEVAL-only (the streamer's
+        /search page + the chatter / thread modal evidence panels).
+        Live LLM calls remain time-windowed and do NOT pull from
+        this index — guard against historical-context pollution by
+        not introducing one."""
+        await asyncio.sleep(30)  # let the dashboard settle on boot
+        while True:
+            try:
+                pending = await asyncio.to_thread(
+                    self.repo.transcripts_missing_embedding, 25,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("transcript-embed backfill: query failed")
+                pending = []
+
+            if not pending:
+                # Index is caught up — sleep longer until new chunks
+                # arrive (the live ingest path will keep things current
+                # in the meantime).
+                await asyncio.sleep(300)
+                continue
+
+            for chunk in pending:
+                try:
+                    vec = await self.llm.embed(chunk.text)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "transcript-embed backfill: embed failed for "
+                        "chunk %d", chunk.id,
+                    )
+                    continue
+                try:
+                    await asyncio.to_thread(
+                        self.repo.upsert_transcript_embedding,
+                        chunk.id, vec,
+                    )
+                except Exception:
+                    logger.exception(
+                        "transcript-embed backfill: upsert failed for "
+                        "chunk %d", chunk.id,
+                    )
+            try:
+                indexed, total = await asyncio.to_thread(
+                    self.repo.transcripts_embedding_coverage,
+                )
+                logger.info(
+                    "transcript-embed backfill: %d/%d indexed (this "
+                    "batch wrote up to %d)",
+                    indexed, total, len(pending),
+                )
+            except Exception:
+                pass
+            # Pace ourselves so we don't hog the embed endpoint.
+            await asyncio.sleep(30)
+
     async def chat_lag_calibration_loop(self) -> None:
         """Background task: periodically auto-tune `chat_lag_seconds`.
 

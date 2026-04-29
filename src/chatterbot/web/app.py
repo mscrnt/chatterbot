@@ -292,6 +292,16 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 name="chat_lag_auto_tune",
             )
         )
+        # Transcript-chunk embedding backfill — fills in vec_transcripts
+        # for historical chunks that don't have an embedding yet.
+        # Powers the /search "Streamer voice" tab. RETRIEVAL only;
+        # live LLM calls don't read from the index.
+        _bg_tasks.add(
+            asyncio.create_task(
+                transcript_service.transcript_embed_backfill_loop(),
+                name="transcript_embed_backfill",
+            )
+        )
         try:
             yield
         finally:
@@ -2577,22 +2587,44 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         q: str = Query(""),
         partial: int = Query(0),
         k: int = Query(20, ge=1, le=100),
+        scope: str = Query(
+            "chat",
+            description="'chat' = chat messages, 'transcripts' = "
+            "streamer voice (whisper utterances).",
+        ),
     ):
-        results: list[tuple] = []
+        # `scope` chooses which embedding index to search against.
+        # The default 'chat' preserves old URLs; 'transcripts' routes
+        # to vec_transcripts so the streamer can answer "when have I
+        # talked about X?". Both share a single query embedding —
+        # nomic-embed-text indexes both halves so the same q_vec works.
+        scope = scope if scope in ("chat", "transcripts") else "chat"
+        message_results: list[tuple] = []
+        transcript_results: list[tuple] = []
         error: str | None = None
         if q.strip():
             try:
                 q_vec = await llm.embed(q.strip())
-                results = repo.search_global_messages(q_vec, k=k)
+                if scope == "transcripts":
+                    transcript_results = repo.search_transcripts(q_vec, k=k)
+                else:
+                    message_results = repo.search_global_messages(q_vec, k=k)
             except Exception as e:
                 logger.exception("search: embedding/query failed")
                 error = f"{type(e).__name__}: {e}"
-        indexed, total = repo.messages_embedding_coverage()
+        msg_indexed, msg_total = repo.messages_embedding_coverage()
+        tx_indexed, tx_total = repo.transcripts_embedding_coverage()
         ctx = {
             "q": q,
-            "results": results,
-            "indexed": indexed,
-            "total": total,
+            "scope": scope,
+            "results": message_results,            # legacy template var
+            "transcript_results": transcript_results,
+            "indexed": msg_indexed,                # legacy template var
+            "total": msg_total,
+            "msg_indexed": msg_indexed,
+            "msg_total": msg_total,
+            "tx_indexed": tx_indexed,
+            "tx_total": tx_total,
             "error": error,
         }
         tpl = "partials/search_results.html" if partial else "search.html"

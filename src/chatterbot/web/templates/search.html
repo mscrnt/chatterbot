@@ -7,24 +7,67 @@
       <i class="fa-solid fa-wand-magic-sparkles text-accent"></i> Semantic search
     </h1>
     <p class="text-xs text-muted">
-      Vague descriptions work best — we look for messages that <em>mean</em>
-      similar things, not just the exact words.
+      Vague descriptions work best — we look for things that <em>mean</em>
+      similar things, not just exact words.
     </p>
   </header>
 
+  {# Scope toggle: chat vs streamer voice. Each side has its own
+     coverage readout so the streamer can see whether the index is
+     filled in for the side they're searching. #}
+  <nav class="flex gap-1 border-b border-subtle" role="tablist" aria-label="Search scope">
+    {% set _tab_base = 'tap inline-flex items-center gap-2 px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-all duration-150 ease-out' %}
+    <a href="/search?scope=chat{% if q %}&q={{ q | urlencode }}{% endif %}"
+       role="tab"
+       aria-selected="{{ 'true' if scope == 'chat' else 'false' }}"
+       class="{{ _tab_base }}
+              {% if scope == 'chat' %}border-accent text-accent{% else %}border-transparent text-muted hover:text-primary hover:bg-surface-raised{% endif %}">
+      <i class="fa-solid fa-comments text-xs"></i>
+      Chat messages
+      <span class="text-[10px] text-muted">{{ msg_indexed }}/{{ msg_total }}</span>
+    </a>
+    <a href="/search?scope=transcripts{% if q %}&q={{ q | urlencode }}{% endif %}"
+       role="tab"
+       aria-selected="{{ 'true' if scope == 'transcripts' else 'false' }}"
+       class="{{ _tab_base }}
+              {% if scope == 'transcripts' %}border-accent text-accent{% else %}border-transparent text-muted hover:text-primary hover:bg-surface-raised{% endif %}">
+      <i class="fa-solid fa-microphone text-xs"></i>
+      Streamer voice
+      <span class="text-[10px] text-muted">{{ tx_indexed }}/{{ tx_total }}</span>
+    </a>
+  </nav>
+
   <p class="text-[11px] text-muted">
-    Index coverage: <span class="text-primary font-medium">{{ indexed }}</span>
-    / {{ total }} text messages embedded
-    {% if total and indexed < total %}
-      ({{ "%.0f"|format(100 * indexed / total) }}%) — run
-      <code class="text-accent">uv run python scripts/backfill_message_embeddings.py --db &lt;db&gt;</code>
-      to fill the rest.
+    {% if scope == 'transcripts' %}
+      Searching streamer audio (whisper utterances). Find every time you
+      talked about a thing across past streams.
+      {% if tx_total and tx_indexed < tx_total %}
+        Index coverage:
+        <span class="text-primary font-medium">{{ tx_indexed }}</span> /
+        {{ tx_total }} chunks ({{ "%.0f"|format(100 * tx_indexed / tx_total) }}%) —
+        the rest are filling in via the background backfill loop.
+      {% endif %}
+    {% else %}
+      Searching chat messages.
+      {% if msg_total and msg_indexed < msg_total %}
+        Index coverage:
+        <span class="text-primary font-medium">{{ msg_indexed }}</span> /
+        {{ msg_total }} messages ({{ "%.0f"|format(100 * msg_indexed / msg_total) }}%) —
+        run
+        <code class="text-accent">uv run python scripts/backfill_message_embeddings.py --db &lt;db&gt;</code>
+        to fill the rest.
+      {% endif %}
     {% endif %}
   </p>
 
   <div class="relative">
-    {% with endpoint='/search?partial=1', target='#search-results',
-            value=q, placeholder='e.g. "someone asked about my pet" or "raid hype"…' %}
+    {% with endpoint='/search?partial=1&scope=' ~ scope, target='#search-results',
+            value=q,
+            placeholder=(
+              'e.g. "when did I talk about Tarkov balance"…'
+              if scope == 'transcripts' else
+              'e.g. "someone asked about my pet" or "raid hype"…'
+            ) %}
       {% include "components/_search.html" %}
     {% endwith %}
   </div>
