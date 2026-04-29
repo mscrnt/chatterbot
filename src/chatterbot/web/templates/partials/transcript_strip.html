@@ -154,16 +154,18 @@
         first VAD-bounded segment, lines appear here.
       </div>
     {% else %}
+      {# Full-log view stays newest-first to match summary view: most
+         recent utterance lands at the top, older ones below the
+         visible 5 ride behind show-more. No scroll container, no
+         auto-scroll — natural top alignment per streamer ask. #}
       {% set _thr = 0.55 %}
       <div x-data="{ expanded: localStorage.getItem('chatterbot.transcriptExpanded') === '1' }">
-        <ul data-transcript-feed
-            class="space-y-1 text-sm overflow-y-auto"
-            style="max-height: 22rem;">
-          {% for c in chunks | reverse %}
+        <ul class="space-y-1 text-sm">
+          {% for c in chunks %}
             {% set _sim = c.similarity %}
             {% set _hit = _sim is not none and _sim >= _thr %}
             {% set _close = _sim is not none and _sim >= 0.30 and not _hit %}
-            <li {% if loop.revindex0 >= _strip_visible %}x-show="expanded" x-cloak{% endif %}>
+            <li {% if loop.index0 >= _strip_visible %}x-show="expanded" x-cloak{% endif %}>
               <button type="button"
                       class="{{ _row_btn }}"
                       hx-get="/modals/transcript/{{ c.id }}"
@@ -205,24 +207,13 @@
     {% endif %}
   {% endif %}
 
-  {# Two side-effects that need to run on each render of the strip:
-
-     1. Auto-scroll any data-transcript-feed (only the full-log
-        view has one — summary stays naturally top-aligned) so new
-        utterances always land in view.
-
-     2. ONE-TIME-only sync of the server-rendered view with the
-        streamer's localStorage choice. Window-flag-gated so the
-        dispatch fires once per page open, not on every swap. The
-        old `load delay:200ms` HTMX trigger created an infinite
-        refetch loop because `load` re-fires on every outerHTML
-        swap. #}
+  {# ONE-TIME-only sync of the server-rendered view with the
+     streamer's localStorage choice. Window-flag-gated so the
+     dispatch fires once per page open, not on every swap. The old
+     `load delay:200ms` HTMX trigger created an infinite refetch
+     loop because `load` re-fires on every outerHTML swap. #}
   <script>
     (function () {
-      const feed = document.querySelector('#transcript-strip [data-transcript-feed]');
-      if (feed) {
-        requestAnimationFrame(() => { feed.scrollTop = feed.scrollHeight; });
-      }
       if (window._chatterbotTranscriptViewSynced) return;
       window._chatterbotTranscriptViewSynced = true;
       const stored = localStorage.getItem('chatterbot.transcriptView');
