@@ -21,18 +21,29 @@
    server-side changes from other surfaces — and the scroll-preserve
    handlers above keep the viewport pinned across the full-body swap. #}
 
-  {# Default order top-to-bottom (per streamer ask):
-       1. Live transcript    — what whisper just heard (most "now")
-       2. Stream goals       — pinned tracker, dismissible
-       3. Activity sparkline — quick pulse check
-       4. …rest as usual…
+  {# Default top-to-bottom order (per streamer + client feedback):
+     focus on GROUP engagement, demote individual-focused panels.
+       1. Live transcript (with recent matches folded in) — what
+          whisper just heard
+       2. Engaging subjects — what the room is talking about NOW
+       3. High-impact subjects — what to say to re-engage clusters
+       4. Live conversations — clustered topic threads + drivers
+       5. Activity pulse — quick rhythm check
+       6. Stream goals — pinned tracker
+       7. Last stream recap — yesterday's context
+       8. Talking to you / Lurkers — individual-but-useful
+       9. Starred / Anniversaries / Newcomers / Regulars / Lapsed —
+          individual-focused, deprioritised
      Each section keeps a stable `data-panel-id` so the streamer
      can drag any of them anywhere; this is just the default. #}
 
   {# ---------------- Live transcript strip ----------------
      `preserve=True` so the body's outer HTMX swap doesn't clobber
      the strip's own refresh cadence (it has its own SSE-driven
-     hx-trigger inside). #}
+     hx-trigger inside). Recent transcript matches now ride INSIDE
+     this panel as a collapsible footer — they're transcript-derived
+     so they belong adjacent to the transcript that produced them,
+     not in their own floating card. #}
   {% if transcript_status and (transcript_status.enabled or transcript_chunks or transcript_groups) %}
     {% call panel('transcript', 'Live transcript', icon='fa-microphone',
                   subtitle='whisper', preserve=True) %}
@@ -41,22 +52,99 @@
               embedded=True %}
         {% include "partials/transcript_strip.html" %}
       {% endwith %}
+      {% if recent_matches %}
+        {% include "partials/recent_matches.html" %}
+      {% endif %}
     {% endcall %}
   {% endif %}
 
-  {# ---------------- Recent LLM transcript matches ----------------
-     Default-positioned right under the live transcript since both
-     are about transcript-driven flow — an utterance gets matched
-     to an open insight card and the row reflects it here. The
-     streamer can drag them apart if they prefer. #}
-  {% if recent_matches %}
-    {% include "partials/recent_matches.html" %}
+  {# ===================================================================
+     GROUP-FOCUSED panels — what's the ROOM doing right now. Per
+     streamer + client feedback, these come first because they drive
+     the high-leverage decisions ("what subject would re-engage the
+     biggest cluster?"). Individual-focused panels live further down.
+     =================================================================== #}
+
+  {# ---------------- Engaging subjects ----------------
+     LLM-curated distinct conversation subjects from recent chat.
+     Sensitive subjects (religion / politics / controversy) are
+     filtered at the prompt level so they never reach the dashboard. #}
+  {% include "partials/engaging_subjects.html" %}
+
+  {# ---------------- What to say next (high-impact subjects) ----------------
+     Cross-references active chatters against topic_thread driver
+     history — finds subjects the LIVE audience would re-engage with.
+     Different from Engaging Subjects (what chat is saying NOW) and
+     Quiet Cohorts (groups that just went silent). #}
+  {% include "partials/high_impact_subjects.html" %}
+
+  {# ---------------- Live conversation threads ---------------- #}
+  {# Grounded thread summaries with participants. Each thread has a
+     per-card action row so the streamer can skip a hallucinated one
+     ("Qwen's drunk") and never see it again. #}
+  {% if live_threads %}
+  {% call panel('live-threads', 'Live conversations', icon='fa-comments',
+                count=live_threads|length,
+                subtitle='grounded in actual chat — click skip if Qwen\'s drunk') %}
+    <ul class="divide-y divide-subtle rounded-xl border border-subtle bg-surface overflow-hidden">
+      {% for t in live_threads %}
+        {% set _ts = (live_thread_states.get(t.id|string) if live_thread_states else None) %}
+        {% if not _ts or _ts.state not in ('skipped', 'addressed') %}
+          {% set _is_pending = _ts and _ts.state == 'auto_pending' %}
+          <li class="insight-card-root px-3 py-2 sm:py-3 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3
+                     {% if _is_pending %}bg-warning/5 ring-1 ring-warning/30{% endif %}
+                     hover:bg-surface-raised transition-all duration-150 ease-out">
+            <button type="button"
+                    class="flex-1 text-left min-w-0"
+                    hx-get="/modals/thread/{{ t.id }}"
+                    hx-target="#modal-root"
+                    hx-swap="innerHTML"
+                    title="Open with snapshots + drivers">
+              <div class="flex items-baseline gap-2 flex-wrap">
+                <span class="font-medium text-primary text-sm sm:text-base">{{ t.title }}</span>
+                {% if t.category and t.category != 'other' %}
+                  <span class="text-[10px] uppercase tracking-wide text-muted">{{ t.category }}</span>
+                {% endif %}
+                {% if t.member_count > 1 %}
+                  <span class="text-[10px] text-accent">↻ {{ t.member_count }}</span>
+                {% endif %}
+                <span class="text-[10px] text-muted ml-auto">{{ t.last_ts | short_ts }}</span>
+              </div>
+              {% if t.recap %}
+                <p class="text-[12px] text-primary mt-1 leading-snug">{{ t.recap }}</p>
+              {% endif %}
+              {% if t.drivers %}
+                <p class="text-[11px] text-muted mt-1 inline-flex items-center gap-1">
+                  <i class="fa-solid fa-users text-[9px]"></i>
+                  {{ t.drivers | join(', ') }}
+                </p>
+              {% endif %}
+            </button>
+            <div class="shrink-0">
+              {% with kind='thread', item_key=t.id|string,
+                      state=(_ts.state if _ts else None) %}
+                {% include "components/_insight_actions.html" %}
+              {% endwith %}
+            </div>
+          </li>
+        {% endif %}
+      {% endfor %}
+    </ul>
+  {% endcall %}
   {% endif %}
 
-  {# ---------------- Stream goals panel ---------------- #}
-  {% if goals_state %}
-    {% with goals=goals_state %}{% include "partials/goals_panel.html" %}{% endwith %}
-  {% endif %}
+  {# ---------------- Quiet cohorts ---------------- #}
+  {# Clusters of chatters who all drove the same topic thread but
+     have gone silent — observational only. The streamer can decide
+     whether to pivot back to that topic to re-engage them. Same
+     skip/addressed state machine as live threads. #}
+  {% include "partials/quiet_cohorts.html" %}
+
+  {# ===================================================================
+     CONTEXT panels — pulse + goals + last-stream context. Useful
+     glance-info, kept in the middle so the group-focused panels above
+     stay visible without scrolling.
+     =================================================================== #}
 
   {# ---------------- Activity pulse sparkline ---------------- #}
   {% set _pulse_total = pulse | sum(attribute=1) if pulse else 0 %}
@@ -85,6 +173,14 @@
       {% endif %}
     </div>
   {% endcall %}
+
+  {# ---------------- Stream goals ----------------
+     Pinned tracker, dismissible per-goal. Lives between Activity and
+     Last stream recap so the streamer can see "where am I now / what
+     am I aiming for / what did yesterday look like" together. #}
+  {% if goals_state %}
+    {% with goals=goals_state %}{% include "partials/goals_panel.html" %}{% endwith %}
+  {% endif %}
 
   {# ---------------- Last stream recap + KPI deltas ---------------- #}
   {% if latest_recap %}
@@ -121,26 +217,6 @@
      control just above the Regulars panel block, since that's the
      only thing it actually affects. Newcomers / Active stay on
      their own fixed semantic windows (10 min / 24 h). #}
-
-  {# ---------------- Starred chatters present ---------------- #}
-  {% if starred_active %}
-  {% call panel('starred', 'Your favorites are here', icon='fa-star',
-                icon_tone='warning', count=starred_active|length) %}
-    <div class="flex flex-wrap gap-2">
-      {% for u in starred_active %}
-        <button type="button"
-                class="inline-flex items-center gap-2 px-2 py-1 rounded-full border border-warning/40 bg-warning/10 hover:bg-warning/20 text-sm"
-                hx-get="/modals/insight/adhoc/{{ u.twitch_id }}"
-                hx-target="#modal-root"
-                hx-swap="innerHTML"
-                title="What should I say to {{ u.name }} right now?">
-          {% with name=u.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
-          <span class="text-warning font-medium">{{ u.name }}</span>
-        </button>
-      {% endfor %}
-    </div>
-  {% endcall %}
-  {% endif %}
 
   {# Helper macro: per-row dismissal gate. A row is hidden when its
      state is skipped, addressed, OR snoozed-not-yet-due. The
@@ -315,84 +391,9 @@
     {% endcall %}
   {% endif %}
 
-  {# ---------------- What to say next (high-impact subjects) ----------------
-     Cross-references active chatters against topic_thread driver
-     history — finds subjects the LIVE audience would re-engage with.
-     Different from Engaging Subjects (what chat is saying NOW) and
-     Quiet Cohorts (groups that just went silent). #}
-  {% include "partials/high_impact_subjects.html" %}
-
-  {# ---------------- Engaging subjects ----------------
-     LLM-curated distinct conversation subjects from recent chat —
-     replaces the cosine-clustered "Live conversations" panel as the
-     primary "what's the room talking about" surface. Sensitive
-     subjects (religion / politics / controversy) filtered at the
-     prompt level so they never reach the dashboard. #}
-  {% include "partials/engaging_subjects.html" %}
-
-  {# ---------------- Live conversation threads ---------------- #}
-  {# Streamer feedback: per-chatter "talking points" sometimes hallucinate
-     facts (e.g. inventing an FF8 remake from one chatter's mention).
-     This panel grounds suggestions in actually-clustered chat content
-     and surfaces participants. Each thread has a per-card action row
-     so you can mark hallucinated ones as 'skip'. #}
-  {% if live_threads %}
-  {% call panel('live-threads', 'Live conversations', icon='fa-comments',
-                count=live_threads|length,
-                subtitle='grounded in actual chat — click skip if Qwen\'s drunk') %}
-    <ul class="divide-y divide-subtle rounded-xl border border-subtle bg-surface overflow-hidden">
-      {% for t in live_threads %}
-        {% set _ts = (live_thread_states.get(t.id|string) if live_thread_states else None) %}
-        {% if not _ts or _ts.state not in ('skipped', 'addressed') %}
-          {% set _is_pending = _ts and _ts.state == 'auto_pending' %}
-          <li class="insight-card-root px-3 py-2 sm:py-3 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3
-                     {% if _is_pending %}bg-warning/5 ring-1 ring-warning/30{% endif %}
-                     hover:bg-surface-raised transition-all duration-150 ease-out">
-            <button type="button"
-                    class="flex-1 text-left min-w-0"
-                    hx-get="/modals/thread/{{ t.id }}"
-                    hx-target="#modal-root"
-                    hx-swap="innerHTML"
-                    title="Open with snapshots + drivers">
-              <div class="flex items-baseline gap-2 flex-wrap">
-                <span class="font-medium text-primary text-sm sm:text-base">{{ t.title }}</span>
-                {% if t.category and t.category != 'other' %}
-                  <span class="text-[10px] uppercase tracking-wide text-muted">{{ t.category }}</span>
-                {% endif %}
-                {% if t.member_count > 1 %}
-                  <span class="text-[10px] text-accent">↻ {{ t.member_count }}</span>
-                {% endif %}
-                <span class="text-[10px] text-muted ml-auto">{{ t.last_ts | short_ts }}</span>
-              </div>
-              {% if t.recap %}
-                <p class="text-[12px] text-primary mt-1 leading-snug">{{ t.recap }}</p>
-              {% endif %}
-              {% if t.drivers %}
-                <p class="text-[11px] text-muted mt-1 inline-flex items-center gap-1">
-                  <i class="fa-solid fa-users text-[9px]"></i>
-                  {{ t.drivers | join(', ') }}
-                </p>
-              {% endif %}
-            </button>
-            <div class="shrink-0">
-              {% with kind='thread', item_key=t.id|string,
-                      state=(_ts.state if _ts else None) %}
-                {% include "components/_insight_actions.html" %}
-              {% endwith %}
-            </div>
-          </li>
-        {% endif %}
-      {% endfor %}
-    </ul>
-  {% endcall %}
-  {% endif %}
-
-  {# ---------------- Quiet cohorts ---------------- #}
-  {# Clusters of chatters who all drove the same topic thread but have
-     gone silent — observational only. The streamer can decide whether
-     to pivot back to that topic to re-engage them. Same skip/addressed
-     state machine as live threads. #}
-  {% include "partials/quiet_cohorts.html" %}
+  {# (Engaging subjects, High-impact subjects, Live conversations and
+     Quiet cohorts moved to the top of the body — group-focused
+     panels lead so the streamer can re-engage clusters first.) #}
 
   {# Talking-points section removed per streamer feedback —
      the LLM-generated per-chatter conversation hooks were
@@ -402,6 +403,34 @@
      candidate pool for auto-pending; we just don't render the cards
      here any more. The Live Conversations panel above + observational
      thread recaps replace this surface. #}
+
+  {# ===================================================================
+     INDIVIDUAL-FOCUSED panels — bottom of the body. Per client feedback,
+     the dashboard's primary value is GROUP engagement; individual
+     panels are kept for the cases where the streamer specifically
+     wants to address one person. Starred / anniversaries / newcomers /
+     regulars / lapsed all live here.
+     =================================================================== #}
+
+  {# ---------------- Starred chatters present ---------------- #}
+  {% if starred_active %}
+  {% call panel('starred', 'Your favorites are here', icon='fa-star',
+                icon_tone='warning', count=starred_active|length) %}
+    <div class="flex flex-wrap gap-2">
+      {% for u in starred_active %}
+        <button type="button"
+                class="inline-flex items-center gap-2 px-2 py-1 rounded-full border border-warning/40 bg-warning/10 hover:bg-warning/20 text-sm"
+                hx-get="/modals/insight/adhoc/{{ u.twitch_id }}"
+                hx-target="#modal-root"
+                hx-swap="innerHTML"
+                title="What should I say to {{ u.name }} right now?">
+          {% with name=u.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+          <span class="text-warning font-medium">{{ u.name }}</span>
+        </button>
+      {% endfor %}
+    </div>
+  {% endcall %}
+  {% endif %}
 
   {# ---------------- Anniversaries today ---------------- #}
   {% if anniversaries %}
