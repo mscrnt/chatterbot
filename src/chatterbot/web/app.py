@@ -831,165 +831,87 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     # Plaintext credentials in SQLite. Fine for a single-user local tool bound
     # to 127.0.0.1; flagged to the user on the page.
 
-    # Settings groups — drives the section layout on /settings. Each entry is
-    # (group_id, title, icon_classes, blurb, [keys]). icon_classes is the
-    # full Font Awesome class string ("fa-solid fa-tv" or "fa-brands fa-youtube").
-    _SETTINGS_GROUPS: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
-        (
-            "twitch", "Twitch", "fa-brands fa-twitch",
-            "Bot identity + chat connection. Restart bot after changes.",
-            (
-                "twitch_bot_nick", "twitch_oauth_token", "twitch_channel",
-                "twitch_client_id", "twitch_client_secret",
-            ),
-        ),
-        (
-            "obs", "OBS", "fa-solid fa-circle-dot",
-            "Read-only WebSocket peek at live + scene state. Disabled by default.",
-            ("obs_enabled", "obs_host", "obs_port", "obs_password"),
-        ),
-        (
-            "streamelements", "StreamElements", "fa-solid fa-coins",
-            "Pulls tip / sub / cheer / raid / follow events into the dashboard.",
-            (
-                "streamelements_enabled", "streamelements_jwt",
-                "streamelements_channel_id",
-            ),
-        ),
-        (
-            "youtube", "YouTube", "fa-brands fa-youtube",
-            "Live-chat ingestion via YouTube Data API v3. Read-only API key. "
-            "Adaptive polling keeps quota usage in check on long streams; "
-            "raise the minimum poll interval if you stream past 6h.",
-            (
-                "youtube_enabled", "youtube_api_key", "youtube_channel_id",
-                "youtube_min_poll_seconds", "youtube_max_poll_seconds",
-            ),
-        ),
-        (
-            "discord", "Discord", "fa-brands fa-discord",
-            "Stub — listener wired, no gateway connection yet. Channel IDs comma-separated.",
-            ("discord_enabled", "discord_bot_token", "discord_channel_ids"),
-        ),
-        (
-            "moderation", "Moderation", "fa-solid fa-shield-halved",
-            "Opt-in advisory classifier. The bot never takes chat action.",
-            ("mod_mode_enabled",),
-        ),
-        (
-            "dashboard", "Dashboard UI", "fa-solid fa-sliders",
-            "Display preferences for this dashboard. No bot restart needed.",
-            ("live_widget_enabled",),
-        ),
-        (
-            "whisper", "Whisper", "fa-solid fa-microphone",
-            "Real-time stream transcription via the OBS audio relay script. "
-            "Auto-marks insight cards 'addressed' when you speak about them. "
-            "First time the model loads it'll download ~75MB-1GB depending on size.",
-            (
-                "whisper_enabled", "whisper_model",
-                "whisper_buffer_seconds", "whisper_match_threshold",
-                "whisper_unnamed_match_threshold",
-                "whisper_min_silence_ms",
-                "whisper_llm_match_enabled",
-                "whisper_llm_match_interval_seconds",
-                "whisper_llm_match_min_chunks",
-                "whisper_llm_match_confidence",
-                "whisper_auto_confirm_seconds",
-                "whisper_group_interval_seconds",
-                "whisper_group_min_chunks",
-                "thread_recap_interval_seconds",
-                "thread_recap_max_messages_per_thread",
-                "chat_lag_seconds",
-                "chat_lag_auto_tune_interval_seconds",
-                "screenshot_interval_seconds",
-                "screenshot_max_age_hours",
-                "screenshot_jpeg_quality",
-                "screenshot_width",
-                "screenshot_grid_max",
-            ),
-        ),
-        (
-            "ai", "AI Provider", "fa-solid fa-robot",
-            "Which backend handles generation calls (notes, recaps, "
-            "engaging-subjects, etc). Embeddings ALWAYS run on local "
-            "Ollama regardless — vec_messages dim is locked. "
-            "Set `llm_provider` to ollama / anthropic / openai. "
-            "Restart the dashboard after changes.",
-            (
-                "llm_provider",
-                "anthropic_api_key", "anthropic_model",
-                "anthropic_thinking_budget_tokens",
-                "openai_api_key", "openai_model",
-                "openai_reasoning_model", "openai_organization",
-            ),
-        ),
-        (
-            "internal", "Internal bus", "fa-solid fa-bolt",
-            "Cross-process notification bus — the bot pushes to the "
-            "dashboard's SSE stream when chat arrives so clients see "
-            "updates with ~10ms latency instead of waiting for the "
-            "10s watermark fallback. Empty URL disables push (the "
-            "fallback poll still works).",
-            (
-                "dashboard_internal_url",
-                "internal_notify_secret",
-            ),
-        ),
-    )
+    # Section layout + per-field metadata (labels, tooltips, help
+    # text, input types, options, depends_on rules) live in
+    # web/settings_meta.py. Adding a new editable setting:
+    #   1) add the key to EDITABLE_SETTING_KEYS in config.py
+    #   2) add a Field entry in settings_meta.FIELDS
+    #   3) reference the key in a Section's `fields` list
 
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_page(request: Request, saved: int = Query(0)):
         live, db_sources = get_settings_with_sources()
-
-        # Enum-style fields render as a <select> with these options.
-        # Adding a new entry here AND a corresponding `is_set` /
-        # validation rule is the only place to touch — the template
-        # falls back to text input otherwise.
-        ENUM_FIELDS: dict[str, list[str]] = {
-            "llm_provider": ["ollama", "anthropic", "openai"],
-        }
+        from .settings_meta import SECTIONS, field_meta
 
         def _row(key: str) -> dict:
-            value = getattr(live, key)
-            is_secret = key in SECRET_SETTING_KEYS
+            value = getattr(live, key, None)
             is_bool = isinstance(value, bool)
-            options = ENUM_FIELDS.get(key)
             return {
                 "key": key,
-                "label": key.replace("_", " "),
                 "value": value,
-                "is_secret": is_secret,
-                "is_bool": is_bool,
-                "options": options,
                 "is_set": bool(value) if not is_bool else True,
                 "source": "db" if key in db_sources else "env",
+                "meta": field_meta(key),
             }
 
-        grouped: list[dict] = []
-        seen: set[str] = set()
-        for gid, title, icon, blurb, keys in _SETTINGS_GROUPS:
-            grouped.append({
-                "id": gid,
-                "title": title,
-                "icon": icon,
-                "blurb": blurb,
-                "rows": [_row(k) for k in keys if k in EDITABLE_SETTING_KEYS],
-            })
-            seen.update(keys)
-        leftover = [k for k in EDITABLE_SETTING_KEYS if k not in seen]
-        if leftover:
-            grouped.append({
-                "id": "other", "title": "Other", "icon": "fa-ellipsis",
-                "blurb": "", "rows": [_row(k) for k in leftover],
-            })
+        # Flat key→row dict so the template looks up rows by name
+        # without re-walking the section hierarchy. Plus a
+        # JSON-serializable form_values dict that Alpine reactively
+        # tracks — depends_on rules read from this map for
+        # client-side show/hide of conditional fields.
+        rows: dict[str, dict] = {
+            k: _row(k) for k in EDITABLE_SETTING_KEYS
+        }
+        # Defaults map — pristine Settings() with NO env / DB
+        # overrides, so we can surface "Default: X" hints next to
+        # every field. The streamer can see what the value would
+        # fall back to without opening the source. Pulled from
+        # `model_fields[k].default` so this works regardless of
+        # which fields are currently overridden in the user's env.
+        from ..config import Settings as _SettingsCls
+        defaults: dict[str, object] = {}
+        for k in EDITABLE_SETTING_KEYS:
+            field_info = _SettingsCls.model_fields.get(k)
+            if field_info is None:
+                continue
+            d = field_info.default
+            # PydanticUndefined → no default declared. Skip.
+            if repr(d) == "PydanticUndefined":
+                continue
+            defaults[k] = d
+        # Decorate each row with the resolved default for the
+        # partial template to surface as a placeholder + help-line.
+        for k, r in rows.items():
+            r["default"] = defaults.get(k)
+        form_values: dict[str, object] = {}
+        for k, r in rows.items():
+            v = r["value"]
+            if isinstance(v, bool):
+                form_values[k] = v
+            elif v is None:
+                # Fall back to the default rather than empty so the
+                # input renders SOMETHING and Alpine's x-model has a
+                # value to bind. Keeps audio buffer length etc. from
+                # showing blank when the user hasn't customised it.
+                d = defaults.get(k)
+                if d is None or isinstance(d, bool):
+                    form_values[k] = ""
+                else:
+                    form_values[k] = d
+            else:
+                form_values[k] = (
+                    v if isinstance(v, (int, float, str)) else str(v)
+                )
 
         from ..diagnose import make_github_issue_url
         return TEMPLATES.TemplateResponse(
             request,
             "settings.html",
             {
-                "groups": grouped,
+                "sections": SECTIONS,
+                "section_ids": [s["id"] for s in SECTIONS],
+                "rows": rows,
+                "form_values": form_values,
                 "saved": bool(saved),
                 "github_issue_url": make_github_issue_url(),
                 # Initial state for the chat-lag calibrator partial:
@@ -1001,7 +923,9 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "chat_lag_lookback_options": (5, 15, 30),
                 "chat_lag_auto_tuned_at": repo.get_app_setting("chat_lag_auto_tuned_at"),
                 "chat_lag_auto_tuned_value": repo.get_app_setting("chat_lag_auto_tuned_value"),
-                "chat_lag_auto_tune_enabled": int(getattr(live, "chat_lag_auto_tune_interval_seconds", 600)) > 0,
+                "chat_lag_auto_tune_enabled": int(
+                    getattr(live, "chat_lag_auto_tune_interval_seconds", 600)
+                ) > 0,
             },
         )
 
@@ -1014,6 +938,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "youtube_enabled",
             "discord_enabled",
             "whisper_enabled",
+            "whisper_llm_match_enabled",
         }
     )
 

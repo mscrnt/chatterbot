@@ -1,0 +1,111 @@
+{# Renders ONE settings field with consistent layout, tooltip, help
+   text, and a value-source pill. Expects `r` (row dict) + `m`
+   (resolved metadata dict) in scope.
+
+   Row layout:
+     [Label + ?-tooltip + source pill]
+     [Input + suffix]
+     [Help text — small, muted, plain English]
+
+   Inputs update `fieldValues[key]` on change so depends_on rules
+   stay reactive without a server round-trip. Bool toggles + selects
+   matter most for cascading visibility. #}
+<div class="rounded-lg border border-subtle bg-canvas/50 px-3 py-2.5 space-y-1.5">
+  <div class="flex items-baseline justify-between gap-2 flex-wrap">
+    <label for="field-{{ r.key }}" class="inline-flex items-center gap-1.5 font-medium text-sm text-primary">
+      <span>{{ m.label }}</span>
+      {% if m.tooltip %}
+        <span class="text-muted hover:text-primary cursor-help"
+              title="{{ m.tooltip }}">
+          <i class="fa-solid fa-circle-question text-[11px]"></i>
+        </span>
+      {% endif %}
+    </label>
+    <span class="inline-flex items-center gap-1">
+      {% if r.source == 'db' %}
+        {% with label='from db', tone='accent' %}{% include "components/_pill.html" %}{% endwith %}
+      {% elif r.is_set %}
+        {% with label='from env', tone='neutral' %}{% include "components/_pill.html" %}{% endwith %}
+      {% else %}
+        {% with label='unset', tone='warning' %}{% include "components/_pill.html" %}{% endwith %}
+      {% endif %}
+      {% if m.advanced %}
+        <span class="px-1.5 text-[9px] uppercase tracking-wider rounded-full bg-muted/15 text-muted border border-muted/30"
+              title="advanced — defaults are sensible">
+          adv
+        </span>
+      {% endif %}
+    </span>
+  </div>
+
+  {# ---- Input variants ---- #}
+  {% if m.type == 'bool' %}
+    <label class="inline-flex items-center gap-2 tap cursor-pointer">
+      <input type="checkbox" name="{{ r.key }}"
+             id="field-{{ r.key }}"
+             x-model="fieldValues['{{ r.key }}']"
+             class="h-5 w-5 accent-accent">
+      <span class="text-sm text-primary"
+            x-text="fieldValues['{{ r.key }}'] ? 'enabled' : 'disabled'"></span>
+    </label>
+
+  {% elif m.type == 'select' %}
+    <select name="{{ r.key }}"
+            id="field-{{ r.key }}"
+            x-model="fieldValues['{{ r.key }}']"
+            class="w-full tap bg-canvas border border-subtle rounded px-3 py-2 text-base text-primary focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out">
+      {% for opt in (m.options or []) %}
+        <option value="{{ opt }}" {% if r.value == opt %}selected{% endif %}>{{ opt }}</option>
+      {% endfor %}
+    </select>
+
+  {% elif m.type == 'secret' %}
+    <input type="password" name="{{ r.key }}"
+           id="field-{{ r.key }}"
+           placeholder="{% if r.is_set %}•••••••• (leave blank to keep current){% else %}{{ m.placeholder or 'not set' }}{% endif %}"
+           autocomplete="off"
+           class="w-full tap bg-canvas border border-subtle rounded px-3 py-2 text-base text-primary placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out">
+    {% if r.is_set %}
+      <p class="text-[11px] text-muted">Currently: set ({{ r.value | length }} chars). Submit blank to keep it.</p>
+    {% else %}
+      <p class="text-[11px] text-muted">Currently: not set.</p>
+    {% endif %}
+
+  {% elif m.type == 'number' %}
+    <div class="flex items-center gap-2">
+      <input type="number" name="{{ r.key }}"
+             id="field-{{ r.key }}"
+             value="{{ r.value if r.value is not none else (r.default if r.default is not none else '') }}"
+             x-model.number="fieldValues['{{ r.key }}']"
+             {% if r.default is not none %}placeholder="default {{ r.default }}"{% endif %}
+             {% if m.min is not none %}min="{{ m.min }}"{% endif %}
+             {% if m.max is not none %}max="{{ m.max }}"{% endif %}
+             {% if m.step is not none %}step="{{ m.step }}"{% endif %}
+             class="flex-1 tap bg-canvas border border-subtle rounded px-3 py-2 text-base text-primary tabular-nums focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out">
+      {% if m.suffix %}
+        <span class="text-xs text-muted whitespace-nowrap">{{ m.suffix }}</span>
+      {% endif %}
+    </div>
+
+  {% else %}
+    {# Default: text input. Placeholder shows the default value when
+       the streamer hasn't customised it, so they can see what it'd
+       fall back to without opening the source. #}
+    <input type="text" name="{{ r.key }}"
+           id="field-{{ r.key }}"
+           value="{{ r.value if r.value is not none else (r.default if r.default is not none else '') }}"
+           x-model="fieldValues['{{ r.key }}']"
+           placeholder="{% if r.default %}default {{ r.default }}{% elif m.placeholder %}{{ m.placeholder }}{% endif %}"
+           class="w-full tap bg-canvas border border-subtle rounded px-3 py-2 text-base text-primary focus:outline-none focus:ring-2 focus:ring-accent transition-all duration-150 ease-out">
+  {% endif %}
+
+  {# ---- Help text + default hint ---- #}
+  {% if m.help or r.default is not none %}
+    <p class="text-[11px] leading-snug text-muted">
+      {{ m.help }}
+      {% if r.default is not none and r.default != '' and not (m.type == 'bool') %}
+        <span class="text-subtle">· default <code class="text-muted">{{ r.default }}</code></span>
+      {% endif %}
+    </p>
+  {% endif %}
+</div>
