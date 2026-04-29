@@ -289,7 +289,9 @@
        then theme toggle + shortcuts. Status pills stay in the top bar
        (their own responsive breakpoints already gate their visibility). #}
     {% set is_chatters = current_path.startswith("/chatters") or current_path.startswith("/users") %}
-    {% set is_insights = current_path == '/insights' or current_path == '/topics' %}
+    {# `/` is the Insights home; the chatters list moved to /chatters.
+       Highlight Insights when we're at root or on /insights / /topics. #}
+    {% set is_insights = current_path == '/insights' or current_path == '/topics' or current_path == '/' %}
     <div class="lg:hidden border-t border-subtle bg-surface"
          x-show="menuOpen"
          x-transition.opacity.duration.150ms
@@ -297,8 +299,8 @@
          @click.outside="menuOpen = false">
       <div class="max-w-6xl mx-auto px-3 sm:px-4 py-2 grid grid-cols-2 gap-1">
         {% set _mobile_links = [
-          ('/',         'Chatters',   'fa-users',                is_chatters),
           ('/insights', 'Insights',   'fa-lightbulb',            is_insights),
+          ('/chatters', 'Chatters',   'fa-users',                is_chatters),
           ('/stats',    'Stats',      'fa-chart-pie',            current_path == '/stats'),
           ('/events',   'Events',     'fa-coins',                current_path == '/events'),
           ('/search',   'Search',     'fa-wand-magic-sparkles',  current_path == '/search'),
@@ -488,7 +490,7 @@
         },
         navTo(slug) {
           const map = {
-            c: '/',
+            c: '/chatters',          // chatters list moved off /
             i: '/insights',
             t: '/insights?view=topics',
             e: '/events',
