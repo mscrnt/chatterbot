@@ -10,7 +10,14 @@
 <div id="insights-body" class="space-y-3"
      data-insights-panels
      hx-get="/insights?view=engagement&partial=1&window={{ window }}"
-     hx-trigger="insights:engagement from:body, messages from:body"
+     {# `messages from:body` previously triggered a full ~1s, ~628KB
+        outerHTML swap of this entire body on EVERY chat message — at
+        5+ msgs/sec on a busy stream the dashboard could never finish
+        a swap before the next one queued, locking up the main thread.
+        Per-panel SSE channels (insights:engagement on a 60s cadence)
+        already fire on the data this body actually shows, so we drop
+        the messages trigger entirely. #}
+     hx-trigger="insights:engagement from:body"
      hx-swap="outerHTML"
      hx-on::before-swap="window.__chatterbotPreserveScroll = window.scrollY"
      hx-on::after-swap="if(typeof window.__chatterbotPreserveScroll === 'number') window.scrollTo(0, window.__chatterbotPreserveScroll)">

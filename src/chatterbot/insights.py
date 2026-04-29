@@ -775,7 +775,14 @@ Good output:
         blocklisted subject. Returns (blocked, matched_slug,
         cosine_similarity). 0.85 is the default threshold —
         empirically distinguishes "FF8 remake" vs "Final Fantasy 8
-        remake" (>0.85) from "FF8 remake" vs "FF14 raid" (<0.85)."""
+        remake" (>0.85) from "FF8 remake" vs "FF14 raid" (<0.85).
+
+        The cosine pass runs in `asyncio.to_thread` so a 50-entry
+        blocklist matrix-multiply doesn't peg the event loop —
+        previously this fired on every newly-extracted subject
+        (~8/pass × every 3 min) and the 50× normalize+dot loop was
+        contending with /health and other route handlers, causing
+        the wide-jitter latency we measured."""
         if not self._blocklist_embed_cache or not name.strip():
             return False, None, 0.0
         try:
@@ -786,24 +793,39 @@ Good output:
             qv = await self.llm.embed(name.strip())
         except Exception:
             return False, None, 0.0
-        q = np.asarray(qv, dtype=np.float32)
-        qn = float(np.linalg.norm(q))
-        if qn == 0.0:
-            return False, None, 0.0
-        q = q / qn
-        best_slug = None
-        best_sim = 0.0
-        for slug, vec in self._blocklist_embed_cache.items():
-            if not vec:
-                continue
-            v = np.asarray(vec, dtype=np.float32)
-            vn = float(np.linalg.norm(v))
-            if vn == 0.0:
-                continue
-            sim = float(q @ (v / vn))
-            if sim > best_sim:
-                best_sim = sim
-                best_slug = slug
+
+        cache_snapshot = list(self._blocklist_embed_cache.items())
+
+        def _score() -> tuple[str | None, float]:
+            # Build a single normalized matrix once, then matrix-multiply
+            # against the query vector — one numpy call instead of 50
+            # python-level cosines. Small enough to be irrelevant on its
+            # own, but it stops the asyncio event loop from blocking on
+            # CPU work that has nothing to do with the call's caller.
+            q = np.asarray(qv, dtype=np.float32)
+            qn = float(np.linalg.norm(q))
+            if qn == 0.0:
+                return None, 0.0
+            q = q / qn
+            slugs: list[str] = []
+            vecs: list[list[float]] = []
+            for slug, vec in cache_snapshot:
+                if not vec:
+                    continue
+                slugs.append(slug)
+                vecs.append(vec)
+            if not vecs:
+                return None, 0.0
+            mat = np.asarray(vecs, dtype=np.float32)
+            norms = np.linalg.norm(mat, axis=1, keepdims=True)
+            # Avoid div-zero on degenerate rows.
+            norms = np.where(norms == 0.0, 1.0, norms)
+            mat = mat / norms
+            sims = mat @ q                           # (N,)
+            idx = int(np.argmax(sims))
+            return slugs[idx], float(sims[idx])
+
+        best_slug, best_sim = await asyncio.to_thread(_score)
         return (best_sim >= threshold, best_slug, best_sim)
 
     def _load_subject_blocklist(self) -> list[dict]:
