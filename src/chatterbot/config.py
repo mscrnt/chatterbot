@@ -222,7 +222,12 @@ class Settings(BaseSettings):
     db_path: str = "data/chatters.db"
 
     # Summarizer cadence (starting points; tune after observation)
-    summarize_after_messages: int = 20
+    # Run note extraction once a chatter accumulates this many
+    # unsummarized messages. Lower = more notes per chatter (more
+    # LLM calls); higher = sparser but cheaper. Pair with
+    # `summarize_idle_minutes` so a chatter who quiets down before
+    # hitting the threshold still gets summarized.
+    summarize_after_messages: int = 10
     summarize_idle_minutes: int = 10
     idle_sweep_interval_seconds: int = 60
 

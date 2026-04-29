@@ -113,27 +113,41 @@ that support that note. The streamer uses this to trace any note back to
 the exact line(s) it came from. Context lines (`[ctx id]`) are NOT
 allowed in source_message_ids.
 
-WHAT COUNTS AS A NOTE (any of these):
+WHAT COUNTS AS A NOTE — be generous; the streamer would rather skim 6
+mediocre notes than miss the one that mattered. Capture any of:
+
 - Hard self-disclosure: pets, gear, location, jobs, family, games they
-  play, hobbies. ("Has a cat named Loki.")
-- Stated opinions or takes: positions they explicitly voiced.
-  ("Defends Trump.", "Thinks Putin is a threat.", "Calls Hasan based.")
-- Recurring references: a person, show, game, or topic they've brought
-  up across multiple focal lines. ("Often references David Lynch.")
-- Stated preferences: things they've explicitly liked, disliked, or
-  championed. ("Hates the Resident Evil 4 remake.", "Champions the
-  classic Silent Hill 2 ending.")
+  play, hobbies, schedule, health, education. ("Has a cat named Loki.",
+  "Lives in Sydney.", "Works night shift.")
+- Stated opinions or takes — political, cultural, gaming, tech. Even
+  weak signals count if the chatter clearly meant them.
+  ("Defends Trump.", "Thinks the FF7 remake split was a mistake.")
+- Recurring references: a person, show, game, song, meme, or topic the
+  chatter has brought up — even ONCE counts if it's specific enough to
+  be a callback later. ("Mentioned David Lynch.", "Brought up
+  Yakuza 0 unprompted.")
+- Stated preferences: things they've liked, disliked, or championed.
+  ("Hates the Resident Evil 4 remake.", "Loves Silent Hill 2.")
+- Recurring chat patterns specific to this viewer: a catchphrase,
+  recurring tease, in-joke they keep returning to. ("Constantly
+  ribs the streamer about the missed parry from last stream.")
+- Knowledge / expertise signals: technical comments, shop talk, lore
+  deep-cuts that suggest the chatter knows what they're talking about.
+  ("Knows Souls-game lore — quoted Praise the Sun phrasing.")
 
 RULES:
-- Extract 0 to 5 notes maximum. 0 is fine and common — don't fabricate.
+- Extract up to 8 notes. **Aim for 2-4 on a chatter who's said
+  anything substantive over 10+ messages**; 0 only when the messages
+  are pure greetings / reactions. Don't withhold a note just because
+  it feels small — a single grounded line is useful.
 - Each note is one short third-person sentence grounded in what the
   viewer ACTUALLY said. Do not infer beliefs they didn't state.
 - A SARCASTIC statement is NOT a real opinion. If the viewer says
   "great, I love dying repeatedly to one zombie" right after a death
   context line, do NOT record "loves dying to zombies." Skip it.
 - Pure reactions to the stream content (kills, deaths, jump-scares, RNG,
-  the streamer's plays) are not notes. "BASED" or "LMAO" alone tells us
-  nothing about the viewer.
+  the streamer's plays) are not notes — "BASED" or "LMAO" alone tells
+  us nothing about the viewer.
 - No personality judgments — describe what they SAID, not who they ARE.
   "Often makes political comments" is OK; "Is opinionated" is not.
 - source_message_ids must reference focal `[id]` lines that actually

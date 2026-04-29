@@ -36,12 +36,15 @@ class NoteEntry(BaseModel):
 
 
 class NoteExtractionResponse(BaseModel):
-    """Reply for `summarizer._summarize_user`. The LLM extracts 0-5 short
-    third-person notes about a single viewer — covering hard self-disclosure
-    (pets, gear, location, jobs), stated opinions / takes, recurring
-    references, and explicit preferences. Empty is valid and common."""
+    """Reply for `summarizer._summarize_user`. The LLM extracts up to 8
+    short third-person notes about a single viewer — covering hard
+    self-disclosure (pets, gear, location, jobs), stated opinions /
+    takes, recurring references, explicit preferences, and recurring
+    chat patterns specific to this viewer. The prompt asks the model
+    to err generous: 2-4 is typical on a chatter with substantive
+    activity; 0 only on pure greeting / reaction streams."""
 
-    notes: list[NoteEntry] = Field(default_factory=list, max_length=5)
+    notes: list[NoteEntry] = Field(default_factory=list, max_length=8)
 
 
 # ---- per-user soft-profile extraction ----
