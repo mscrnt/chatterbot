@@ -814,10 +814,22 @@ IMPORTANT — whisper output is imperfect. The transcripts come from real-time s
 Use the image and context to interpret what was *probably* said. If "purry" appears next to a Resident Evil scene, it's "parry." If "yogi" turns up while Yoshi is on screen, it's Yoshi. Don't quote literally — paraphrase with the most plausible reading.
 
 
-Write ONE 1-2 sentence OBSERVATIONAL summary of WHAT THE STREAMER SAID. The audio is primary. The image exists only to help you ground the audio:
+Write a 2-4 sentence OBSERVATIONAL recap of WHAT THE STREAMER SAID and (briefly) HOW CHAT RESPONDED. The audio is primary. The image and chat block exist to help you ground the audio:
   - resolve pronouns / vague nouns ("the boss" → "the Malenia boss in Elden Ring"),
   - name the game / app / scene if it's relevant to what was said,
-  - back up an ambiguous word the streamer used.
+  - back up an ambiguous word the streamer used,
+  - identify chat replies the streamer is reacting to (when a "CHAT DURING THIS WINDOW" block is present).
+
+PEOPLE ON STREAM:
+- Name people the streamer is talking to / talking about by their actual name when audible ("xQc tells Train to stop trolling …", not "the streamer tells someone to stop trolling …"). Whisper sometimes garbles names — match against the chat block when uncertain.
+
+CHAT REACTION (optional, when worth a sentence):
+- If the chat block shows a clear collective reaction worth one sentence (chat memes, agrees, pushes back, asks a follow-up question), include it as a brief trailing sentence: "Chat hypes the play / pushes back on his take / asks why he stopped."
+- Skip the chat sentence when chat is just generic emote spam or unrelated background.
+
+STREAMER NAME:
+- The prompt may begin with a "STREAMER NAME: <name>" line. If present, refer to them by that name in your summary ("xQc explains …", "Aiko notes …") rather than the generic "the streamer". Reads more naturally on the dashboard.
+- When NO "STREAMER NAME:" line is present, "the streamer" is the right fallback.
 
 GAME / APP IDENTIFICATION (THIS IS THE #1 RULE — read it twice):
 - The prompt may begin with a "KNOWN GAME: <name>" line. If present, that name comes from Twitch's live API and IS THE GAME. Use it verbatim.
@@ -840,13 +852,16 @@ Good example (image used silently to identify the game; summary about what was s
 
 HARD RULES:
 - KNOWN GAME line, if present, OVERRIDES the screenshot. Period.
-- Audio is primary. Lead with what was said. Use the image only to fill in nouns the streamer left implicit.
-- If you can't tell the image is adding anything, just summarise the audio alone.
+- STREAMER NAME line, if present, replaces "the streamer" in your output.
+- Audio is primary. Lead with what was said. Use the image and chat block as supporting context.
+- 2-4 sentences. Long enough to capture multi-topic windows; short enough to scan at a glance. A 1-sentence summary is fine when the window is single-topic.
+- Name people the streamer is talking to / about, when audible.
+- Brief chat reaction (one sentence) is welcome when chat is engaged with the streamer's bit. Skip it when chat is just emote spam.
 - No advice ("you should…").
-- Don't invent products, events, plot points, or characters that aren't in the audio or the image.
+- Don't invent products, events, plot points, or characters that aren't in the audio, image, or chat.
 - Skip filler: empty `summary` is fine when the utterances are one-word reactions or noise.
 
-Reply with `summary` = the line (or empty string).
+Reply with `summary` = the line(s) (or empty string).
 """
 
     async def transcript_group_loop(self) -> None:
@@ -957,14 +972,67 @@ Reply with `summary` = the line (or empty string).
             image_note = ""
 
         channel_context = self._build_channel_context()
+
+        # Pull chat that overlaps the chunk window so the LLM has
+        # context for what the streamer is reacting to. Soft window:
+        # `recent_messages(within_minutes=N)` looks back from "now",
+        # so we size N to comfortably cover [chunks[0].ts, chunks[-1].ts]
+        # plus a few minutes of pre-roll (chat triggers a streamer
+        # reaction that lasts a while). Capped to 60 messages so a
+        # very busy chat doesn't blow the context budget.
+        chat_block = ""
+        try:
+            from datetime import datetime as _dt
+            now = _dt.utcnow()
+            try:
+                first_ts = _dt.fromisoformat(
+                    chunks[0].ts.replace("Z", "+00:00")
+                ).replace(tzinfo=None)
+                window_min = max(3, int((now - first_ts).total_seconds() / 60) + 2)
+            except Exception:
+                window_min = 5
+            window_min = min(window_min, 12)
+            chat_msgs = await asyncio.to_thread(
+                self.repo.recent_messages,
+                limit=60, within_minutes=window_min,
+            )
+        except Exception:
+            logger.exception("transcript: chat fetch for group summary failed")
+            chat_msgs = []
+        if chat_msgs:
+            chat_lines = []
+            for m in chat_msgs:
+                ts_short = m.ts[11:16] if len(m.ts) >= 16 else m.ts
+                # Light reply-context — when the chatter is replying
+                # to someone, give the LLM the parent so it can tell
+                # "alice asks bob about X" from "alice asks streamer
+                # about X".
+                reply_prefix = ""
+                if m.reply_parent_login and m.reply_parent_body:
+                    reply_prefix = (
+                        f"@{m.reply_parent_login}({m.reply_parent_body[:40]}) "
+                    )
+                chat_lines.append(
+                    f"  [{ts_short}] {m.name}: {reply_prefix}"
+                    f"{m.content[:200]}"
+                )
+            chat_block = (
+                f"\n\nCHAT DURING THIS WINDOW ({len(chat_lines)} "
+                f"messages, oldest first — use as SECONDARY context "
+                "to ground reactions; the streamer's audio is still "
+                "primary):\n"
+                + "\n".join(chat_lines)
+            )
+
         user_prompt = (
             channel_context
             + f"STREAMER UTTERANCES ({len(chunks)} lines, "
             f"oldest first):\n"
             + "\n".join(lines)
+            + chat_block
             + image_note
-            + "\n\nReturn ONE observational `summary` line, or empty "
-            "string if there's nothing coherent to summarise."
+            + "\n\nReturn a 2-4 sentence observational `summary`, or "
+            "an empty string if there's nothing coherent to summarise."
         )
 
         return {

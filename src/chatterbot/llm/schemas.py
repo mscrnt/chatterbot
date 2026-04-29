@@ -253,11 +253,16 @@ class ThreadRecapsResponse(BaseModel):
 
 class TranscriptGroupSummaryResponse(BaseModel):
     """Reply for the per-window transcript grouper. Reads a contiguous
-    block of streamer utterances and returns a single 1-2 sentence
-    observational summary. Empty string means "nothing summarisable in
-    this window" — the grouper persists silently and skips."""
+    block of streamer utterances + chat that happened during the same
+    window, and returns a 2-4 sentence observational recap. Empty
+    string means "nothing summarisable in this window" — the grouper
+    persists silently and skips.
 
-    summary: str = Field(default="", max_length=400)
+    Bumped 400 → 1200 chars: 400 was clipping multi-topic windows mid-
+    sentence on busy streams, and the dashboard's transcript strip
+    handles 2-4 sentence rows fine."""
+
+    summary: str = Field(default="", max_length=1200)
 
 
 # ---- engaging subjects (per-message extraction with sensitivity gate) ----

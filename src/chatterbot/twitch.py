@@ -53,6 +53,13 @@ class TwitchStatus:
     # Cached broadcaster id from /oauth2/validate — needed to call
     # /helix/channels by id without an extra lookup each poll.
     broadcaster_id: str | None = None
+    # The watched channel's login + Twitch-set display name. Populated
+    # from /helix/users at init and cached for the life of the service
+    # — both fields are stable on Twitch's side, so refreshing every
+    # poll is wasted budget. Used by LLM prompts so "the streamer"
+    # becomes "xQc" / etc. and by the dashboard nav header.
+    broadcaster_login: str | None = None
+    broadcaster_display_name: str | None = None
     # True when we skipped a poll because OBS confirmed the streamer is
     # offline. Helix would just answer "not live" anyway, so we save the
     # call (and the rate-limit budget).
@@ -90,9 +97,32 @@ class TwitchStatus:
         screenshot" instruction. Used by callers that also pass an
         image, where we want to head off "Valheim, judging by the
         graphics" hallucinations when Helix already named the game."""
+        # Streamer name is stable identity even when the channel goes
+        # offline mid-session, so we still emit at least the STREAMER
+        # NAME pin when we have it cached — keeps summaries reading
+        # "xQc said …" instead of falling back to "the streamer" the
+        # moment Helix flips to is_live=False or auto-pauses.
+        name = (
+            (self.broadcaster_display_name or "").strip()
+            or (self.broadcaster_login or "").strip()
+        )
         if not self.is_live:
-            return ""
+            if not name:
+                return ""
+            # Offline / auto-paused — still give the LLM the name pin.
+            # No game / title / viewer fields make sense when offline.
+            if authoritative:
+                return (
+                    f"STREAMER NAME: {name}\n"
+                    "(Refer to them by this name in summaries — "
+                    f"\"{name} said …\" rather than \"the streamer "
+                    "said …\". This name is from Twitch's live API.)"
+                    "\n\n"
+                )
+            return f"STREAMER: {name} (currently offline)\n\n"
         bits: list[str] = []
+        if name:
+            bits.append(f"streamer: {name}")
         if self.game_name:
             bits.append(f"playing/streaming: {self.game_name}")
         if self.title:
@@ -127,14 +157,21 @@ class TwitchStatus:
                 bits.append(f"live for {mins}m")
         if not bits:
             return ""
-        # Lead with a hard KNOWN GAME line when authoritative — vision
-        # models over-weight the screenshot, and burying the game name
-        # inside a paragraph of "channel context" lets them skim past
-        # it. A standalone all-caps line at the top of the prompt is
-        # much harder to ignore.
+        # Lead with hard STREAMER NAME / KNOWN GAME lines when
+        # authoritative — vision models over-weight the screenshot,
+        # and burying these inside a paragraph of "channel context"
+        # lets them skim past. Standalone all-caps lines at the top
+        # of the prompt are much harder to ignore.
         prefix = ""
+        if authoritative and name:
+            prefix += (
+                f"STREAMER NAME: {name}\n"
+                "(Refer to them by this name in summaries — \"xQc said …\" "
+                "rather than \"the streamer said …\". This name is from "
+                "Twitch's live API.)\n\n"
+            )
         if authoritative and self.game_name:
-            prefix = (
+            prefix += (
                 f"KNOWN GAME: {self.game_name}\n"
                 "(This game name comes from Twitch's live API and is "
                 "authoritative. The screenshot may LOOK like a "
@@ -163,6 +200,18 @@ class TwitchService:
         self._lock = asyncio.Lock()
         self._client_id: str | None = None
         self._broadcaster_id: str | None = None
+        # Cached broadcaster identity from /helix/users. Stable on
+        # Twitch's side so we resolve once at init and reuse.
+        self._broadcaster_login: str | None = None
+        self._broadcaster_display_name: str | None = None
+        # True when the configured `twitch_channel` matches the token
+        # owner — i.e. you ARE the streamer being observed, vs you're
+        # using your token to observe someone else's chat. Resolved
+        # in _init_client_id. Used to gate the OBS auto-pause: when
+        # observing someone else, OUR OBS state has nothing to do
+        # with whether THEIR channel is live, so we should keep
+        # polling Helix unconditionally.
+        self._self_streaming: bool = False
         self._last_logged_error: str | None = None
         # Optional OBS coupling — when present, the Helix poll is skipped
         # while OBS reports the streamer offline.
@@ -184,7 +233,20 @@ class TwitchService:
             # OBS-driven auto-pause: when OBS confirms the streamer is
             # offline, Helix would just answer is_live=false. Save the
             # call. Defaults to "not paused" on any uncertainty.
-            if self.obs is not None and self.obs.status.is_streamer_offline():
+            #
+            # Only valid when we're SELF-streaming. When observing
+            # someone else's channel, our local OBS state is unrelated
+            # to whether the watched channel is live, so the auto-pause
+            # would mistakenly suppress Helix polling for the entire
+            # session. Symptom: format_for_llm returns "" because
+            # is_live=False, no STREAMER NAME / KNOWN GAME pin makes
+            # it into the prompt, and the LLM falls back to "the
+            # streamer" + screenshot pixel guessing for the game.
+            if (
+                self._self_streaming
+                and self.obs is not None
+                and self.obs.status.is_streamer_offline()
+            ):
                 if not self._was_auto_paused:
                     logger.info(
                         "twitch: helix poll auto-paused (OBS reports offline)"
@@ -192,6 +254,9 @@ class TwitchService:
                     self._was_auto_paused = True
                 self._status = TwitchStatus(
                     enabled=True, is_live=False, auto_paused=True,
+                    broadcaster_id=self._broadcaster_id,
+                    broadcaster_login=self._broadcaster_login,
+                    broadcaster_display_name=self._broadcaster_display_name,
                     refreshed_at=time.time(),
                 )
                 await asyncio.sleep(self.POLL_SECONDS)
@@ -246,14 +311,28 @@ class TwitchService:
                 #     (the bug we just fixed); resolve the channel's
                 #     own id via /helix/users?login=<channel>.
                 self._broadcaster_id = None
+                self._broadcaster_login = None
+                self._broadcaster_display_name = None
                 self_streaming = (
                     bool(login)
                     and bool(token_owner_login)
                     and login.lower() == token_owner_login.lower()
                 )
-                if self_streaming:
+                self._self_streaming = self_streaming
+                # Always hit /helix/users now — even in the
+                # self-streaming case the validate response gives us
+                # only `login`, not `display_name`. The display name
+                # is what the LLM should call the streamer in
+                # summaries ("xQc reports …" not "the streamer
+                # reports …"). One call at init, cached for the life
+                # of the service.
+                user_lookup_params: dict[str, str] | None = None
+                if self_streaming and token_owner_id:
                     self._broadcaster_id = token_owner_id
+                    user_lookup_params = {"id": token_owner_id}
                 elif login:
+                    user_lookup_params = {"login": login}
+                if user_lookup_params:
                     try:
                         r2 = await client.get(
                             "https://api.twitch.tv/helix/users",
@@ -261,19 +340,36 @@ class TwitchService:
                                 "Authorization": f"Bearer {token}",
                                 "Client-Id": cid,
                             },
-                            params={"login": login},
+                            params=user_lookup_params,
                         )
                         r2.raise_for_status()
                         users = (r2.json() or {}).get("data") or []
                         if users:
-                            self._broadcaster_id = users[0].get("id") or None
+                            u0 = users[0]
+                            if not self._broadcaster_id:
+                                self._broadcaster_id = u0.get("id") or None
+                            self._broadcaster_login = (
+                                u0.get("login") or None
+                            )
+                            self._broadcaster_display_name = (
+                                u0.get("display_name") or None
+                            )
                     except Exception:
                         # Non-fatal: we just won't get content
-                        # classification labels. Game / title / tags
-                        # all still come from /helix/streams.
+                        # classification labels or the display name.
+                        # Game / title / tags all still come from
+                        # /helix/streams; the LLM falls back to the
+                        # configured channel login.
                         logger.exception(
-                            "twitch: helix /users lookup for %r failed", login,
+                            "twitch: helix /users lookup for %r failed",
+                            user_lookup_params,
                         )
+                # Last-resort fallback for the login: the configured
+                # channel name. Display name has no further fallback —
+                # the format_for_llm helper substitutes the login when
+                # display name is missing.
+                if not self._broadcaster_login and login:
+                    self._broadcaster_login = login
 
             # One log line that makes the relationship obvious — the
             # `validated as X` phrasing was confusing when the token
@@ -319,6 +415,8 @@ class TwitchService:
                 self._status = TwitchStatus(
                     enabled=True, error=err,
                     broadcaster_id=self._broadcaster_id,
+                    broadcaster_login=self._broadcaster_login,
+                    broadcaster_display_name=self._broadcaster_display_name,
                     refreshed_at=time.time(),
                 )
                 return
@@ -328,6 +426,8 @@ class TwitchService:
                 self._status = TwitchStatus(
                     enabled=True, is_live=False,
                     broadcaster_id=self._broadcaster_id,
+                    broadcaster_login=self._broadcaster_login,
+                    broadcaster_display_name=self._broadcaster_display_name,
                     refreshed_at=time.time(),
                 )
                 return
@@ -379,6 +479,8 @@ class TwitchService:
                 tags=stream_tags or None,
                 content_classification_labels=content_labels or None,
                 broadcaster_id=self._broadcaster_id,
+                broadcaster_login=self._broadcaster_login,
+                broadcaster_display_name=self._broadcaster_display_name,
                 refreshed_at=time.time(),
             )
 
