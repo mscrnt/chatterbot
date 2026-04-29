@@ -115,7 +115,18 @@
     </button>
   </nav>
 
-  <form method="post" action="/settings" class="space-y-4">
+  {# `novalidate`: the server-side _coerce() in config.py already
+     clamps bounds and falls back to defaults on bad input, so we
+     don't need browser-side HTML5 form validation blocking the
+     entire submit when ONE field has an out-of-grid value. The
+     real-world bug this fixes: a number field's step + default
+     mismatch (e.g. step=5 with default=60 and min=1) makes every
+     submit fail with "invalid form control … is not focusable"
+     because the field is inside a closed <details> section so
+     the browser can't surface the error. The streamer ends up
+     unable to save anything until the offending field is fixed.
+     Disable browser validation, trust the server. #}
+  <form method="post" action="/settings" class="space-y-4" novalidate>
     <input type="hidden" name="_tab" :value="tab">
 
     {% for s in sections %}

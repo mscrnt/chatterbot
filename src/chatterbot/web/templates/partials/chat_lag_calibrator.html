@@ -39,16 +39,20 @@
       set it by hand, or toggle auto-calibration off entirely.
     </p>
 
-    {# Manual override + auto-tune toggle row. Both POST to the
-       /settings/chat-lag/save endpoint which re-renders this same
-       partial, so the form-stuck bug from the lookback dropdown
-       can't repeat here — the auto-tune checkbox uses hx-vals to
-       pin the value in the URL, and the manual input has its own
-       Save button. #}
-    <form class="flex flex-col sm:flex-row sm:items-center gap-2"
-          hx-post="/settings/chat-lag/save"
-          hx-target="#chat-lag-calibrator-root"
-          hx-swap="outerHTML">
+    {# Manual override + auto-tune toggle row.
+
+       NOTE: this used to be a <form> element, but the calibrator is
+       embedded inside the outer settings <form>. Nested forms are
+       invalid HTML — browsers silently close the OUTER form at the
+       inner one's start tag, which orphaned the outer "Save" button
+       and made every settings save silently do nothing. Replaced
+       with a <div>; the HTMX button uses hx-include to gather the
+       inputs by id.
+
+       Inputs all live inside #chat-lag-controls so hx-include picks
+       them up cleanly. #}
+    <div id="chat-lag-controls"
+         class="flex flex-col sm:flex-row sm:items-center gap-2">
       <label class="inline-flex items-center gap-2 text-xs text-muted">
         Manual override:
         <input type="number" name="chat_lag_seconds"
@@ -65,12 +69,16 @@
                class="h-4 w-4 accent-accent">
         Auto-calibrate every ~10 min
       </label>
-      <button type="submit"
+      <button type="button"
+              hx-post="/settings/chat-lag/save"
+              hx-include="#chat-lag-controls"
+              hx-target="#chat-lag-calibrator-root"
+              hx-swap="outerHTML"
               class="tap ml-auto inline-flex items-center justify-center gap-2 px-3 rounded bg-surface-raised hover:bg-subtle text-primary text-sm whitespace-nowrap">
         <i class="fa-solid fa-floppy-disk text-xs"></i>
         Save
       </button>
-    </form>
+    </div>
 
     {# Calibration runner controls — separate row from the override
        so it's clear these are different actions. #}

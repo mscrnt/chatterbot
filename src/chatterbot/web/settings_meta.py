@@ -370,11 +370,15 @@ FIELDS: dict[str, dict[str, Any]] = {
     },
     "screenshot_jpeg_quality": {
         "label": "JPEG quality",
-        "tooltip": "Compression quality for stored screenshots (1-100).",
+        "tooltip": "Compression quality for stored screenshots (5-100).",
         "help": "Tradeoff: lower = smaller files, blurrier. Higher = bigger files, sharper. Default 60 (good middle). 80+ is overkill at the size we capture.",
         "type": "number",
-        "min": 1, "max": 100, "step": 5,
-        "suffix": "1-100",
+        # min must be on the step grid for HTML form validity. Default
+        # is 60 with step=5, so min=5 keeps the grid aligned (was 1,
+        # which made every default value fail browser validation and
+        # blocked the entire settings form from saving).
+        "min": 5, "max": 100, "step": 5,
+        "suffix": "5-100",
     },
     "screenshot_width": {
         "label": "Screenshot width",
