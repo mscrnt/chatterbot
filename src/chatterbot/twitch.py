@@ -76,6 +76,83 @@ class TwitchStatus:
         except (TypeError, ValueError):
             return 0
 
+    def format_for_llm(self, *, authoritative: bool = False) -> str:
+        """Render this status as a CHANNEL CONTEXT block ready to
+        prepend to an LLM prompt. Single source of truth shared by
+        every "informed" call site (talking points, engaging subjects,
+        thread recaps, transcript group summaries) so the LLM sees the
+        same Helix snapshot in the same shape regardless of caller.
+
+        Returns "" when offline / no signals — caller can concat
+        unconditionally.
+
+        `authoritative=True` adds an explicit "do NOT guess from the
+        screenshot" instruction. Used by callers that also pass an
+        image, where we want to head off "Valheim, judging by the
+        graphics" hallucinations when Helix already named the game."""
+        if not self.is_live:
+            return ""
+        bits: list[str] = []
+        if self.game_name:
+            bits.append(f"playing/streaming: {self.game_name}")
+        if self.title:
+            bits.append(f"stream title: {self.title}")
+        if self.tags:
+            bits.append("tags: " + ", ".join(self.tags[:8]))
+        if self.content_classification_labels:
+            bits.append(
+                "content labels: "
+                + ", ".join(self.content_classification_labels)
+            )
+        viewers = int(self.viewer_count or 0)
+        if viewers > 0:
+            # Coarse tier so the LLM gets scale signal without
+            # overfitting to a specific count.
+            if viewers < 25:
+                tier = f"{viewers} viewers (small chat)"
+            elif viewers < 200:
+                tier = f"{viewers} viewers (medium)"
+            elif viewers < 1000:
+                tier = f"{viewers} viewers (busy)"
+            else:
+                tier = f"{viewers} viewers (very busy — chat is fast)"
+            bits.append(tier)
+        uptime = self.stream_uptime_seconds
+        if uptime > 0:
+            hours, rem = divmod(uptime, 3600)
+            mins = rem // 60
+            if hours:
+                bits.append(f"live for {hours}h {mins}m")
+            else:
+                bits.append(f"live for {mins}m")
+        if not bits:
+            return ""
+        # Lead with a hard KNOWN GAME line when authoritative — vision
+        # models over-weight the screenshot, and burying the game name
+        # inside a paragraph of "channel context" lets them skim past
+        # it. A standalone all-caps line at the top of the prompt is
+        # much harder to ignore.
+        prefix = ""
+        if authoritative and self.game_name:
+            prefix = (
+                f"KNOWN GAME: {self.game_name}\n"
+                "(This game name comes from Twitch's live API and is "
+                "authoritative. The screenshot may LOOK like a "
+                "different game — IGNORE THAT and use this name.)\n\n"
+            )
+        if authoritative:
+            header = (
+                "CHANNEL CONTEXT (authoritative — from Twitch's live "
+                "API. Use these names directly; do NOT guess the game "
+                "or title from the screenshot)"
+            )
+        else:
+            header = (
+                "CHANNEL CONTEXT (the streamer is currently live; "
+                "chat may reference this)"
+            )
+        return prefix + f"{header}: " + " · ".join(bits) + "\n\n"
+
 
 class TwitchService:
     POLL_SECONDS = 60

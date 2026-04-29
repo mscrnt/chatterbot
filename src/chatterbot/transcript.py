@@ -112,6 +112,7 @@ def _utterance_mentions_chatter(utterance: str, names: list[str]) -> bool:
     return False
 
 from .config import Settings
+from .insights import INFORMED_NUM_CTX
 from .llm.ollama_client import OllamaClient
 from .repo import ChatterRepo
 
@@ -150,12 +151,17 @@ class TranscriptService:
 
     def __init__(
         self, repo: ChatterRepo, llm: OllamaClient, settings: Settings,
-        *, obs=None,
+        *, obs=None, twitch_status=None,
     ):
         self.repo = repo
         self.llm = llm
         self.settings = settings
         self.obs = obs  # OBSStatusService — used for screenshot capture
+        # Optional[TwitchService] — feeds the live Helix snapshot
+        # (game_name, title, viewer_count, etc.) into the group-summary
+        # prompt as authoritative channel context, so the LLM stops
+        # guessing the game from the screenshot pixels.
+        self.twitch_status = twitch_status
         self._buffer = _IngestBuffer()
         self._lock = asyncio.Lock()
         self._model = None  # lazy-loaded WhisperModel
@@ -775,7 +781,27 @@ When in doubt, return NO match. Empty `matches` list is the expected, common out
     # 1-2 sentence observational line for the group.
     # =========================================================
 
-    GROUP_SUMMARY_NUM_CTX = 8192
+    # Bumped to INFORMED_NUM_CTX — the prompt now carries the full
+    # CHANNEL CONTEXT block (game / title / tags / viewer tier /
+    # uptime) plus up to ~400 utterance lines plus a base64 image
+    # payload. 8k truncated long groups; 32k gives headroom.
+    GROUP_SUMMARY_NUM_CTX = INFORMED_NUM_CTX
+
+    def _build_channel_context(self) -> str:
+        """Delegate to TwitchStatus.format_for_llm with
+        authoritative=True so the group-summary prompt gets the full
+        Helix snapshot (game, title, tags, content labels, viewer
+        tier, uptime) and explicit "do not guess from screenshot"
+        framing. Returns "" when the Helix poll isn't connected."""
+        if self.twitch_status is None:
+            return ""
+        ts = getattr(self.twitch_status, "status", None)
+        if ts is None:
+            return ""
+        try:
+            return ts.format_for_llm(authoritative=True)
+        except AttributeError:
+            return ""
     GROUP_SUMMARY_TRUNCATE_PER_CHUNK = 200
 
     GROUP_SUMMARY_SYSTEM = """You're labeling a window of streamer voice transcripts on a Twitch dashboard. An attached image shows what was on the streamer's OBS scene during this same window — use it as SILENT CONTEXT, not as content.
@@ -793,6 +819,12 @@ Write ONE 1-2 sentence OBSERVATIONAL summary of WHAT THE STREAMER SAID. The audi
   - name the game / app / scene if it's relevant to what was said,
   - back up an ambiguous word the streamer used.
 
+GAME / APP IDENTIFICATION (THIS IS THE #1 RULE — read it twice):
+- The prompt may begin with a "KNOWN GAME: <name>" line. If present, that name comes from Twitch's live API and IS THE GAME. Use it verbatim.
+- The screenshot will sometimes LOOK like a different game (similar art style, similar UI, the streamer is on a menu screen, the cam is overlapping gameplay). IGNORE THAT. The Twitch API knows what game is on the channel; the screenshot is a single frame of unknown context. If they disagree, the API wins. Always.
+- Never write "judging by the graphics", "appears to be", "looks like Fall Guys / Valheim / etc.", or any phrasing that implies you're guessing the game from pixels.
+- When NO "KNOWN GAME:" line is present, you may infer the game from the screenshot — but state it plainly ("playing Valheim"), not as a guess.
+
 NEVER describe the image directly. Do NOT mention:
   - the image itself ("the screenshot shows", "in the image"),
   - the image format ("four-panel grid", "2x2 grid", "panel", "thumbnail"),
@@ -800,12 +832,14 @@ NEVER describe the image directly. Do NOT mention:
   - the layout ("alongside a UI displaying", "next to the cam").
 
 Bad example (your output keeps doing this — STOP):
+  "The streamer is playing a co-op game (Valheim, judging by the graphics) and..."
   "In a four-panel grid of the game Parkitect, the streamer explores a park scene while discussing digital tickets."
 
 Good example (image used silently to identify the game; summary about what was said):
   "The streamer talks about a new feature in Parkitect that lets guests buy tickets in advance."
 
 HARD RULES:
+- KNOWN GAME line, if present, OVERRIDES the screenshot. Period.
 - Audio is primary. Lead with what was said. Use the image only to fill in nouns the streamer left implicit.
 - If you can't tell the image is adding anything, just summarise the audio alone.
 - No advice ("you should…").
@@ -836,6 +870,115 @@ Reply with `summary` = the line (or empty string).
             except Exception:
                 logger.exception("transcript: group_loop iteration failed")
 
+    async def build_group_summary_prompt(
+        self, chunks: list, *, include_image: bool = True,
+    ) -> dict:
+        """Assemble the exact prompt + screenshot grid + system prompt
+        the group-summary LLM call uses, without firing the LLM. Used
+        by `_run_group_summary` (the live caller) and by the debug
+        route `/debug/transcript-prompt` (so the streamer can inspect
+        what the model is actually being told).
+
+        Returns a dict so the debug route can render structured fields:
+            {
+              "system_prompt": str,
+              "user_prompt": str,
+              "screenshot_count": int,
+              "screenshot_grid_b64": str | None,  # only when include_image
+              "channel_context": str,             # the rendered block
+              "known_game": str,                  # "" when Helix offline
+              "model": str,
+              "num_ctx": int,
+              "think": bool,
+            }
+        """
+        # Per-utterance lines — clip each utterance defensively.
+        lines = [
+            f"  [{c.ts[11:16] if len(c.ts) >= 16 else c.ts}] "
+            f"{c.text[:self.GROUP_SUMMARY_TRUNCATE_PER_CHUNK]}"
+            for c in chunks
+        ]
+
+        # Screenshots in the chunk window — up to `screenshot_grid_max`
+        # stitched into a 2x2 grid. Skipped when include_image=False
+        # (the debug route can ask for prompt-only).
+        grid_b64: str | None = None
+        screenshot_count = 0
+        if include_image and chunks:
+            try:
+                shots = await asyncio.to_thread(
+                    self.repo.screenshots_in_range,
+                    chunks[0].ts, chunks[-1].ts,
+                    max_count=int(getattr(self.settings, "screenshot_grid_max", 4)),
+                )
+            except Exception:
+                logger.exception("transcript: screenshots_in_range failed")
+                shots = []
+            if shots:
+                from pathlib import Path
+                data_dir = Path(self.settings.db_path).parent
+                abs_paths = [str(data_dir / s.path) for s in shots]
+                try:
+                    grid_bytes = await asyncio.to_thread(_stitch_grid, abs_paths)
+                except Exception:
+                    logger.exception("transcript: stitch_grid failed")
+                    grid_bytes = None
+                if grid_bytes:
+                    import base64 as _b64
+                    grid_b64 = _b64.b64encode(grid_bytes).decode("ascii")
+                    screenshot_count = len(shots)
+
+        # Known game from Helix — pinned into the image_note so the
+        # constraint sits right next to the image reference.
+        known_game = ""
+        try:
+            ts = getattr(self.twitch_status, "status", None)
+            if ts is not None and getattr(ts, "is_live", False):
+                known_game = (getattr(ts, "game_name", None) or "").strip()
+        except Exception:
+            known_game = ""
+        if screenshot_count:
+            game_pin = (
+                f" The KNOWN GAME is {known_game!r} (from the Twitch "
+                f"API at the top of the prompt). DO NOT rename it based "
+                f"on what the image looks like — even if the screenshot "
+                f"looks like a different game, the API is authoritative."
+            ) if known_game else ""
+            image_note = (
+                "\n\nAn image is attached showing what was on screen "
+                "during this window. Use it ONLY as silent context: "
+                "resolve vague nouns the streamer used, verify an "
+                "ambiguous word. Do NOT describe the image, its layout, "
+                "or mention that it's attached. The summary should "
+                "read as if you only heard the audio, with the image "
+                "silently helping you understand it." + game_pin
+            )
+        else:
+            image_note = ""
+
+        channel_context = self._build_channel_context()
+        user_prompt = (
+            channel_context
+            + f"STREAMER UTTERANCES ({len(chunks)} lines, "
+            f"oldest first):\n"
+            + "\n".join(lines)
+            + image_note
+            + "\n\nReturn ONE observational `summary` line, or empty "
+            "string if there's nothing coherent to summarise."
+        )
+
+        return {
+            "system_prompt": self.GROUP_SUMMARY_SYSTEM,
+            "user_prompt": user_prompt,
+            "screenshot_count": screenshot_count,
+            "screenshot_grid_b64": grid_b64,
+            "channel_context": channel_context,
+            "known_game": known_game,
+            "model": getattr(self.llm, "model", ""),
+            "num_ctx": self.GROUP_SUMMARY_NUM_CTX,
+            "think": True,
+        }
+
     async def _run_group_summary(self) -> int:
         """One pass — pull all chunks > last group's last_chunk_id,
         summarise, persist. Returns number of groups created (0 or 1)."""
@@ -851,59 +994,31 @@ Reply with `summary` = the line (or empty string).
         if len(chunks) < min_chunks:
             return 0
 
-        # Build the prompt — clip each utterance defensively.
-        lines = [
-            f"  [{c.ts[11:16] if len(c.ts) >= 16 else c.ts}] "
-            f"{c.text[:self.GROUP_SUMMARY_TRUNCATE_PER_CHUNK]}"
-            for c in chunks
-        ]
+        bundle = await self.build_group_summary_prompt(chunks)
+        prompt = bundle["user_prompt"]
+        grid_b64 = bundle["screenshot_grid_b64"]
+        screenshot_count = bundle["screenshot_count"]
+        known_game = bundle["known_game"]
+        channel_context = bundle["channel_context"]
 
-        # Pull screenshots in this window's time range and stitch up to
-        # `screenshot_grid_max` into a 2x2 grid. The multimodal LLM gets
-        # this image alongside the transcript text — visual context for
-        # the audio. No screenshots? Pure text call as before.
-        grid_b64 = None
-        screenshot_count = 0
-        try:
-            shots = await asyncio.to_thread(
-                self.repo.screenshots_in_range,
-                chunks[0].ts, chunks[-1].ts,
-                max_count=int(getattr(self.settings, "screenshot_grid_max", 4)),
+        # Diagnostic — log whether the LLM is going in with the
+        # KNOWN GAME pin or not, plus screenshot count. When the LLM
+        # mis-identifies a game, this is the first place to look:
+        #   - "no helix" → twitch_status not wired or offline
+        #   - "no game"  → Helix is up but game_name missing
+        #   - "game=X"   → LLM was told and ignored it (prompt issue)
+        if logger.isEnabledFor(logging.INFO):
+            if not channel_context:
+                helix_state = "no helix"
+            elif known_game:
+                helix_state = f"game={known_game!r}"
+            else:
+                helix_state = "no game"
+            logger.info(
+                "transcript group summary: %d chunks, %d screenshot(s), "
+                "%s, prompt=%d chars",
+                len(chunks), screenshot_count, helix_state, len(prompt),
             )
-        except Exception:
-            logger.exception("transcript: screenshots_in_range failed")
-            shots = []
-        if shots:
-            from pathlib import Path
-            data_dir = Path(self.settings.db_path).parent
-            abs_paths = [str(data_dir / s.path) for s in shots]
-            try:
-                grid_bytes = await asyncio.to_thread(_stitch_grid, abs_paths)
-            except Exception:
-                logger.exception("transcript: stitch_grid failed")
-                grid_bytes = None
-            if grid_bytes:
-                import base64 as _b64
-                grid_b64 = _b64.b64encode(grid_bytes).decode("ascii")
-                screenshot_count = len(shots)
-
-        image_note = (
-            "\n\nAn image is attached showing what was on screen during this "
-            "window. Use it ONLY as silent context: identify the game/app, "
-            "resolve vague nouns the streamer used, verify an ambiguous word. "
-            "Do NOT describe the image, its layout, or mention that it's "
-            "attached. The summary should read as if you only heard the "
-            "audio, with the image silently helping you understand it."
-        ) if screenshot_count else ""
-
-        prompt = (
-            f"STREAMER UTTERANCES ({len(chunks)} lines, "
-            f"oldest first):\n"
-            + "\n".join(lines)
-            + image_note
-            + "\n\nReturn ONE observational `summary` line, or empty "
-            "string if there's nothing coherent to summarise."
-        )
 
         try:
             # think=True — group summary runs after a window of audio

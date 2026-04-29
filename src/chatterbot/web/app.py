@@ -193,8 +193,14 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     insights = InsightsService(repo, llm, settings, twitch_status=twitch_status)
     # Real-time transcript service. Owns the whisper model (lazy-loaded
     # on first audio chunk) + match-to-card cache. No-op when disabled.
+    # Takes twitch_status so the group-summary call can prefix the
+    # prompt with authoritative CHANNEL CONTEXT — stops the LLM from
+    # writing "Valheim, judging by the graphics" when the Helix poll
+    # already knows the game.
     from ..transcript import TranscriptService
-    transcript_service = TranscriptService(repo, llm, settings, obs=obs_status)
+    transcript_service = TranscriptService(
+        repo, llm, settings, obs=obs_status, twitch_status=twitch_status,
+    )
     # Wire the talking-points provider so the transcript matcher can
     # auto-address them when the streamer speaks about them.
     transcript_service._talking_points_provider = lambda: (
@@ -2294,6 +2300,73 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "matched_card": matched_card,
             },
         )
+
+    @app.get("/debug/transcript-prompt")
+    async def debug_transcript_prompt(
+        group_id: int | None = Query(
+            None,
+            description="Inspect a specific past group; default = next "
+            "(unsummarised) chunks the LLM would see right now.",
+        ),
+        include_image: bool = Query(
+            False,
+            description="Set true to also stitch + base64 the screenshot "
+            "grid. Off by default since the b64 payload is large.",
+        ),
+    ):
+        """Inspect what the group-summary LLM is actually being told.
+
+        Default: shows the prompt that WOULD be sent for the next pass
+        (unsummarised chunks past the watermark). Pass `?group_id=N`
+        to inspect what was sent for an existing group.
+
+        Useful for triaging "the LLM keeps calling it the wrong game"
+        bugs — if the response shows `known_game=""` or
+        `channel_context=""`, the Helix poll isn't wired or offline,
+        not a prompting issue. If `known_game="Log Riders"` and the
+        LLM still says Fall Guys, that's purely a vision-bias problem
+        and the prompt itself is fine.
+        """
+        if group_id is not None:
+            grp = await asyncio.to_thread(repo.get_transcript_group, group_id)
+            if grp is None:
+                raise HTTPException(status_code=404, detail="group not found")
+            chunks = await asyncio.to_thread(
+                repo.transcript_chunks_in_id_range,
+                grp.first_chunk_id, grp.last_chunk_id,
+            )
+            source = f"group_id={group_id}"
+        else:
+            watermark = await asyncio.to_thread(
+                repo.latest_transcript_group_last_chunk_id,
+            )
+            chunks = await asyncio.to_thread(
+                repo.list_transcripts_after_id, watermark, limit=400,
+            )
+            source = f"unsummarised after watermark={watermark}"
+
+        if not chunks:
+            return JSONResponse({
+                "ok": False,
+                "reason": "no chunks to summarise",
+                "source": source,
+            })
+
+        bundle = await transcript_service.build_group_summary_prompt(
+            chunks, include_image=include_image,
+        )
+        # Drop the (large) base64 image payload from the JSON response
+        # unless explicitly requested. Length is shown either way so
+        # the streamer sees "yes, an image is being sent."
+        grid_b64 = bundle.pop("screenshot_grid_b64", None)
+        bundle["screenshot_grid_b64_len"] = len(grid_b64) if grid_b64 else 0
+        if include_image and grid_b64:
+            bundle["screenshot_grid_b64"] = grid_b64
+        bundle["source"] = source
+        bundle["chunk_count"] = len(chunks)
+        bundle["chunk_ids"] = [chunks[0].id, chunks[-1].id]
+        bundle["chunk_ts_range"] = [chunks[0].ts, chunks[-1].ts]
+        return JSONResponse(bundle)
 
     @app.get("/transcript", response_class=HTMLResponse)
     async def transcript_partial(

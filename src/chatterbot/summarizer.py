@@ -175,10 +175,20 @@ RULES:
 
 
 class Summarizer:
-    def __init__(self, repo: ChatterRepo, llm: OllamaClient, settings: Settings):
+    def __init__(
+        self, repo: ChatterRepo, llm: OllamaClient, settings: Settings,
+        *, twitch_status=None,
+    ):
         self.repo = repo
         self.llm = llm
         self.settings = settings
+        # Optional[TwitchService] — when wired, the topic-snapshot call
+        # prefixes its prompt with the live Helix snapshot (game,
+        # title, tags, viewer tier, uptime). Lets the LLM ground topic
+        # labels against game-specific jargon. Bot process owns its
+        # own poller (separate from the dashboard's) so the snapshot
+        # is fresh during long sessions without cross-process coupling.
+        self.twitch_status = twitch_status
         self._user_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._inflight: set[str] = set()
         # Topic threading runs as a side-effect of each new snapshot. Keep a
@@ -707,14 +717,35 @@ RULES:
         last_id = rows[-1][0]
         formatted = "\n".join(f"{name}: {content}" for _, name, content in rows)
 
+        # Channel context (game / title / tags / viewer tier / uptime)
+        # from the live Helix poll, when wired. Empty string when the
+        # bot starts without a TwitchService — caller can concat
+        # unconditionally. authoritative=False since topic snapshots
+        # don't ride with a screenshot (text-only call).
+        channel_context = ""
+        if self.twitch_status is not None:
+            ts = getattr(self.twitch_status, "status", None)
+            if ts is not None:
+                try:
+                    channel_context = ts.format_for_llm(authoritative=False)
+                except AttributeError:
+                    channel_context = ""
+
         try:
-            # think=True — channel-wide topic snapshots feed into thread
-            # clustering, so getting the labels right matters more than
-            # finishing fast.
+            # think=True + INFORMED_NUM_CTX — channel-wide topic
+            # snapshots feed into thread clustering, so getting the
+            # labels right matters more than finishing fast. The
+            # 32k floor lets a hot chat fit the whole `recent_messages_for_topics`
+            # window without truncating.
+            from .insights import INFORMED_NUM_CTX
             response = await self.llm.generate_structured(
-                prompt=f"Recent chat (oldest first):\n{formatted}",
+                prompt=(
+                    channel_context
+                    + f"Recent chat (oldest first):\n{formatted}"
+                ),
                 system_prompt=TOPICS_SYSTEM,
                 response_model=TopicsResponse,
+                num_ctx=INFORMED_NUM_CTX,
                 think=True,
             )
         except ValidationError:

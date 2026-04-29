@@ -33,6 +33,16 @@ from .repo import ChatterRepo
 logger = logging.getLogger(__name__)
 
 
+# Shared `num_ctx` floor for the four "informed" streamer-facing LLM calls:
+# talking points, engaging subjects, thread recaps, and topic snapshots.
+# These calls assemble the data the streamer reads on the dashboard, so
+# they prioritise accuracy over latency — wide context (game, transcript,
+# notes, chat) plus think=True. 32k handles a hot chat plus all the
+# context blocks without truncation; Qwen 3.5 / Llama 3.x families all
+# accept it. The Ollama think-mode floor is 16k; we double it here.
+INFORMED_NUM_CTX = 32768
+
+
 @dataclass
 class _PersistentCluster:
     """One persistent engaging-subject cluster carried across refreshes
@@ -63,7 +73,13 @@ You'll get a numbered list of active chatters, each with:
   - their username
   - extracted notes (facts they've previously stated about themselves)
   - a few of their most recent messages
-  - optionally, the current channel-wide topic context
+
+You may also receive optional context blocks (use as silent grounding,
+do not parrot back to the streamer):
+  - CHANNEL CONTEXT — what the streamer is playing / streaming right now
+  - STREAMER VOICE — a recent transcript of what the streamer just said
+  - Current channel-wide topics — recent chat topics
+  - An attached screenshot — what's on screen right now
 
 For each chatter, produce AT MOST ONE short conversation-starter the streamer could use. Keep each line under 25 words. Skipping is the expected default — only emit a hook when it's clearly grounded.
 
@@ -126,7 +142,15 @@ class InsightsService:
 
     DEFAULT_REFRESH_SECONDS = 180  # 3 min
     ACTIVE_WINDOW_MINUTES = 10
-    RECENT_MESSAGES_PER_USER = 6
+    # Bumped from 6 — talking points is the highest-leverage call on
+    # the dashboard, and INFORMED_NUM_CTX gives us the headroom to
+    # carry richer per-chatter recent-message context without
+    # truncating the prompt.
+    RECENT_MESSAGES_PER_USER = 12
+    # Active-chatter cap fed to the LLM. Bumped from 20 to 25 so a
+    # busier chat still hits the talking-points pass without dropping
+    # the long tail.
+    ACTIVE_CHATTER_CAP = 25
 
     def __init__(
         self, repo: ChatterRepo, llm: OllamaClient, settings: Settings,
@@ -165,6 +189,85 @@ class InsightsService:
     def subjects_cache(self) -> EngagingSubjectsCache:
         return self._subjects_cache
 
+    async def _latest_screenshot_grid(
+        self, window_minutes: int = 10,
+    ) -> str | None:
+        """Build a base64 2x2 grid of the most recent OBS screenshots so
+        the multimodal LLM has visual game context for talking-points,
+        engaging-subjects, and thread-recap calls.
+
+        Returns None when:
+          - screenshot capture is disabled (interval = 0)
+          - no shots in the last `window_minutes`
+          - Pillow isn't installed / stitching fails
+
+        Vision-incapable models silently ignore `images=`; the cost is
+        only the wasted base64 payload, not a hard error. We still gate
+        on `screenshot_interval_seconds` so non-whisper installs don't
+        pay it at all."""
+        try:
+            interval = int(getattr(
+                self.settings, "screenshot_interval_seconds", 0,
+            ))
+        except (TypeError, ValueError):
+            interval = 0
+        if interval <= 0:
+            return None
+        try:
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        except ImportError:
+            return None
+        end = _dt.now(_tz.utc)
+        start = end - _td(minutes=max(1, int(window_minutes)))
+        try:
+            shots = await asyncio.to_thread(
+                self.repo.screenshots_in_range,
+                start.isoformat(timespec="seconds"),
+                end.isoformat(timespec="seconds"),
+                max_count=int(getattr(self.settings, "screenshot_grid_max", 4)),
+            )
+        except Exception:
+            logger.exception("informed-call: screenshots_in_range failed")
+            return None
+        if not shots:
+            return None
+        from pathlib import Path
+        data_dir = Path(self.settings.db_path).parent
+        abs_paths = [str(data_dir / s.path) for s in shots]
+        try:
+            # Reuse the transcript service's stitcher — same 960x540
+            # JPEG output the group-summary call uses, so the LLM sees
+            # screenshots in a consistent format across all calls.
+            from .transcript import _stitch_grid
+            grid_bytes = await asyncio.to_thread(_stitch_grid, abs_paths)
+        except Exception:
+            logger.exception("informed-call: stitch_grid failed")
+            return None
+        if not grid_bytes:
+            return None
+        import base64 as _b64
+        return _b64.b64encode(grid_bytes).decode("ascii")
+
+    async def _latest_transcript_summary(self) -> str:
+        """Most recent transcript group summary, formatted as a prompt
+        block. Empty string when whisper is disabled / no groups yet,
+        so callers can concat unconditionally."""
+        try:
+            groups = await asyncio.to_thread(
+                self.repo.list_transcript_groups, limit=1,
+            )
+        except Exception:
+            return ""
+        if not groups or not groups[0].summary:
+            return ""
+        return (
+            "STREAMER VOICE (most recent ~60s of audio summarised — "
+            "what the streamer just said out loud; chat may be "
+            "reacting to this):\n  "
+            + groups[0].summary.strip()
+            + "\n\n"
+        )
+
     async def refresh_loop(self, interval_seconds: int | None = None) -> None:
         interval = interval_seconds or self.DEFAULT_REFRESH_SECONDS
         # First pass after a small delay so the dashboard finishes booting.
@@ -190,7 +293,7 @@ class InsightsService:
             active = await asyncio.to_thread(
                 self.repo.list_active_chatters,
                 self.ACTIVE_WINDOW_MINUTES,
-                20,
+                self.ACTIVE_CHATTER_CAP,
             )
             if not active:
                 self._cache = InsightsCache(
@@ -240,17 +343,44 @@ class InsightsService:
                 if topics else ""
             )
 
+            # Informed-call enrichment: what's the streamer playing,
+            # what did they just say, and what's on screen. All three
+            # are best-effort and skip silently when unavailable.
+            # authoritative=True since we ALSO pass a screenshot — keeps
+            # the LLM from second-guessing the Helix-supplied game name.
+            channel_context = self._build_channel_context(authoritative=True)
+            transcript_block = await self._latest_transcript_summary()
+            grid_b64 = await self._latest_screenshot_grid(
+                window_minutes=self.ACTIVE_WINDOW_MINUTES,
+            )
+            image_note = (
+                "\n\nAn image is attached showing what is currently on "
+                "screen. Use it ONLY as silent context (identify the "
+                "game/app, ground vague chatter references). Do NOT "
+                "describe the image or mention that it's attached."
+            ) if grid_b64 else ""
+
             prompt = (
-                f"{topic_block}"
-                f"Active chatters (last {self.ACTIVE_WINDOW_MINUTES} minutes):\n\n"
+                channel_context
+                + transcript_block
+                + topic_block
+                + f"Active chatters (last {self.ACTIVE_WINDOW_MINUTES} minutes):\n\n"
                 + "\n\n".join(blocks)
+                + image_note
             )
 
             try:
+                # think=True + INFORMED_NUM_CTX + image — talking points
+                # is the single most-read line on the dashboard while
+                # the streamer is live, so we spend the latency budget
+                # for accuracy. Cadence (~3 min) absorbs the cost.
                 response = await self.llm.generate_structured(
                     prompt=prompt,
                     system_prompt=TALKING_POINTS_SYSTEM,
                     response_model=TalkingPointsResponse,
+                    num_ctx=INFORMED_NUM_CTX,
+                    images=[grid_b64] if grid_b64 else None,
+                    think=True,
                 )
             except ValidationError as e:
                 logger.exception("talking-points validation failed")
@@ -290,7 +420,7 @@ class InsightsService:
     # as the primary "what's happening" surface.
     # =========================================================
 
-    THREAD_RECAP_NUM_CTX = 16384
+    THREAD_RECAP_NUM_CTX = INFORMED_NUM_CTX
     THREAD_RECAP_TRUNCATE_PER_MSG = 200
 
     THREAD_RECAP_SYSTEM = """You're labeling clustered chat conversations on a Twitch streamer's dashboard.
@@ -379,9 +509,22 @@ Empty / partial replies are fine. Skipping is the right call when in doubt.
             return
 
         from .llm.schemas import ThreadRecapsResponse
+        # Informed-call enrichment — channel context + screenshot give
+        # the recap LLM the same grounding signals talking-points and
+        # engaging-subjects already get.
+        channel_context = self._build_channel_context(authoritative=True)
+        grid_b64 = await self._latest_screenshot_grid(window_minutes=15)
+        image_note = (
+            "\n\nAn image is attached showing what is currently on "
+            "screen. Use it ONLY as silent context to ground vague "
+            "thread topics. Do NOT describe the image or mention that "
+            "it's attached."
+        ) if grid_b64 else ""
         prompt = (
-            "Active topic threads (numbered by `thread_id`):\n\n"
+            channel_context
+            + "Active topic threads (numbered by `thread_id`):\n\n"
             + "\n\n".join(blocks)
+            + image_note
             + "\n\nReturn one observational `recap` per thread you can "
             "ground in its messages. Skip noisy / unsummarisable ones."
         )
@@ -394,6 +537,7 @@ Empty / partial replies are fine. Skipping is the right call when in doubt.
                 system_prompt=self.THREAD_RECAP_SYSTEM,
                 response_model=ThreadRecapsResponse,
                 num_ctx=self.THREAD_RECAP_NUM_CTX,
+                images=[grid_b64] if grid_b64 else None,
                 think=True,
             )
         except ValidationError as e:
@@ -431,7 +575,10 @@ Empty / partial replies are fine. Skipping is the right call when in doubt.
     # controversial topics.
     # =========================================================
 
-    SUBJECTS_NUM_CTX = 8192
+    # Bumped from 8192 to INFORMED_NUM_CTX so the prompt can carry
+    # cluster blocks + driver notes + transcript section + known
+    # subjects + channel context without truncation.
+    SUBJECTS_NUM_CTX = INFORMED_NUM_CTX
     SUBJECTS_LOOKBACK_MINUTES = 20
     SUBJECTS_MAX_MESSAGES = 250
     # Streamer-controlled blocklist key in app_settings. Each entry:
@@ -639,62 +786,22 @@ Good output:
         self.repo.set_app_setting(self.SUBJECTS_BLOCKLIST_KEY, "[]")
         return n
 
-    def _build_channel_context(self) -> str:
-        """Format the live Helix snapshot as a CHANNEL CONTEXT block for
-        LLM prompts. Returns "" when offline or when Helix isn't wired
-        up — caller can concat unconditionally.
-
-        Pulls (when available): game_name, stream title, tags,
-        content_classification_labels, viewer_count, stream uptime.
-        Each is a fallback-safe getattr so the block degrades cleanly
-        if upstream fields shift."""
+    def _build_channel_context(self, *, authoritative: bool = False) -> str:
+        """Delegate to the shared TwitchStatus.format_for_llm so every
+        informed call site sees the same Helix snapshot in the same
+        shape. Returns "" when twitch_status isn't wired or the
+        streamer is offline."""
         if self.twitch_status is None:
             return ""
         ts = getattr(self.twitch_status, "status", None)
-        if ts is None or not getattr(ts, "is_live", False):
+        if ts is None:
             return ""
-        bits: list[str] = []
-        game = getattr(ts, "game_name", None)
-        if game:
-            bits.append(f"playing/streaming: {game}")
-        title = getattr(ts, "title", None)
-        if title:
-            bits.append(f"stream title: {title}")
-        tags = getattr(ts, "tags", None) or []
-        if tags:
-            bits.append("tags: " + ", ".join(tags[:8]))
-        labels = getattr(ts, "content_classification_labels", None) or []
-        if labels:
-            bits.append("content labels: " + ", ".join(labels))
-        viewers = int(getattr(ts, "viewer_count", 0) or 0)
-        if viewers > 0:
-            # Round into a coarse tier so the LLM gets scale signal
-            # without overfitting to a specific count.
-            if viewers < 25:
-                tier = f"{viewers} viewers (small chat)"
-            elif viewers < 200:
-                tier = f"{viewers} viewers (medium)"
-            elif viewers < 1000:
-                tier = f"{viewers} viewers (busy)"
-            else:
-                tier = f"{viewers} viewers (very busy — chat is fast)"
-            bits.append(tier)
-        uptime = int(getattr(ts, "stream_uptime_seconds", 0) or 0)
-        if uptime > 0:
-            hours, rem = divmod(uptime, 3600)
-            mins = rem // 60
-            if hours:
-                bits.append(f"live for {hours}h {mins}m")
-            else:
-                bits.append(f"live for {mins}m")
-        if not bits:
+        try:
+            return ts.format_for_llm(authoritative=authoritative)
+        except AttributeError:
+            # Defensive — older TwitchStatus shape without the helper.
             return ""
-        return (
-            "CHANNEL CONTEXT (the streamer is currently live; chat "
-            "may reference this): "
-            + " · ".join(bits)
-            + "\n\n"
-        )
+
 
     def _load_streamer_facts(self) -> str:
         """Load streamer-authored channel facts from disk. Prepended to
@@ -1070,7 +1177,9 @@ Good output:
             # streamer-declared content classifications. Sourced from
             # the Helix /streams + /channels poll on TwitchService;
             # silently skipped when Helix isn't connected.
-            channel_context = self._build_channel_context()
+            # authoritative=True — the engaging-subjects call now also
+            # rides with a screenshot grid, same as talking-points.
+            channel_context = self._build_channel_context(authoritative=True)
 
             # === LLM labeling pass — only for dirty clusters. ===
             # Carry-forward names mean stable identity; the LLM only
@@ -1156,13 +1265,34 @@ Good output:
                             + self.SUBJECTS_SYSTEM
                         )
 
+                    # Visual context — same screenshot grid the
+                    # transcript group summary uses, so the LLM can
+                    # ground game-specific jargon when chat references
+                    # something on-screen.
+                    grid_b64 = await self._latest_screenshot_grid(
+                        window_minutes=window_min,
+                    )
+                    if grid_b64:
+                        prompt += (
+                            "\n\nAn image is attached showing what is "
+                            "currently on screen. Use it ONLY as silent "
+                            "context (identify the game/app, ground "
+                            "vague subject names). Do NOT describe the "
+                            "image or mention that it's attached."
+                        )
                     try:
                         from .llm.schemas import EngagingSubjectsResponse
+                        # think=True — engaging-subjects feeds the
+                        # dashboard's main "what's chat talking about"
+                        # panel; same accuracy-over-latency tradeoff as
+                        # talking points. Cadence (~3 min) absorbs it.
                         response = await self.llm.generate_structured(
                             prompt=prompt,
                             system_prompt=system_prompt,
                             response_model=EngagingSubjectsResponse,
                             num_ctx=self.SUBJECTS_NUM_CTX,
+                            images=[grid_b64] if grid_b64 else None,
+                            think=True,
                         )
                         response_subjects = response.subjects
                         if not response_subjects:

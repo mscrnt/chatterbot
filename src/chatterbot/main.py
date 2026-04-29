@@ -73,13 +73,20 @@ async def run_bot(settings: Settings) -> None:
             settings.ollama_base_url,
         )
 
-    summarizer = Summarizer(repo, llm, settings)
-    listener = ChatterListener(settings, repo, summarizer)
-    se = StreamElementsListener(repo, settings)
     # OBS is the authoritative "are we streaming?" signal. The bot process
     # owns its own poller (the dashboard has a separate one for the nav)
     # so YouTube + other quota-sensitive pollers can pause when offline.
     obs = OBSStatusService(settings)
+    # Twitch Helix poller — separate instance from the dashboard's,
+    # since the bot is a different process. Feeds the summarizer's
+    # topic-snapshot call with live channel context (game / title /
+    # tags / viewer tier / uptime). OBS-aware pause keeps Helix
+    # quiet while we're not streaming.
+    from .twitch import TwitchService
+    twitch_status = TwitchService(settings, obs=obs)
+    summarizer = Summarizer(repo, llm, settings, twitch_status=twitch_status)
+    listener = ChatterListener(settings, repo, summarizer)
+    se = StreamElementsListener(repo, settings)
 
     # One-time backfill of any pre-existing topic_snapshots into the
     # topic_threads index. Idempotent — only operates on snapshots that
@@ -102,6 +109,13 @@ async def run_bot(settings: Settings) -> None:
         )
     if settings.obs_enabled:
         tasks.append(asyncio.create_task(obs.poll_loop(), name="obs_poll"))
+    # Helix poller — gated on credentials being present. The
+    # poll_loop self-terminates on missing oauth token / channel, so
+    # always-on-task with no extra guard is safe.
+    if settings.twitch_oauth_token and settings.twitch_channel:
+        tasks.append(
+            asyncio.create_task(twitch_status.poll_loop(), name="twitch_poll"),
+        )
 
         # Stream-start session reset. On not-streaming → streaming,
         # wipe per-session ephemeral state (currently-addressed insight
