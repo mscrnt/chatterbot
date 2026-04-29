@@ -76,5 +76,39 @@
       {% endfor %}
     </ul>
   </section>
+
+  {# Chat that paired with this audio — same exact rows the LLM saw
+     as the CHAT DURING THIS WINDOW context block when building the
+     summary above. Persisted at write-time on transcript_groups so
+     this is the rows the LLM actually used, not a re-queried
+     approximation. Empty for groups created before this column
+     existed (silent). #}
+  {% if chat_messages %}
+    <section>
+      <p class="text-[11px] uppercase tracking-wider text-muted mb-1">
+        chat the AI saw ({{ chat_messages | length }})
+      </p>
+      <ul class="divide-y divide-subtle rounded-xl border border-accent/30 bg-accent/5 overflow-hidden">
+        {% for m in chat_messages %}
+          <li class="px-3 py-2 text-sm hover:bg-accent/10">
+            <div class="flex items-baseline gap-2">
+              <span class="text-[11px] text-muted whitespace-nowrap w-32 shrink-0">{{ m.ts | short_ts }}</span>
+              {% with source=(m.source or 'twitch') %}{% include "components/_source_mark.html" %}{% endwith %}
+              <a href="/users/{{ m.user_id }}?focus={{ m.id }}"
+                 class="text-accent font-medium shrink-0 hover:underline">{{ m.name }}</a>
+              <span class="text-primary break-words flex-1">{{ m.content }}</span>
+            </div>
+            {% if m.reply_parent_body %}
+              <div class="text-[11px] text-muted mt-0.5 ml-32 inline-flex items-start gap-1">
+                <i class="fa-solid fa-reply text-[9px] mt-0.5"></i>
+                replying to <span class="text-accent">{{ m.reply_parent_login or '?' }}</span>:
+                <span class="italic truncate max-w-[20rem]">"{{ m.reply_parent_body }}"</span>
+              </div>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    </section>
+  {% endif %}
 </div>
 {% endblock %}

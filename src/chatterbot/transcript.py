@@ -1488,6 +1488,12 @@ Reply with `summary` = the line(s) (or empty string).
             "an empty string if there's nothing coherent to summarise."
         )
 
+        # IDs of the chat messages that landed in the prompt — caller
+        # persists this with the resulting transcript_group so the
+        # detail modal can re-display the exact same chat the LLM
+        # saw, not a re-queried approximation.
+        chat_message_ids = [int(m.id) for m in chat_msgs if getattr(m, "id", None)]
+
         return {
             "system_prompt": self.GROUP_SUMMARY_SYSTEM,
             "user_prompt": user_prompt,
@@ -1495,6 +1501,7 @@ Reply with `summary` = the line(s) (or empty string).
             "screenshot_grid_b64": grid_b64,
             "channel_context": channel_context,
             "known_game": known_game,
+            "chat_message_ids": chat_message_ids,
             "model": getattr(self.llm, "model", ""),
             "num_ctx": self.GROUP_SUMMARY_NUM_CTX,
             "think": True,
@@ -1521,6 +1528,7 @@ Reply with `summary` = the line(s) (or empty string).
         screenshot_count = bundle["screenshot_count"]
         known_game = bundle["known_game"]
         channel_context = bundle["channel_context"]
+        chat_message_ids = bundle.get("chat_message_ids") or []
 
         # Diagnostic — log whether the LLM is going in with the
         # KNOWN GAME pin or not, plus screenshot count. When the LLM
@@ -1595,6 +1603,7 @@ Reply with `summary` = the line(s) (or empty string).
             start_ts=chunks[0].ts, end_ts=chunks[-1].ts,
             first_chunk_id=chunks[0].id, last_chunk_id=chunks[-1].id,
             summary=summary,
+            context_message_ids=chat_message_ids,
         )
         logger.info(
             "transcript: group written — %d chunks (id %d → %d): %r",

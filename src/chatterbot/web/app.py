@@ -2360,7 +2360,15 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     async def modal_transcript_group(request: Request, group_id: int):
         """Detail view for one transcript group — summary + the
         underlying utterances clipped to the group's id range, plus
-        the OBS screenshots captured during the group's window."""
+        the OBS screenshots captured during the group's window AND
+        the exact chat messages the LLM saw when building the
+        summary.
+
+        Chat-context message IDs are persisted with the group at
+        summary-write time (transcript_groups.context_message_ids).
+        Older groups created before that column existed return
+        empty `chat_messages` — the modal renders without a chat
+        section in that case."""
         group = repo.get_transcript_group(group_id)
         if not group:
             raise HTTPException(404, "transcript group not found")
@@ -2371,9 +2379,21 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             group.start_ts, group.end_ts,
             max_count=int(getattr(settings, "screenshot_grid_max", 4)),
         )
+        # Hydrate the persisted chat IDs into Message rows. Empty list
+        # for older groups (pre-feature) — template renders cleanly.
+        chat_messages: list = []
+        if group.context_message_ids:
+            chat_messages = await asyncio.to_thread(
+                repo.get_messages_by_ids, list(group.context_message_ids),
+            )
         return TEMPLATES.TemplateResponse(
             request, "modals/_transcript_group.html",
-            {"group": group, "chunks": chunks, "screenshots": screenshots},
+            {
+                "group": group,
+                "chunks": chunks,
+                "screenshots": screenshots,
+                "chat_messages": chat_messages,
+            },
         )
 
     @app.get("/modals/transcript/{chunk_id}", response_class=HTMLResponse)

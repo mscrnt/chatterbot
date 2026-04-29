@@ -142,7 +142,14 @@ class TranscriptScreenshot:
 class TranscriptGroup:
     """A window of consecutive whisper utterances summarised by the LLM
     into a single observational line. Replaces per-utterance lines in the
-    live transcript strip — less distracting, more skimmable."""
+    live transcript strip — less distracting, more skimmable.
+
+    `context_message_ids` records the chat message IDs that were passed
+    to the LLM as the CHAT DURING THIS WINDOW context block. Persisted
+    with the group at write-time so the transcript-group modal can
+    show the streamer EXACTLY the chat the LLM saw — not a re-queried
+    approximation. Empty list for groups created before this field
+    was added (graceful degrade in the UI)."""
 
     id: int
     start_ts: str
@@ -151,6 +158,7 @@ class TranscriptGroup:
     last_chunk_id: int
     summary: str
     created_at: str
+    context_message_ids: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -899,6 +907,17 @@ class ChatterRepo:
                 "CREATE INDEX IF NOT EXISTS idx_transcript_groups_end "
                 "ON transcript_groups(end_ts)"
             )
+            # Idempotent column add for context_message_ids — JSON array
+            # of chat message IDs the LLM saw when summarising. Older
+            # DBs predate this column and need an ALTER; sqlite has no
+            # IF NOT EXISTS for ADD COLUMN, so we check the schema first.
+            cur.execute("PRAGMA table_info(transcript_groups)")
+            tg_cols = {row["name"] for row in cur.fetchall()}
+            if "context_message_ids" not in tg_cols:
+                cur.execute(
+                    "ALTER TABLE transcript_groups "
+                    "ADD COLUMN context_message_ids TEXT"
+                )
             # OBS screenshots paired with transcript chunks, captured by
             # the screenshot loop every N seconds while whisper + OBS
             # are both active. Each transcript group queries this table
@@ -2586,17 +2605,26 @@ class ChatterRepo:
     def add_transcript_group(
         self, *, start_ts: str, end_ts: str,
         first_chunk_id: int, last_chunk_id: int, summary: str,
+        context_message_ids: list[int] | None = None,
     ) -> int:
+        """Persist one summarised group. `context_message_ids` records
+        the chat messages the LLM saw as the CHAT DURING THIS WINDOW
+        block — the modal hydrates those exact rows so the streamer
+        sees the same chat the LLM did, not a re-queried approximation."""
+        ctx_json = (
+            json.dumps([int(i) for i in context_message_ids])
+            if context_message_ids else None
+        )
         with self._cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO transcript_groups(
                     start_ts, end_ts, first_chunk_id, last_chunk_id,
-                    summary, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    summary, created_at, context_message_ids
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (start_ts, end_ts, int(first_chunk_id), int(last_chunk_id),
-                 summary.strip(), _now_iso()),
+                 summary.strip(), _now_iso(), ctx_json),
             )
             return int(cur.lastrowid)
 
@@ -2645,7 +2673,7 @@ class ChatterRepo:
             cur.execute(
                 """
                 SELECT id, start_ts, end_ts, first_chunk_id, last_chunk_id,
-                       summary, created_at
+                       summary, created_at, context_message_ids
                 FROM transcript_groups WHERE id = ?
                 """,
                 (int(group_id),),
@@ -2653,11 +2681,19 @@ class ChatterRepo:
             r = cur.fetchone()
             if not r:
                 return None
+            ctx_ids: list[int] = []
+            raw = r["context_message_ids"] if "context_message_ids" in r.keys() else None
+            if raw:
+                try:
+                    ctx_ids = [int(i) for i in json.loads(raw) if i is not None]
+                except (TypeError, ValueError):
+                    ctx_ids = []
             return TranscriptGroup(
                 id=int(r["id"]), start_ts=r["start_ts"], end_ts=r["end_ts"],
                 first_chunk_id=int(r["first_chunk_id"]),
                 last_chunk_id=int(r["last_chunk_id"]),
                 summary=r["summary"], created_at=r["created_at"],
+                context_message_ids=ctx_ids,
             )
 
     def latest_transcript_group_last_chunk_id(self) -> int:
