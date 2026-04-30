@@ -47,6 +47,23 @@ whisper = [
     # — gives the multimodal LLM visual context too, not just audio.
     "Pillow>=10.0.0",
 ]
+# Personal training-dataset capture (opt-in, off by default). Encrypts
+# every captured event at rest using AES-GCM with a streamer-controlled
+# passphrase, compresses the payload with zstd before encryption.
+# Streamers who don't `chatterbot dataset setup` can skip this extra —
+# the import is lazy and the toggle defaults to off, so the bot /
+# dashboard boot path doesn't notice.
+#   uv sync --extra dataset
+dataset = [
+    # AES-GCM + Argon2id KDF. cryptography ships with audited primitives
+    # and a stable wrapper; we don't need anything else from a crypto
+    # library.
+    "cryptography>=42.0.0",
+    # zstd compression. ~5x faster than gzip at comparable ratios; size
+    # difference matters at fine-tune-corpus scale (tens of MB per
+    # stream day).
+    "zstandard>=0.22.0",
+]
 
 [project.scripts]
 chatterbot = "chatterbot.main:main"

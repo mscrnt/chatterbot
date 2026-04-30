@@ -417,6 +417,12 @@ class ChatterRepo:
         self._app_settings_cache: dict[str, str | None] = {}
         self._app_settings_cache_loaded_at: float = 0.0
         self._app_settings_lock = threading.Lock()
+        # Personal-dataset DEK held in process memory while capture is
+        # unlocked. None when the streamer hasn't unlocked yet (or has
+        # capture disabled). Accessed via dataset_dek() / set_dataset_dek
+        # so the hot capture-path is one attribute read.
+        self._dataset_dek: bytes | None = None
+        self._dataset_dek_lock = threading.Lock()
 
     def _init_conn(self) -> sqlite3.Connection:
         """Create + configure a SQLite connection for the current thread.
@@ -782,6 +788,40 @@ class ChatterRepo:
                     updated_at TEXT NOT NULL
                 )
                 """
+            )
+            # Personal training-dataset capture index. Each row points at
+            # one encrypted record inside a shard file under
+            # data/dataset/shards/. The actual ciphertext never lives in
+            # SQLite — keeps chatters.db backup size sane and lets
+            # `rm -rf data/dataset/` cleanly destroy the dataset.
+            #
+            # ts is in cleartext on purpose: AES-GCM binds it as
+            # associated-data so the reader needs it to decrypt, and
+            # filtering an export by date range shouldn't require
+            # touching the encryption pipeline.
+            #
+            # schema_version is per-row so the reader can dispatch to
+            # the right migration when the on-disk event shape evolves.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dataset_events (
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts             TEXT NOT NULL,
+                    event_kind     TEXT NOT NULL,
+                    shard_path     TEXT NOT NULL,
+                    byte_offset    INTEGER NOT NULL,
+                    byte_length    INTEGER NOT NULL,
+                    schema_version INTEGER NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dataset_events_ts "
+                "ON dataset_events(ts)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dataset_events_kind "
+                "ON dataset_events(event_kind)"
             )
             # Username history: a row per (user_id, observed_name). Twitch IDs
             # never change but display names do, so this gives us a complete
@@ -7093,6 +7133,118 @@ class ChatterRepo:
                 k: v for k, v in self._app_settings_cache.items()
                 if v is not None
             }
+
+    # ============================ dataset capture =========================
+    # Opt-in personal training-dataset surface. The hot path is one
+    # attribute read on `_dataset_dek` and one dict lookup on the cached
+    # `app_settings` — when capture is off (the default) these helpers
+    # cost nothing. Actual cipher / storage primitives live in
+    # `chatterbot.dataset.*` and are lazy-imported there so the optional
+    # `cryptography` + `zstandard` deps don't load unless capture is
+    # used.
+
+    def dataset_capture_enabled(self) -> bool:
+        """Hot-path toggle. Reads the cached app_settings value — single
+        dict lookup after the first call per process."""
+        v = self.get_app_setting("dataset_capture_enabled")
+        return (v or "").lower() == "true"
+
+    def dataset_dek(self) -> bytes | None:
+        """In-memory data-encryption key. Returns None when the streamer
+        hasn't unlocked. The capture wrapper checks this on every event;
+        no lock needed for the read because the reference itself is
+        atomic in CPython."""
+        return self._dataset_dek
+
+    def set_dataset_dek(self, dek: bytes | None) -> None:
+        """Install the unlocked DEK into process memory. Called once at
+        bot/dashboard startup after the passphrase is verified, or
+        cleared (None) when the streamer toggles capture off."""
+        with self._dataset_dek_lock:
+            self._dataset_dek = dek
+
+    def insert_dataset_event(
+        self,
+        *,
+        ts: str,
+        event_kind: str,
+        shard_path: str,
+        byte_offset: int,
+        byte_length: int,
+        schema_version: int,
+    ) -> int:
+        """Append one row to the dataset_events index. Returns the new
+        row id. Caller has already written the ciphertext to the shard
+        — this just records the pointer."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO dataset_events
+                  (ts, event_kind, shard_path, byte_offset, byte_length, schema_version)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (ts, event_kind, shard_path, int(byte_offset), int(byte_length), int(schema_version)),
+            )
+            return int(cur.lastrowid or 0)
+
+    def iter_dataset_events(
+        self,
+        *,
+        since_ts: str | None = None,
+        until_ts: str | None = None,
+        kinds: list[str] | None = None,
+    ) -> Iterable[dict]:
+        """Yield index rows for the export pipeline, oldest-first.
+        Filters are optional — `since_ts` / `until_ts` are ISO-UTC
+        strings; `kinds` restricts to specific event_kind values."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if since_ts:
+            clauses.append("ts >= ?")
+            params.append(since_ts)
+        if until_ts:
+            clauses.append("ts <= ?")
+            params.append(until_ts)
+        if kinds:
+            placeholders = ",".join("?" * len(kinds))
+            clauses.append(f"event_kind IN ({placeholders})")
+            params.extend(kinds)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id, ts, event_kind, shard_path, byte_offset,
+                       byte_length, schema_version
+                FROM dataset_events
+                {where}
+                ORDER BY id ASC
+                """,
+                params,
+            )
+            for r in cur.fetchall():
+                yield {
+                    "id": int(r["id"]),
+                    "ts": r["ts"],
+                    "event_kind": r["event_kind"],
+                    "shard_path": r["shard_path"],
+                    "byte_offset": int(r["byte_offset"]),
+                    "byte_length": int(r["byte_length"]),
+                    "schema_version": int(r["schema_version"]),
+                }
+
+    def dataset_event_count(self, *, kind: str | None = None) -> int:
+        """Total event count, optionally filtered by kind. Used by the
+        `chatterbot dataset info` CLI."""
+        with self._cursor() as cur:
+            if kind:
+                cur.execute(
+                    "SELECT COUNT(*) AS n FROM dataset_events WHERE event_kind = ?",
+                    (kind,),
+                )
+            else:
+                cur.execute("SELECT COUNT(*) AS n FROM dataset_events")
+            row = cur.fetchone()
+            return int(row["n"]) if row else 0
 
     # ============================ teardown =================================
 

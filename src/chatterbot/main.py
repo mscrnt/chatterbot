@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import sys
 from pathlib import Path
 
 from .bot import ChatterListener
@@ -72,6 +73,13 @@ async def run_bot(settings: Settings) -> None:
             "ollama health check failed at %s — starting anyway",
             settings.ollama_base_url,
         )
+
+    # Personal-dataset capture unlock — opt-in. No-op when the toggle
+    # is off, the wrapped DEK is missing, or the passphrase env var
+    # isn't set. Capture is silently off in any of those cases; the
+    # bot runs as if the feature didn't exist.
+    from .dataset import try_unlock_at_startup
+    try_unlock_at_startup(repo, llm)
 
     # OBS is the authoritative "are we streaming?" signal. The bot process
     # owns its own poller (the dashboard has a separate one for the nav)
@@ -226,6 +234,22 @@ def run_diagnose(settings: Settings, with_recent_activity: bool) -> Path:
 
 
 def main() -> None:
+    # Pre-dispatch for the `dataset` subcommand. argparse can't cleanly
+    # mix a positional `mode` with subparsers (the first positional
+    # always tries to match a subparser choice first), so we peel
+    # `chatterbot dataset ...` off before the legacy parser ever sees
+    # it. This keeps `chatterbot bot/tui/dashboard/diagnose` working
+    # exactly as before.
+    if len(sys.argv) >= 2 and sys.argv[1] == "dataset":
+        from .dataset import cli as dataset_cli
+        sub_parser = argparse.ArgumentParser(prog="chatterbot dataset")
+        sub_subs = sub_parser.add_subparsers(dest="dataset_cmd", required=True)
+        dataset_cli.register_subcommands(sub_subs)
+        args = sub_parser.parse_args(sys.argv[2:])
+        settings = get_settings()
+        setup_logging("dataset")
+        sys.exit(dataset_cli.dispatch(args, settings))
+
     parser = argparse.ArgumentParser(prog="chatterbot")
     parser.add_argument(
         "mode",
@@ -233,7 +257,9 @@ def main() -> None:
         choices=("bot", "tui", "dashboard", "diagnose"),
         default=None,
         help="bot = silent listener; tui = Textual viewer; "
-             "dashboard = FastAPI viewer; diagnose = write a .cbreport bundle",
+             "dashboard = FastAPI viewer; diagnose = write a .cbreport bundle. "
+             "Use `chatterbot dataset --help` for the opt-in dataset capture "
+             "subcommands.",
     )
     parser.add_argument(
         "--with-recent-activity",
@@ -241,6 +267,7 @@ def main() -> None:
         help="(diagnose only) include usernames + per-user message counts "
              "from the last 24h. Off by default for privacy.",
     )
+
     args = parser.parse_args()
 
     settings = get_settings()

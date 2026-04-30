@@ -545,6 +545,7 @@ class Summarizer:
                     response_model=NoteExtractionResponse,
                     num_ctx=INFORMED_NUM_CTX,
                     think=True,
+                    call_site="summarizer.note_extraction",
                 )
             except ValidationError:
                 logger.exception("note extraction validation failed for %s", user_id)

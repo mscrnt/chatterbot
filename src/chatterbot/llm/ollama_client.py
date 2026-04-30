@@ -69,6 +69,20 @@ class OllamaClient:
         # loops.
         cap = max(1, int(max_concurrent_generations))
         self._gen_sem = asyncio.Semaphore(cap)
+        # Optional ChatterRepo handle for personal-dataset capture. When
+        # None (the default) `generate_structured` skips the capture
+        # path entirely — no import of `chatterbot.dataset.*`, no extra
+        # work. Wired up at bot/dashboard startup via
+        # `llm.attach_dataset_capture(repo)` on the singleton client.
+        self._dataset_repo = None  # type: ignore[assignment]
+
+    def attach_dataset_capture(self, repo) -> None:
+        """Wire a ChatterRepo into this client so structured calls can
+        record LLM_CALL events to the personal dataset. Idempotent —
+        safe to call multiple times. Capture is still gated by the
+        repo's own `dataset_capture_enabled()` toggle, so attaching
+        without the streamer opting in is a no-op."""
+        self._dataset_repo = repo
 
     async def generate(
         self,
@@ -159,6 +173,7 @@ class OllamaClient:
         num_predict: int | None = None,
         images: list[str] | None = None,
         think: bool = False,
+        call_site: str = "unknown",
     ) -> T:
         """Run a generation that returns a validated `response_model` instance.
 
@@ -168,19 +183,63 @@ class OllamaClient:
         structured output, but fail-loudly is the right default).
 
         See `generate()` for `think`, `num_ctx`, `num_predict` semantics.
+
+        `call_site` identifies the prompt origin in the personal-dataset
+        capture log (e.g. "summarizer.note_extraction"). Pure metadata
+        — has no effect on the LLM call itself. Defaults to "unknown"
+        so legacy call sites without the kwarg still work; new sites
+        should pass a stable identifier.
         """
         schema = response_model.model_json_schema()
-        raw = await self.generate(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            format_schema=schema,
-            model_override=model_override,
-            num_ctx=num_ctx,
-            num_predict=num_predict,
-            images=images,
-            think=think,
-        )
-        return response_model.model_validate_json(raw)
+        started = time.monotonic()
+        raw = ""
+        error: str | None = None
+        try:
+            raw = await self.generate(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                format_schema=schema,
+                model_override=model_override,
+                num_ctx=num_ctx,
+                num_predict=num_predict,
+                images=images,
+                think=think,
+            )
+            return response_model.model_validate_json(raw)
+        except Exception as e:
+            # Record the failure too — failed validations are a useful
+            # negative signal for prompt iteration. Re-raise so the
+            # caller sees the original error.
+            error = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            # Capture is always opt-in and gated by `dataset_capture_enabled()`
+            # inside `record_llm_call`. The hot path when capture is off
+            # is one attribute access + one method call returning False.
+            if self._dataset_repo is not None:
+                latency_ms = int((time.monotonic() - started) * 1000)
+                try:
+                    from ..dataset.capture import record_llm_call
+                    await record_llm_call(
+                        self._dataset_repo,
+                        call_site=call_site,
+                        model_id=model_override or self.model,
+                        provider="ollama",
+                        system_prompt=system_prompt,
+                        prompt=prompt,
+                        response_text=raw,
+                        response_schema_name=response_model.__name__,
+                        num_ctx=num_ctx,
+                        num_predict=num_predict,
+                        think=think,
+                        latency_ms=latency_ms,
+                        error=error,
+                    )
+                except Exception:
+                    # Capture must never break the LLM call path. Log
+                    # at debug level — the capture module itself logs
+                    # at warning when it actually drops something.
+                    logger.debug("dataset capture failed", exc_info=True)
 
     async def stream_generate(
         self,

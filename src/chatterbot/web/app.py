@@ -116,6 +116,15 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     from ..llm.providers import make_llm_client
     llm = make_llm_client(settings)
 
+    # Personal-dataset capture unlock — opt-in. Same shape as the bot
+    # process: no-op unless the streamer enabled capture, ran
+    # `chatterbot dataset setup`, and set CHATTERBOT_DATASET_PASSPHRASE
+    # in the environment. Two processes (bot + dashboard) both unlock
+    # independently — they share the same wrapped DEK in app_settings
+    # so the unlocked DEK ends up identical.
+    from ..dataset import try_unlock_at_startup
+    try_unlock_at_startup(repo, llm)
+
     # Expose runtime settings flags to every template (nav uses these).
     TEMPLATES.env.globals["mod_mode_enabled"] = bool(settings.mod_mode_enabled)
     # Re-read on each request so toggling in /settings takes effect after the
