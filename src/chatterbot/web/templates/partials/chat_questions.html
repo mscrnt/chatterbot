@@ -1,0 +1,84 @@
+{# Questions panel — clustered chat questions from the last 15 min.
+
+   Each row is one cluster: the representative question text, how
+   many distinct chatters asked something similar, and who they
+   were. Clicking a chatter pill jumps to their /users page —
+   cheap shortcut for "answer this person directly".
+
+   Per-row dismiss / snooze / addressed via the shared
+   _insight_actions component. item_key = str(last_msg_id) so a
+   dismissal hides this cluster as it currently exists; if a fresh
+   ask comes in later the cluster's last_msg_id changes and the
+   question naturally re-surfaces. cq_states is a dict keyed by
+   item_key (= str(last_msg_id)) — pre-populated by the route.
+
+   Source: repo.recent_questions(within_minutes=15) — token-overlap
+   clusters chat messages containing '?'. Distinct from
+   recent_direct_mentions which is the @-style Talking-to-you panel. #}
+{% from "partials/_panel.html" import panel %}
+
+{# Pre-filter clusters whose state is hidden (skipped / addressed,
+   or snoozed-not-yet-due). Mirrors the pattern in insights_body.html
+   for the lurkers + mentions panels. #}
+{% set _visible_questions = [] %}
+{% for q in chat_questions %}
+  {% set _ikey = q.last_msg_id | string %}
+  {% set _s = (cq_states.get(_ikey) if cq_states else None) %}
+  {% set _hide = false %}
+  {% if _s %}
+    {% if _s.state in ('skipped', 'addressed') %}{% set _hide = true %}
+    {% elif _s.state == 'snoozed' and _s.due_ts and _s.due_ts > now_iso() %}{% set _hide = true %}
+    {% endif %}
+  {% endif %}
+  {% if not _hide %}
+    {% set _ = _visible_questions.append((q, _s)) %}
+  {% endif %}
+{% endfor %}
+
+{% if _visible_questions %}
+{% call panel('chat-questions', 'Questions in chat', icon='fa-circle-question',
+              icon_tone='accent',
+              count=_visible_questions | length,
+              subtitle='last 15 min · grouped · click ✓ when answered') %}
+  <ul class="divide-y divide-subtle rounded-xl border border-subtle bg-surface overflow-hidden">
+    {% for q, _s in _visible_questions %}
+      {% set _ikey = q.last_msg_id | string %}
+      <li class="insight-card-root px-3 py-2 sm:py-3 hover:bg-surface-raised transition-all duration-150 ease-out">
+        <div class="flex items-baseline gap-2 flex-wrap">
+          <i class="fa-solid fa-circle-question text-accent text-[11px] shrink-0"></i>
+          <p class="text-primary text-sm break-words flex-1 leading-snug">{{ q.question }}</p>
+          {% if q.count > 1 %}
+            <span class="text-[10px] text-accent font-semibold tabular-nums shrink-0"
+                  title="{{ q.count }} distinct chatters asked something similar">
+              ×{{ q.count }}
+            </span>
+          {% endif %}
+          <span class="text-[10px] text-muted whitespace-nowrap shrink-0">{{ q.latest_ts | short_ts }}</span>
+          <div class="shrink-0">
+            {% with kind='chat_question', item_key=_ikey,
+                    state=(_s.state if _s else None) %}
+              {% include "components/_insight_actions.html" %}
+            {% endwith %}
+          </div>
+        </div>
+        {# Driver pills — clickable shortcut to /users/<id> #}
+        {% if q.drivers %}
+          <div class="flex flex-wrap gap-1 mt-1.5 ml-5">
+            {% for d in q.drivers[:8] %}
+              <a href="/users/{{ d.user_id }}"
+                 class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-subtle bg-canvas hover:bg-surface-raised text-[11px] text-accent hover:underline"
+                 title="{{ d.ts }}">
+                {% with name=d.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+                {{ d.name }}
+              </a>
+            {% endfor %}
+            {% if q.drivers | length > 8 %}
+              <span class="text-[10px] text-muted self-center">+{{ q.drivers | length - 8 }} more</span>
+            {% endif %}
+          </div>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+{% endcall %}
+{% endif %}

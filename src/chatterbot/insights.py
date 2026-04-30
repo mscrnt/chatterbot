@@ -137,6 +137,36 @@ class EngagingSubjectsCache:
     error: str | None = None
 
 
+@dataclass
+class OpenQuestionDriver:
+    """One chatter who asked (or co-asked) an open question. Mirrors the
+    dict shape `repo.recent_questions` returns so the existing
+    chat_questions.html template renders without changes."""
+    name: str
+    user_id: str
+    ts: str
+
+
+@dataclass
+class OpenQuestionEntry:
+    """One LLM-curated open question. Field names match the dict keys
+    `chat_questions.html` already reads (`question`, `count`,
+    `drivers`, `latest_ts`, `last_msg_id`) so the template doesn't
+    need changes — the LLM just refines the heuristic candidates."""
+    question: str
+    count: int
+    drivers: list[OpenQuestionDriver]
+    latest_ts: str
+    last_msg_id: int
+
+
+@dataclass
+class OpenQuestionsCache:
+    questions: list[OpenQuestionEntry]
+    refreshed_at: float | None
+    error: str | None = None
+
+
 class InsightsService:
     """Caches the LLM-derived talking points; refreshed by a background task."""
 
@@ -168,8 +198,12 @@ class InsightsService:
         self._subjects_cache = EngagingSubjectsCache(
             subjects=[], refreshed_at=None, error=None,
         )
+        self._questions_cache = OpenQuestionsCache(
+            questions=[], refreshed_at=None, error=None,
+        )
         self._lock = asyncio.Lock()
         self._subjects_lock = asyncio.Lock()
+        self._questions_lock = asyncio.Lock()
         # Persistent engaging-subject clusters carried across refreshes.
         # New messages append to existing clusters when the cosine
         # similarity to the centroid clears the threshold; only orphans
@@ -196,6 +230,10 @@ class InsightsService:
     @property
     def subjects_cache(self) -> EngagingSubjectsCache:
         return self._subjects_cache
+
+    @property
+    def open_questions_cache(self) -> OpenQuestionsCache:
+        return self._questions_cache
 
     async def _latest_screenshot_grid(
         self, window_minutes: int = 10,
@@ -1547,4 +1585,237 @@ Good output:
                 "engaging subjects refreshed: %d msgs, %d live clusters, "
                 "%d dirty (relabeled), %d cached subjects",
                 len(msgs), len(live_ids), len(dirty_ids), len(entries),
+            )
+
+    # =========================================================
+    # Open chat questions — LLM filter pass over the heuristic
+    # `recent_questions` candidates. The repo helper clusters by
+    # token overlap and excludes @-mentions / Twitch reply rows;
+    # this pass uses full chat + transcript context to drop
+    # already-answered, rhetorical, or directed-at-other-chatter
+    # questions that the heuristic can't catch.
+    # =========================================================
+
+    OPEN_QUESTIONS_NUM_CTX = INFORMED_NUM_CTX
+    OPEN_QUESTIONS_LOOKBACK_MINUTES = 15
+    OPEN_QUESTIONS_MAX_CANDIDATES = 12
+    OPEN_QUESTIONS_MAX_CONTEXT_MSGS = 200
+
+    OPEN_QUESTIONS_SYSTEM = """You're filtering chat questions for a Twitch streamer's dashboard. The dashboard surfaces OPEN questions chat is asking the streamer (or the room) so the streamer can answer the ones that matter. Your output never returns to chat.
+
+You'll receive:
+  - A numbered list of CANDIDATE QUESTIONS — each is the representative wording from a token-overlap cluster of similar questions chat asked recently. Each candidate has an integer id (`[N]`), the askers, and the timestamp of the most recent ask.
+  - The full window of recent CHAT MESSAGES (oldest → newest) so you can see what was said before AND after each question — including any answers already given.
+  - STREAMER VOICE — what the streamer said out loud during the same window. The streamer often answers questions verbally without typing.
+  - CHANNEL CONTEXT — what's being streamed right now (helps you tell genuine questions from rhetorical reactions).
+
+Return ONLY candidates that are still GENUINELY OPEN.
+
+DROP a candidate when ANY of these apply:
+- It's already been answered in chat (another chatter or the streamer typed an answer after the ask).
+- The streamer answered it out loud — STREAMER VOICE shows them addressing the topic after the ask.
+- It's directed at a SPECIFIC OTHER CHATTER, not the streamer or the room (e.g., "@bob you good?", "tom how was your run"). The SQL filter catches `@`-prefixed and Twitch-reply rows but contextual @-replies still slip through.
+- It's rhetorical / not seeking an answer ("can you believe that?", "wait what?", "really??").
+- It's pure game commentary or a reaction ("how did he die there?", "why is this boss so hard?") — not a question for the streamer.
+- It's a bot command, meta-noise, or untranslatable spam.
+
+KEEP a candidate when:
+- It's a question chat is asking THE STREAMER or THE ROOM broadly.
+- No clear answer has been given yet — neither in chat nor in the streamer's voice.
+- The streamer would benefit from a nudge to address it.
+
+For each kept candidate:
+  - candidate_id: ECHO the integer `[N]` from the input. The dashboard uses this to re-attach the original askers + timestamps. If you can't ground the question in a specific candidate, drop it — do NOT invent ids.
+  - question: the wording chat is asking. You may LIGHTLY clean it (capitalize the first letter, fix obvious typos, drop trailing filler) and you may merge two candidates with the same intent into one entry by picking either id and using a unified wording. You may NOT invent a question that no chatter actually asked.
+
+Return AT MOST 8 questions. Order them most-recently-asked first when in doubt.
+
+When uncertain, drop. Chat will re-ask anything that matters; surfacing an already-answered question wastes the streamer's attention.
+"""
+
+    async def open_questions_loop(
+        self, interval_seconds: int | None = None,
+    ) -> None:
+        """Background task: periodically refresh the open-questions
+        cache. No-op when the channel is quiet."""
+        await asyncio.sleep(20)
+        while True:
+            try:
+                interval = max(60, int(
+                    interval_seconds
+                    or getattr(self.settings, "open_questions_interval_seconds", 180)
+                ))
+                if interval <= 0:
+                    return
+                await self._refresh_open_questions()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("open-questions iteration failed")
+            await asyncio.sleep(interval)
+
+    async def _refresh_open_questions(self) -> None:
+        async with self._questions_lock:
+            window_min = int(getattr(
+                self.settings, "open_questions_lookback_minutes",
+                self.OPEN_QUESTIONS_LOOKBACK_MINUTES,
+            ))
+            try:
+                candidates = await asyncio.to_thread(
+                    self.repo.recent_questions,
+                    within_minutes=window_min,
+                    limit=self.OPEN_QUESTIONS_MAX_CANDIDATES,
+                )
+            except Exception:
+                logger.exception("open-questions: recent_questions failed")
+                return
+            if not candidates:
+                # Nothing to filter — flush the cache so the panel
+                # shows the empty state instead of stale entries.
+                self._questions_cache = OpenQuestionsCache(
+                    questions=[], refreshed_at=time.time(), error=None,
+                )
+                return
+
+            # Pull surrounding chat (full window, oldest-first) so the
+            # LLM can spot answers given AFTER each question. Cap is
+            # generous enough to cover busy windows but bounded so the
+            # prompt stays inside INFORMED_NUM_CTX.
+            try:
+                chat_msgs = await asyncio.to_thread(
+                    self.repo.recent_messages,
+                    limit=self.OPEN_QUESTIONS_MAX_CONTEXT_MSGS,
+                    within_minutes=window_min,
+                )
+            except Exception:
+                logger.exception("open-questions: recent_messages failed")
+                chat_msgs = []
+
+            # Streamer voice — they often answer questions verbally
+            # without typing. Same lookback window so the LLM can match
+            # transcripts to specific asks by timestamp.
+            try:
+                transcripts = await asyncio.to_thread(
+                    self.repo.recent_transcripts,
+                    within_minutes=window_min, limit=80,
+                )
+            except Exception:
+                transcripts = []
+
+            # Build the prompt. Each candidate gets its [N] id (=
+            # last_msg_id) so the LLM can echo it back.
+            cand_blocks: list[str] = []
+            cand_by_id: dict[int, dict] = {}
+            for c in candidates:
+                cid = int(c["last_msg_id"])
+                cand_by_id[cid] = c
+                askers = ", ".join(d["name"] for d in c["drivers"]) or "?"
+                cand_blocks.append(
+                    f"  [{cid}] (asked by {askers}; latest ask {c['latest_ts']}; "
+                    f"×{c['count']} similar)\n      {c['question'][:240]}"
+                )
+
+            chat_lines = [
+                f"  [{m.id}] {m.ts} <{m.name}> {m.content[:200]}"
+                for m in chat_msgs
+            ]
+            chat_section = (
+                f"RECENT CHAT (oldest → newest, last {window_min} min — use "
+                "to spot answers given AFTER each candidate's latest ask):\n"
+                + "\n".join(chat_lines)
+                + "\n\n"
+                if chat_lines else ""
+            )
+
+            transcript_section = ""
+            if transcripts:
+                tlines = [
+                    f"  - {t.text[:240].strip()}"
+                    for t in transcripts if t.text and t.text.strip()
+                ]
+                if tlines:
+                    transcript_section = (
+                        f"STREAMER VOICE (last {window_min} min, oldest first "
+                        "— what the streamer said out loud; if they verbally "
+                        "answered a candidate, drop it):\n"
+                        + "\n".join(tlines[-60:])
+                        + "\n\n"
+                    )
+
+            channel_context = self._build_channel_context(authoritative=False)
+
+            prompt = (
+                channel_context
+                + chat_section
+                + transcript_section
+                + "CANDIDATE QUESTIONS (from token-overlap clustering of "
+                "recent chat — each line: `[id] (askers; latest ts; count) "
+                "question`). Echo the `[id]` back as `candidate_id` for the "
+                "ones you keep:\n\n"
+                + "\n\n".join(cand_blocks)
+                + "\n\nReturn only the candidates that are still genuinely "
+                "open. Drop already-answered, directed-at-other-chatter, "
+                "rhetorical, and reaction questions."
+            )
+
+            from .llm.schemas import OpenQuestionsResponse
+            try:
+                response = await self.llm.generate_structured(
+                    prompt=prompt,
+                    system_prompt=self.OPEN_QUESTIONS_SYSTEM,
+                    response_model=OpenQuestionsResponse,
+                    num_ctx=self.OPEN_QUESTIONS_NUM_CTX,
+                    think=True,
+                )
+            except ValidationError as e:
+                logger.warning("open-questions validation failed: %s", e)
+                self._questions_cache = OpenQuestionsCache(
+                    questions=[], refreshed_at=time.time(),
+                    error=f"validation failed: {e!s}",
+                )
+                return
+            except Exception as e:
+                logger.exception("open-questions LLM call failed")
+                self._questions_cache = OpenQuestionsCache(
+                    questions=[], refreshed_at=time.time(), error=str(e),
+                )
+                return
+
+            # Re-attach drivers from the original cluster. Drop any
+            # candidate_id the LLM hallucinated.
+            entries: list[OpenQuestionEntry] = []
+            seen_ids: set[int] = set()
+            for q in response.questions:
+                if q.candidate_id in seen_ids:
+                    continue  # LLM merged two cands onto one id; keep first
+                cand = cand_by_id.get(int(q.candidate_id))
+                if cand is None:
+                    continue
+                seen_ids.add(int(q.candidate_id))
+                drivers = [
+                    OpenQuestionDriver(
+                        name=d["name"], user_id=d["user_id"], ts=d["ts"],
+                    )
+                    for d in cand["drivers"]
+                ]
+                entries.append(OpenQuestionEntry(
+                    question=q.question.strip() or cand["question"],
+                    count=int(cand["count"]),
+                    drivers=drivers,
+                    latest_ts=cand["latest_ts"],
+                    last_msg_id=int(cand["last_msg_id"]),
+                ))
+            # Sort newest-ask first (matches the heuristic's tiebreak).
+            entries.sort(key=lambda e: e.latest_ts, reverse=True)
+            entries = entries[:8]
+
+            self._questions_cache = OpenQuestionsCache(
+                questions=entries, refreshed_at=time.time(), error=None,
+            )
+            logger.info(
+                "open questions refreshed: %d candidates → %d open "
+                "(LLM kept %d, dropped %d)",
+                len(candidates), len(entries),
+                len(response.questions),
+                max(0, len(response.questions) - len(entries)),
             )

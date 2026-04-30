@@ -78,6 +78,17 @@
      filtered at the prompt level so they never reach the dashboard. #}
   {% include "partials/engaging_subjects.html" %}
 
+  {# ---------------- Questions in chat ----------------
+     Chat messages containing '?' clustered by token-Jaccard so the
+     same question asked five times shows up once with all askers.
+     Different from Talking to you (which is @-mentions of the
+     streamer) — most chat questions are general "any tips?",
+     "good route?" style asks that the streamer would otherwise
+     miss in the flood. #}
+  {% if chat_questions %}
+    {% include "partials/chat_questions.html" %}
+  {% endif %}
+
   {# ---------------- What to say next (high-impact subjects) ----------------
      Cross-references active chatters against topic_thread driver
      history — finds subjects the LIVE audience would re-engage with.

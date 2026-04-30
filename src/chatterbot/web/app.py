@@ -272,6 +272,17 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 name="engaging_subjects_loop",
             )
         )
+        # Open-questions LLM filter — runs the heuristic
+        # `recent_questions` clusters through an LLM that has full
+        # chat + transcript context, so already-answered or
+        # directed-at-other-chatter asks get dropped before the
+        # panel renders.
+        _bg_tasks.add(
+            asyncio.create_task(
+                insights.open_questions_loop(),
+                name="open_questions_loop",
+            )
+        )
         # OBS screenshot capture — pairs visual context with each
         # transcript group summary. No-op if OBS is unreachable.
         _bg_tasks.add(
@@ -1896,6 +1907,22 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             # streamer can audit the full queue without an extra round
             # trip.
             "direct_mentions": repo.recent_direct_mentions(limit=30),
+            # General chat questions — LLM-curated OPEN questions
+            # only. The heuristic `recent_questions` pass clusters
+            # `?`-bearing chat by token overlap and excludes @-
+            # mentions / Twitch reply rows; the background
+            # `open_questions_loop` then runs that pool through the
+            # LLM with full chat + streamer-voice context to drop
+            # already-answered, rhetorical, or directed-at-another-
+            # chatter asks. The cache exposes the same dict shape
+            # the template was reading (question / count / drivers /
+            # latest_ts / last_msg_id), so no template change needed.
+            "chat_questions": insights.open_questions_cache.questions,
+            # Per-cluster dismissal state — kind='chat_question',
+            # item_key=str(last_msg_id). When a fresh ask comes in
+            # the cluster's last_msg_id changes so the dismissal
+            # naturally stops applying and the question re-surfaces.
+            "cq_states": repo.get_insight_states("chat_question"),
             # Most recent end-of-stream recap, if any.
             "latest_recap": (repo.list_stream_recaps(limit=1) or [None])[0],
             # Recap deltas — last 5 recaps for the cross-stream KPI strip.

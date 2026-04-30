@@ -311,3 +311,39 @@ class EngagingSubjectsResponse(BaseModel):
     to identify distinct subjects."""
 
     subjects: list[EngagingSubject] = Field(default_factory=list, max_length=12)
+
+
+# ---- open chat questions (LLM filter over heuristic candidates) ----
+
+OpenQuestionText = Annotated[
+    str,
+    StringConstraints(min_length=3, max_length=300, strip_whitespace=True),
+]
+
+
+class OpenQuestion(BaseModel):
+    """One genuinely-open question the LLM kept after filtering the
+    heuristic candidate pool. `candidate_id` echoes the integer key
+    the prompt numbered the candidate cluster with (= last_msg_id of
+    the heuristic cluster) so the dashboard can re-attach the original
+    askers + timestamps. `question` may be a lightly refined wording
+    of the cluster's representative text — the LLM is allowed to merge
+    near-dupes the heuristic missed or to clean up filler, but not to
+    invent a question that no chatter actually asked."""
+
+    candidate_id: int
+    question: OpenQuestionText
+
+
+class OpenQuestionsResponse(BaseModel):
+    """Reply for `insights._refresh_open_questions`. The LLM gets a
+    numbered list of candidate question clusters (output of the
+    heuristic `recent_questions` pass) plus the surrounding chat +
+    streamer transcript and returns ONLY the candidates that look
+    like still-OPEN questions to the room — dropping ones that are
+    rhetorical, already answered (in chat OR by the streamer out
+    loud), bot commands, pure reactions, or directed @-replies that
+    slipped past the SQL filter. Empty list is the right answer when
+    nothing in the candidate pool is genuinely open."""
+
+    questions: list[OpenQuestion] = Field(default_factory=list, max_length=8)

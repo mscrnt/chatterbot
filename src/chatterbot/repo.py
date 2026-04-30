@@ -3025,6 +3025,147 @@ class ChatterRepo:
     _MENTION_PREFIX_LEN = 6
     _MIN_PREFIX_HANDLE_LEN = 4  # below this, prefix-match is too noisy
 
+    def recent_questions(
+        self,
+        *,
+        within_minutes: int = 15,
+        limit: int = 8,
+        min_chars: int = 8,
+    ) -> list[dict]:
+        """Cluster recent chat questions and return the most-asked
+        ones, newest-first within ties on count. A "question" is any
+        clean message containing `?` and at least `min_chars`
+        characters.
+
+        Clustering is token-set Jaccard (>=0.6) over short stopword-
+        filtered tokens, so 'whats a good route' and 'whats the route'
+        merge into one row showing both askers. Returns dicts shaped
+        for direct render in the Questions panel:
+
+            {
+              question: str,                         # representative text
+              count: int,                            # askers
+              drivers: list[{name, user_id, ts}],
+              latest_ts: str,
+              last_msg_id: int,
+            }
+
+        Used by /insights → Questions panel. Different from
+        recent_direct_mentions which captures @<channel> talking-to-you
+        messages — most chat questions don't @-mention the streamer."""
+        import re
+        word_re = re.compile(r"[a-z][a-z']{2,}")
+        # Minimal stopword set focused on chat-question filler. Keep
+        # question words (what/when/where/why/how/which) — they help
+        # cluster "what's a route" vs "any route" against "where's
+        # the route" without false-merging unrelated questions.
+        stopwords = frozenset({
+            "the", "and", "for", "you", "are", "was", "were", "with",
+            "this", "that", "have", "has", "had", "but", "not", "all",
+            "any", "can", "will", "would", "could", "should", "your",
+            "their", "them", "they", "his", "her", "him", "she", "yes",
+            "yeah", "yep", "nah", "got", "get", "going", "gonna", "wanna",
+            "say", "said", "see", "saw", "look", "tho", "lol", "lmao",
+            "kek", "fr", "ngl", "btw", "imo", "idk", "tbh", "ok",
+            "okay", "just", "like", "really",
+        })
+
+        def _tokens(text: str) -> set[str]:
+            return {
+                w for w in word_re.findall(text.lower())
+                if w not in stopwords
+            }
+
+        # Pull candidates: clean filter + has '?' + reasonable length
+        # + NOT a reply or @-mention (those questions are addressed
+        # to a specific person and the dashboard's "Talking to you"
+        # panel handles them — this panel is for OPEN questions chat
+        # is asking the room).
+        # SQL excludes:
+        #   - rows with reply_parent_login set (Twitch's native reply
+        #     feature → it's directed at someone)
+        #   - content starting with '@' (chat convention for "I'm
+        #     replying to a specific user")
+        # Pull a wider candidate set (200) than the cap so a hot
+        # chat window has plenty of material to cluster + so the
+        # LLM filter pass downstream has signal to work with.
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT m.id, m.user_id, u.name, u.source, m.ts, m.content
+                FROM messages m
+                JOIN users u ON u.twitch_id = m.user_id
+                WHERE {self._CLEAN_MSG_WHERE}
+                  AND datetime(m.ts) >= datetime('now', ?)
+                  AND m.content LIKE '%?%'
+                  AND length(m.content) >= ?
+                  AND m.reply_parent_login IS NULL
+                  AND m.content NOT LIKE '@%'
+                ORDER BY m.id DESC
+                LIMIT 200
+                """,
+                (f"-{int(within_minutes)} minutes", int(min_chars)),
+            )
+            rows = list(cur.fetchall())
+
+        # Cluster by Szymkiewicz-Simpson overlap coefficient
+        # (intersect / smaller set). Jaccard penalises asymmetry —
+        # one short question vs one long question — and short-vs-
+        # short questions hit a 0.4 ceiling even when they're
+        # obviously the same ask. Overlap recognises 'good route'
+        # appearing in {good, route, game} ∩ {whats, good, route,
+        # start} as 2/3 = 0.67 → cluster. Threshold 0.5 = "more than
+        # half of the smaller question's distinctive tokens overlap"
+        # — empirically the right cut for chat-style questions.
+        # Walking newest → oldest so the representative text stays
+        # current.
+        clusters: list[dict] = []
+        for r in rows:
+            content = (r["content"] or "").strip()
+            toks = _tokens(content)
+            if not toks:
+                continue
+            best_idx, best_sim = -1, 0.0
+            for i, c in enumerate(clusters):
+                if not c["_tokens"]:
+                    continue
+                inter = len(toks & c["_tokens"])
+                smaller = min(len(toks), len(c["_tokens"]))
+                sim = inter / smaller if smaller else 0.0
+                if sim > best_sim:
+                    best_sim = sim
+                    best_idx = i
+            driver = {
+                "name": r["name"], "user_id": r["user_id"], "ts": r["ts"],
+            }
+            if best_sim >= 0.5 and best_idx >= 0:
+                c = clusters[best_idx]
+                # Dedupe driver list by user_id — one chatter asking
+                # the same thing 3 times shouldn't inflate the count.
+                if not any(d["user_id"] == driver["user_id"] for d in c["drivers"]):
+                    c["drivers"].append(driver)
+                    c["count"] += 1
+                # Widen the cluster's vocabulary so subsequent merges
+                # have a richer signature.
+                c["_tokens"] |= toks
+            else:
+                clusters.append({
+                    "question": content,
+                    "_tokens": toks,
+                    "count": 1,
+                    "drivers": [driver],
+                    "latest_ts": r["ts"],
+                    "last_msg_id": int(r["id"]),
+                })
+
+        # Sort: most-asked first; tiebreak on most-recent.
+        clusters.sort(key=lambda c: c["latest_ts"], reverse=True)
+        clusters.sort(key=lambda c: c["count"], reverse=True)
+        return [
+            {k: v for k, v in c.items() if k != "_tokens"}
+            for c in clusters[:int(limit)]
+        ]
+
     def recent_direct_mentions(
         self, *, limit: int = 8, lookback_minutes: int = 30,
     ) -> list[Message]:
