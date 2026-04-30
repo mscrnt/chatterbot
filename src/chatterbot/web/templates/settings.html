@@ -25,7 +25,7 @@
      }"
      x-init="
        const fromUrl = (new URLSearchParams(location.search)).get('tab');
-       tab = (fromUrl && (validSectionIds.includes(fromUrl) || fromUrl === 'diagnostics'))
+       tab = (fromUrl && (validSectionIds.includes(fromUrl) || fromUrl === 'diagnostics' || fromUrl === 'prompts'))
          ? fromUrl
          : validSectionIds[0];
      ">
@@ -85,6 +85,9 @@
       {% for s in sections %}
         <option value="{{ s.id }}">{{ s.title }}</option>
       {% endfor %}
+      {% if prompt_sections %}
+        <option value="prompts">Prompts</option>
+      {% endif %}
       <option value="diagnostics">Diagnostics</option>
     </select>
   </div>
@@ -103,6 +106,18 @@
         <i class="{{ s.icon }} text-xs"></i> {{ s.title }}
       </button>
     {% endfor %}
+    {% if prompt_sections %}
+    <button type="button"
+            role="tab"
+            :aria-selected="tab === 'prompts'"
+            @click="tab = 'prompts'; history.replaceState(null, '', '?tab=prompts')"
+            class="tap inline-flex items-center gap-2 px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-all duration-150 ease-out"
+            :class="tab === 'prompts'
+                    ? 'border-accent text-accent'
+                    : 'border-transparent text-muted hover:text-primary hover:bg-surface-raised'">
+      <i class="fa-solid fa-pen-fancy text-xs"></i> Prompts
+    </button>
+    {% endif %}
     <button type="button"
             role="tab"
             :aria-selected="tab === 'diagnostics'"
@@ -279,9 +294,11 @@
       </div>
     </section>
 
-    {# Save bar — hidden on Diagnostics tab #}
+    {# Save bar — hidden on tabs that don't use the main settings
+       form (Diagnostics is read-only; Prompts has its own per-card
+       forms outside this <form> element). #}
     <div class="flex flex-col sm:flex-row gap-2 sm:items-center sm:justify-between pt-2"
-         x-show="tab !== 'diagnostics'" x-cloak>
+         x-show="tab !== 'diagnostics' && tab !== 'prompts'" x-cloak>
       <p class="text-xs text-muted">
         Saving writes to the <code>app_settings</code> table.
         Bot-related changes need a <code>make bot</code> restart; UI toggles apply on next page load.
@@ -292,6 +309,18 @@
       </button>
     </div>
   </form>
+
+  {# Prompts tab — lives OUTSIDE the main settings <form> because
+     each prompt card is its own form (HTML5 forbids nested forms).
+     Each card POSTs to /settings/prompts/<call_site> and HTMX-swaps
+     itself with the response. #}
+  {% if prompt_sections %}
+    <section x-show="tab === 'prompts'" x-cloak>
+      {% with sections=prompt_sections, card_state=prompts_card_state %}
+        {% include "partials/prompts_panel.html" %}
+      {% endwith %}
+    </section>
+  {% endif %}
 </div>
 
 <style>[x-cloak] { display: none !important; }</style>

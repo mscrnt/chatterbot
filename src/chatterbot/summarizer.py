@@ -1065,12 +1065,15 @@ Bad output (DO NOT DO):
             # 32k floor lets a hot chat fit the whole `recent_messages_for_topics`
             # window without truncating.
             from .insights import INFORMED_NUM_CTX
+            from .llm.prompts import resolve_prompt
             response = await self.llm.generate_structured(
                 prompt=(
                     channel_context
                     + f"Recent chat (oldest first):\n{formatted}"
                 ),
-                system_prompt=TOPICS_SYSTEM,
+                system_prompt=resolve_prompt(
+                    "summarizer.topics_snapshot", self.repo,
+                ),
                 response_model=TopicsResponse,
                 num_ctx=INFORMED_NUM_CTX,
                 think=True,

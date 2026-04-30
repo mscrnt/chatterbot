@@ -1011,6 +1011,33 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 )
 
         from ..diagnose import make_github_issue_url
+        # Build the Prompts tab state — one card per editable prompt,
+        # current mode + adlib values + custom text for each.
+        # Cheap (in-memory dict + a few app_settings lookups). Only
+        # rendered when the streamer switches to the Prompts tab.
+        from ..llm import prompts as _prompts_mod
+        prompt_defs = _prompts_mod.all_prompt_defs()
+        prompts_card_state: dict = {}
+        for pd in prompt_defs:
+            prompts_card_state[pd.call_site] = {
+                "mode": _prompts_mod.get_mode(pd.call_site, repo),
+                "adlib_values": _prompts_mod.get_adlib_values(pd.call_site, repo),
+                "custom_text": _prompts_mod.get_custom_text(pd.call_site, repo),
+            }
+        # Group by section in the order the registry declares so the
+        # UI's section blocks render predictably.
+        prompt_sections: list = []
+        seen_sections: dict = {}
+        for pd in prompt_defs:
+            seen_sections.setdefault(pd.section, []).append(pd)
+        for sec_id in _prompts_mod.SECTION_ORDER:
+            if sec_id in seen_sections:
+                prompt_sections.append((
+                    sec_id,
+                    _prompts_mod.SECTION_TITLES.get(sec_id, sec_id.title()),
+                    seen_sections[sec_id],
+                ))
+
         return TEMPLATES.TemplateResponse(
             request,
             "settings.html",
@@ -1033,6 +1060,10 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "chat_lag_auto_tune_enabled": int(
                     getattr(live, "chat_lag_auto_tune_interval_seconds", 600)
                 ) > 0,
+                # Prompts tab state — see the registry in
+                # chatterbot/llm/prompts.py for what's editable.
+                "prompt_sections": prompt_sections,
+                "prompts_card_state": prompts_card_state,
             },
         )
 
@@ -1072,6 +1103,116 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         tab = (form.get("_tab") or "").strip()
         url = f"/settings?saved=1&tab={tab}" if tab else "/settings?saved=1"
         return RedirectResponse(url=url, status_code=303)
+
+    # ============================================================
+    # Streamer-customizable prompts.
+    #
+    # Each editable call site gets its own card on the Prompts tab.
+    # Cards POST to /settings/prompts/<site> with the chosen mode
+    # plus the appropriate payload (adlib values OR custom text).
+    # The route returns the re-rendered card so HTMX can swap it
+    # in place without a full page reload.
+    #
+    # Streamers who never visit this tab see no behavior change —
+    # `resolve_prompt` falls back to the factory prompt when no
+    # override is stored.
+    # ============================================================
+
+    def _render_prompt_card(
+        request: Request,
+        call_site: str,
+        *,
+        flash: str | None = None,
+        flash_kind: str = "success",
+    ) -> Response:
+        """Render one prompt card with the current saved state +
+        an optional flash banner. Used as the response from save /
+        revert routes so the streamer sees their action confirmed
+        without a full-page reload."""
+        from ..llm import prompts as _prompts_mod
+        pd = _prompts_mod.get_prompt_def(call_site)
+        if pd is None:
+            raise HTTPException(404, "prompt not found")
+        return TEMPLATES.TemplateResponse(
+            request,
+            "partials/prompt_card.html",
+            {
+                "prompt": pd,
+                "mode": _prompts_mod.get_mode(call_site, repo),
+                "adlib_values": _prompts_mod.get_adlib_values(call_site, repo),
+                "custom_text": _prompts_mod.get_custom_text(call_site, repo),
+                "flash": flash,
+                "flash_kind": flash_kind,
+            },
+        )
+
+    @app.post("/settings/prompts/{call_site}", response_class=HTMLResponse)
+    async def settings_prompts_save(request: Request, call_site: str):
+        """Save mode + payload for one prompt card. The mode field
+        determines which payload field is meaningful:
+          - factory  → no payload, just the mode flip
+          - adlibs   → form fields named `adlib__<slot>`, packed
+                       into a JSON dict
+          - custom   → `custom` textarea contents"""
+        from ..llm import prompts as _prompts_mod
+
+        pd = _prompts_mod.get_prompt_def(call_site)
+        if pd is None:
+            raise HTTPException(404, "prompt not editable")
+
+        form = await request.form()
+        mode = (form.get("mode") or "factory").strip().lower()
+        if not _prompts_mod.save_mode(call_site, mode, repo):
+            return _render_prompt_card(
+                request, call_site,
+                flash=f"Invalid mode: {mode!r}.",
+                flash_kind="error",
+            )
+
+        # Persist the mode-specific payload regardless of which
+        # mode is currently active — so a streamer can switch
+        # between modes without losing the values they typed in
+        # the others.
+        adlib_values = {}
+        for slot in pd.adlib_slots:
+            v = form.get(f"adlib__{slot.name}")
+            if v is not None:
+                adlib_values[slot.name] = str(v)
+        if adlib_values:
+            _prompts_mod.save_adlib_values(call_site, adlib_values, repo)
+        custom_payload = form.get("custom")
+        if custom_payload is not None:
+            _prompts_mod.save_custom_text(
+                call_site, str(custom_payload), repo,
+            )
+
+        # Friendly mode-aware flash text — Adlibs / Custom take
+        # effect on the next refresh of the affected feature, so
+        # we explicitly tell the streamer their save IS persisted
+        # but won't be visible until then.
+        mode_flash = {
+            "factory": "Reverted to the factory prompt.",
+            "adlibs":  "Saved. Adlib answers take effect on the next refresh.",
+            "custom":  "Saved. Custom prompt takes effect on the next refresh.",
+        }.get(mode, "Saved.")
+        return _render_prompt_card(
+            request, call_site, flash=mode_flash, flash_kind="success",
+        )
+
+    @app.post(
+        "/settings/prompts/{call_site}/revert", response_class=HTMLResponse,
+    )
+    async def settings_prompts_revert(request: Request, call_site: str):
+        """Wipe every override for a prompt and reset to factory.
+        Idempotent — re-clicking is a no-op."""
+        from ..llm import prompts as _prompts_mod
+        if not _prompts_mod.revert_to_factory(call_site, repo):
+            raise HTTPException(404, "prompt not editable")
+        return _render_prompt_card(
+            request, call_site,
+            flash="Reverted to factory. Adlib answers and custom text cleared.",
+            flash_kind="success",
+        )
 
     # ============================================================
     # Personal training dataset (opt-in capture system).

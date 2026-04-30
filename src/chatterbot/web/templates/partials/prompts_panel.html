@@ -1,0 +1,50 @@
+{# Prompts settings panel — renders all 7 streamer-editable
+   prompts grouped by section. Lives inside settings.html as a
+   self-contained tab body (no shared form — each card has its
+   own submit flow per /settings/prompts/<call_site>).
+
+   Context:
+     - sections: list of (section_id, section_title, list[PromptDef])
+     - card_state: dict[call_site, dict] with mode + adlib_values +
+       custom_text per prompt #}
+
+<div class="space-y-6">
+  <header class="space-y-2">
+    <h2 class="font-semibold text-primary inline-flex items-center gap-2">
+      <i class="fa-solid fa-pen-fancy text-accent"></i> Prompts
+    </h2>
+    <p class="text-xs text-muted">
+      The prompts below drive the AI features on the dashboard.
+      Each one ships with a carefully-tuned factory default; you can
+      switch to <em>Adlibs</em> for a few quick personality dials, or
+      <em>Custom</em> for full control. Empty / not-yet-touched prompts
+      use the factory by default — no behaviour changes until you save.
+    </p>
+    <p class="text-[11px] text-muted italic">
+      Changes apply to the next refresh of each feature (most are
+      every 3-5 minutes). Restart not required.
+    </p>
+  </header>
+
+  {% for section_id, section_title, prompts in sections %}
+    <section class="space-y-3">
+      <h3 class="text-xs font-semibold uppercase tracking-wider text-muted">
+        {{ section_title }}
+      </h3>
+      <div class="space-y-3">
+        {% for prompt in prompts %}
+          {% with
+            prompt=prompt,
+            mode=card_state[prompt.call_site]['mode'],
+            adlib_values=card_state[prompt.call_site]['adlib_values'],
+            custom_text=card_state[prompt.call_site]['custom_text'],
+            flash=None,
+            flash_kind=None
+          %}
+            {% include "partials/prompt_card.html" %}
+          {% endwith %}
+        {% endfor %}
+      </div>
+    </section>
+  {% endfor %}
+</div>

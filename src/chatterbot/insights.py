@@ -452,9 +452,12 @@ class InsightsService:
                 # is the single most-read line on the dashboard while
                 # the streamer is live, so we spend the latency budget
                 # for accuracy. Cadence (~3 min) absorbs the cost.
+                from .llm.prompts import resolve_prompt
                 response = await self.llm.generate_structured(
                     prompt=prompt,
-                    system_prompt=TALKING_POINTS_SYSTEM,
+                    system_prompt=resolve_prompt(
+                        "insights.talking_points", self.repo,
+                    ),
                     response_model=TalkingPointsResponse,
                     num_ctx=INFORMED_NUM_CTX,
                     images=[grid_b64] if grid_b64 else None,
@@ -611,9 +614,12 @@ Empty / partial replies are fine. Skipping is the right call when in doubt.
             # think=True — recaps are cached and persist; getting the
             # observational paraphrase right matters more than finishing
             # in seconds. ~5 min cadence absorbs the latency.
+            from .llm.prompts import resolve_prompt
             response = await self.llm.generate_structured(
                 prompt=prompt,
-                system_prompt=self.THREAD_RECAP_SYSTEM,
+                system_prompt=resolve_prompt(
+                    "insights.thread_recaps", self.repo,
+                ),
                 response_model=ThreadRecapsResponse,
                 num_ctx=self.THREAD_RECAP_NUM_CTX,
                 images=[grid_b64] if grid_b64 else None,
@@ -1124,10 +1130,13 @@ When in doubt, fewer high-quality points beats more weak ones.
             )
 
         from .llm.schemas import SubjectTalkingPointsResponse
+        from .llm.prompts import resolve_prompt
         try:
             response = await self.llm.generate_structured(
                 prompt=prompt,
-                system_prompt=self.SUBJECT_TALKING_POINTS_SYSTEM,
+                system_prompt=resolve_prompt(
+                    "insights.subject_talking_points", self.repo,
+                ),
                 response_model=SubjectTalkingPointsResponse,
                 num_ctx=self.SUBJECT_TALKING_POINTS_NUM_CTX,
                 images=[grid_b64] if grid_b64 else None,
@@ -1486,7 +1495,11 @@ When in doubt, fewer high-quality points beats more weak ones.
             )
 
             facts = await asyncio.to_thread(self._load_streamer_facts)
-            system_prompt = self.SUBJECTS_SYSTEM
+            from .llm.prompts import resolve_prompt
+            base_prompt = resolve_prompt(
+                "insights.engaging_subjects", self.repo,
+            )
+            system_prompt = base_prompt
             if facts:
                 system_prompt = (
                     "STREAMER-AUTHORED CHANNEL FACTS (treat as ground "
@@ -1495,7 +1508,7 @@ When in doubt, fewer high-quality points beats more weak ones.
                     "to be flagged):\n\n"
                     + facts
                     + "\n\n==================================================================\n\n"
-                    + self.SUBJECTS_SYSTEM
+                    + base_prompt
                 )
 
             grid_b64 = await self._latest_screenshot_grid(
@@ -1872,9 +1885,12 @@ When uncertain, drop. Chat will re-ask anything that matters; surfacing an alrea
 
             from .llm.schemas import OpenQuestionsResponse
             try:
+                from .llm.prompts import resolve_prompt
                 response = await self.llm.generate_structured(
                     prompt=prompt,
-                    system_prompt=self.OPEN_QUESTIONS_SYSTEM,
+                    system_prompt=resolve_prompt(
+                        "insights.open_questions", self.repo,
+                    ),
                     response_model=OpenQuestionsResponse,
                     num_ctx=self.OPEN_QUESTIONS_NUM_CTX,
                     think=True,

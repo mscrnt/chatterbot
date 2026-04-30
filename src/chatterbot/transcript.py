@@ -1495,8 +1495,11 @@ Reply with `summary` = the line(s) (or empty string).
         # saw, not a re-queried approximation.
         chat_message_ids = [int(m.id) for m in chat_msgs if getattr(m, "id", None)]
 
+        from .llm.prompts import resolve_prompt
         return {
-            "system_prompt": self.GROUP_SUMMARY_SYSTEM,
+            "system_prompt": resolve_prompt(
+                "transcript.group_summary", self.repo,
+            ),
             "user_prompt": user_prompt,
             "screenshot_count": screenshot_count,
             "screenshot_grid_b64": grid_b64,
@@ -1555,9 +1558,12 @@ Reply with `summary` = the line(s) (or empty string).
             # has elapsed (not realtime) and the streamer reads it on
             # the dashboard, so accuracy beats latency.
             from .llm.schemas import TranscriptGroupSummaryResponse
+            from .llm.prompts import resolve_prompt
             response = await self.llm.generate_structured(
                 prompt=prompt,
-                system_prompt=self.GROUP_SUMMARY_SYSTEM,
+                system_prompt=resolve_prompt(
+                    "transcript.group_summary", self.repo,
+                ),
                 response_model=TranscriptGroupSummaryResponse,
                 num_ctx=self.GROUP_SUMMARY_NUM_CTX,
                 images=[grid_b64] if grid_b64 else None,
