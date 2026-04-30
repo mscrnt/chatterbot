@@ -64,7 +64,7 @@ if mode == "factory":
 ```
 
 Real implementation:
-[`llm/prompts.py:resolve_prompt`](../src/chatterbot/llm/prompts.py).
+[`llm/prompts.py:resolve_prompt`](../src/chatterbot/llm/prompts.py#L657-L718).
 
 ### Guided
 
@@ -128,10 +128,12 @@ new call picks up the streamer's current saved values.
 Three steps:
 
 1. **Add a `PromptDef` to the registry** in
-   [`llm/prompts.py:_build_registry`](../src/chatterbot/llm/prompts.py).
+   [`llm/prompts.py:_build_registry`](../src/chatterbot/llm/prompts.py#L120-L567).
    Set `factory=` to the existing constant (import it from the call
    site's module). Build `guided_template` as `factory + injection_block`
-   with `{slot_name}` placeholders. Define `guided_slots`.
+   with `{slot_name}` placeholders. Define `guided_slots`. The
+   `PromptDef` + `GuidedSlot` dataclasses are at
+   [`llm/prompts.py`](../src/chatterbot/llm/prompts.py#L58-L97).
 
 2. **Switch the call site** to use `resolve_prompt` instead of the
    hardcoded constant:
@@ -146,8 +148,8 @@ Three steps:
    ```
 
 3. **Add the call site to the test registry**. The
-   `EXPECTED_CALL_SITES` set in
-   [`tests/dataset/test_call_sites.py`](../tests/dataset/test_call_sites.py)
+   `EXPECTED_CALL_SITES` set at
+   [`tests/dataset/test_call_sites.py`](../tests/dataset/test_call_sites.py#L72-L84)
    pins which sites pass `call_site=` through to dataset capture; if
    the new prompt's call site isn't there, the AST-walk test fails.
 
@@ -169,4 +171,4 @@ The registry deliberately covers only **streamer-personality** /
 
 A test pins this list so a future contributor adding a moderator-prompt
 edit accidentally fails CI and has to think hard about it. See
-[`tests/llm/test_prompts_registry.py:test_correctness_critical_sites_are_NOT_editable`](../tests/llm/test_prompts_registry.py).
+[`tests/llm/test_prompts_registry.py:test_correctness_critical_sites_are_NOT_editable`](../tests/llm/test_prompts_registry.py#L293-L308).

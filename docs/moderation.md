@@ -61,8 +61,10 @@ The moderator loop runs in the bot process. Periodically:
    `status='open'`.
 5. Watermark advances so the next pass starts where this one left off.
 
-Implementation:
-[`moderator.py`](../src/chatterbot/moderator.py).
+Implementation: the loop + LLM call live in
+[`moderator.py`](../src/chatterbot/moderator.py); the system prompt
+itself is at
+[`moderator.py:MOD_REVIEW_SYSTEM`](../src/chatterbot/moderator.py#L29-L59).
 
 ## What it doesn't do
 

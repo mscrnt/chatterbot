@@ -127,7 +127,7 @@ what was happening. The summary includes:
   same chat slice)
 
 The LLM call lives in
-[`transcript.py:_run_group_summary`](../src/chatterbot/transcript.py).
+[`transcript.py:_run_group_summary`](../src/chatterbot/transcript.py#L1514-L1620).
 Customizable via the `transcript.group_summary` prompt entry — see
 [prompts.md](prompts.md).
 
@@ -145,7 +145,9 @@ a frame from OBS via `obs-websocket` and saves it to
 
 The 2x2 grid stitched into group summaries uses the most-recent N
 screenshots (default 4) within the group's time window. Stitching
-is done with Pillow in `transcript.py:_stitch_grid` — output is a
+is done with Pillow in
+[`transcript.py:_stitch_grid`](../src/chatterbot/transcript.py#L42-L85)
+— output is a
 single ~960x540 JPEG that gets base64'd into the LLM's `images=`
 parameter.
 

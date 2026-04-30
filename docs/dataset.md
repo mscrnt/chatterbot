@@ -139,7 +139,7 @@ finally:
 ```
 
 Real implementation:
-[`llm/ollama_client.py:generate_structured`](../src/chatterbot/llm/ollama_client.py)
+[`llm/ollama_client.py:generate_structured`](../src/chatterbot/llm/ollama_client.py#L166-L237)
 (plus equivalents in
 [`llm/providers.py`](../src/chatterbot/llm/providers.py) for Anthropic
 + OpenAI).
@@ -169,7 +169,7 @@ fine-tune bundles be self-contained without needing the full
 `chatters.db` attached.
 
 Background loop in
-[`dataset/loops.py:context_snapshot_loop`](../src/chatterbot/dataset/loops.py).
+[`dataset/loops.py:context_snapshot_loop`](../src/chatterbot/dataset/loops.py#L151-L181).
 
 ## Storage shape
 
@@ -214,7 +214,10 @@ def record_llm_call_safe(repo, ...):
 ```
 
 Real implementation:
-[`dataset/capture.py`](../src/chatterbot/dataset/capture.py).
+[`dataset/capture.py:record_llm_call_safe`](../src/chatterbot/dataset/capture.py#L202-L264)
+(the safe wrapper) +
+[`record_llm_call`](../src/chatterbot/dataset/capture.py#L267-L356)
+(the encrypt-and-write path).
 
 ### Schema version
 
@@ -245,7 +248,7 @@ not lose this week's events.
 Idempotent — running `compact` twice produces no extra deletions.
 
 Implementation:
-[`dataset/retention.py`](../src/chatterbot/dataset/retention.py).
+[`dataset/retention.py:compact`](../src/chatterbot/dataset/retention.py#L106-L200).
 
 ## Export
 
@@ -268,7 +271,7 @@ Browser-side export lives at `/dataset/export` in the dashboard;
 returns the same `.cbds` bundle as a download.
 
 Implementation:
-[`dataset/cli.py:cmd_export`](../src/chatterbot/dataset/cli.py).
+[`dataset/cli.py:cmd_export`](../src/chatterbot/dataset/cli.py#L253-L411).
 
 ## Redaction
 

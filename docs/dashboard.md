@@ -65,7 +65,7 @@ re-render when HTMX subscribers receive an SSE event from the
 [cross-process bus](architecture.md#cross-process-notification).
 
 Per-card actions — dismiss, addressed, snooze, pin — go through
-[`repo.set_insight_state`](../src/chatterbot/repo.py) and write to
+[`repo.set_insight_state`](../src/chatterbot/repo.py#L2159-L2219) and write to
 `insight_states` + `insight_state_history`. The audit page at
 `/audit` shows every transition.
 
@@ -106,7 +106,7 @@ on the search input — no client-side JS for the search itself.
 
 `/settings` is the dashboard's configuration tab. Most knobs are KV
 entries in `app_settings` (see
-[`config.py:EDITABLE_SETTING_KEYS`](../src/chatterbot/config.py)),
+[`config.py:EDITABLE_SETTING_KEYS`](../src/chatterbot/config.py#L25-L110)),
 rendered via the metadata in
 [`web/settings_meta.py`](../src/chatterbot/web/settings_meta.py).
 

@@ -107,7 +107,7 @@ loop is "edit Python, hard-refresh." See the Dashboard section of
 ## Schema
 
 Every persistent table lives in `data/chatters.db`. The schema is built
-on first connection by [`repo.py:_init_schema`](../src/chatterbot/repo.py)
+on first connection by [`repo.py:_init_schema`](../src/chatterbot/repo.py#L465-L1117)
 and migrated additively (PRAGMA table_info → ALTER TABLE pattern) on
 subsequent connections. No migration tool — additive only, no destructive
 schema changes after data lands.

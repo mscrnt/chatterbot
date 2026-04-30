@@ -157,8 +157,8 @@ A few conventions worth knowing about:
 ### Migrations
 
 - Additive only. No destructive schema changes after data lands.
-- Pattern: `PRAGMA table_info` + `ALTER TABLE` inside the
-  `_init_schema` block in [`repo.py`](../src/chatterbot/repo.py).
+- Pattern: `PRAGMA table_info` + `ALTER TABLE` inside
+  [`repo.py:_init_schema`](../src/chatterbot/repo.py#L465-L1117).
 
 ### Commits
 
@@ -176,6 +176,29 @@ A few conventions worth knowing about:
   cluster IDs are brittle.
 - Skip tests that need external services unless an env var
   configures them in (see the replay-tier pattern).
+
+### Documentation
+
+- Function-level references in `docs/` use line-range anchors:
+  `[insights.py:_refresh_engaging_subjects](../src/chatterbot/insights.py#L1282-L1713)`.
+  These rot when the underlying code moves. **If you refactor
+  function locations, re-validate doc links**:
+
+  ```bash
+  # Walk every relative .md link and check it resolves to a real
+  # file. A separate sanity check confirms the line ranges still
+  # straddle the named symbol.
+  python -m doc_link_check  # (TODO: ship this script)
+  ```
+
+  Until that helper ships, a quick manual sweep: search the docs
+  for `#L` after any rename / file split, and re-pin against the
+  new line numbers. General "see this module" refs (without a
+  symbol name in the display text) stay file-level and don't rot.
+
+- One short docstring at the top of each `docs/*.md` explains
+  what the doc covers; sub-sections follow the README's link
+  table order.
 
 ## Filing bugs
 
@@ -210,9 +233,9 @@ Before submitting:
 
 1. Run `uv run pytest` locally and confirm all tests pass
 2. Run `uv run ruff check src/ tests/` for lint
-3. If you added a new LLM call site, add it to
-   `EXPECTED_CALL_SITES` in
-   [`tests/dataset/test_call_sites.py`](../tests/dataset/test_call_sites.py)
+3. If you added a new LLM call site, add it to the
+   `EXPECTED_CALL_SITES` set at
+   [`tests/dataset/test_call_sites.py`](../tests/dataset/test_call_sites.py#L72-L84)
 4. If you touched a streamer-personality prompt, consider whether it
    should go in the editable registry in
    [`llm/prompts.py`](../src/chatterbot/llm/prompts.py) — see

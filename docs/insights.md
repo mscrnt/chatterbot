@@ -37,7 +37,7 @@ How it works:
 6. Cache by `(user_id, name, point)` for the dashboard render.
 
 Implementation:
-[`insights.py:_refresh`](../src/chatterbot/insights.py).
+[`insights.py:_refresh`](../src/chatterbot/insights.py#L369-L497).
 
 Streamer rules baked into the system prompt:
 
@@ -85,7 +85,7 @@ sha1-of-name-lowercased prefix the dashboard uses for routing
 (`/modals/subject/{slug}`, `/insights/subject/{slug}/reject`).
 
 Implementation:
-[`insights.py:_refresh_engaging_subjects`](../src/chatterbot/insights.py).
+[`insights.py:_refresh_engaging_subjects`](../src/chatterbot/insights.py#L1282-L1713).
 
 Streamer-customizable via the `insights.engaging_subjects` prompt entry.
 See [prompts.md](prompts.md). The customizable knobs cover subject
@@ -129,7 +129,7 @@ The talking-points generator is `insights.subject_talking_points` in
 the streamer-customizable prompt registry. Customizable knobs cover
 voice / style, things to avoid, count of points, and self-disclosure
 level. Implementation:
-[`insights.py:generate_subject_talking_points`](../src/chatterbot/insights.py).
+[`insights.py:generate_subject_talking_points`](../src/chatterbot/insights.py#L1034-L1156).
 
 The modal template is
 [`templates/modals/_engaging_subject.html`](../src/chatterbot/web/templates/modals/_engaging_subject.html).
@@ -156,7 +156,7 @@ Cache shape mirrors the heuristic dict (`question`, `count`, `drivers`,
 `latest_ts`, `last_msg_id`) so the template renders without changes.
 
 Implementation:
-[`insights.py:_refresh_open_questions`](../src/chatterbot/insights.py).
+[`insights.py:_refresh_open_questions`](../src/chatterbot/insights.py#L1782-L1950).
 
 Streamer-customizable via the `insights.open_questions` prompt entry.
 Knobs cover filter strictness, streamer-relevance preference, and how
@@ -173,7 +173,7 @@ returns recaps. Recaps go to `topic_threads.recap`; the dashboard reads
 from there.
 
 Implementation:
-[`insights.py:_refresh_thread_recaps`](../src/chatterbot/insights.py).
+[`insights.py:_refresh_thread_recaps`](../src/chatterbot/insights.py#L544-L653).
 
 Streamer-customizable via the `insights.thread_recaps` prompt entry.
 Knobs cover tone, length, and focus (content vs mood vs both).
@@ -183,7 +183,7 @@ Knobs cover tone, length, and focus (content vs mood vs both).
 Regulars who are currently in chat (active in the last 30 min) and that
 the streamer hasn't talked to in the last 7 days. Pure SQL — no LLM
 call. Implementation:
-[`repo.list_neglected_lurkers`](../src/chatterbot/repo.py).
+[`repo.list_neglected_lurkers`](../src/chatterbot/repo.py#L3961-L4004).
 
 ## Talking to you
 
@@ -196,7 +196,7 @@ three signals:
 3. Twitch IRCv3 reply tag pointing at the streamer
 
 Implementation:
-[`repo.recent_direct_mentions`](../src/chatterbot/repo.py).
+[`repo.recent_direct_mentions`](../src/chatterbot/repo.py#L3256-L3357).
 
 ## Card actions
 
