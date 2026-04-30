@@ -26,6 +26,11 @@
     </p>
   </header>
 
+  {# Channel-facts editor — sits above the prompt cards because
+     streamer_facts.md grounds 5 of them. Editing it here keeps the
+     LLM-tuning surface in one place. #}
+  {% include "partials/streamer_facts_editor.html" %}
+
   {% for section_id, section_title, prompts in sections %}
     <section class="space-y-3">
       <h3 class="text-xs font-semibold uppercase tracking-wider text-muted">

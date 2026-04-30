@@ -1064,6 +1064,10 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 # chatterbot/llm/prompts.py for what's editable.
                 "prompt_sections": prompt_sections,
                 "prompts_card_state": prompts_card_state,
+                # Streamer-facts editor state — sits at the top of the
+                # Prompts tab. Same shape the POST handler returns so
+                # the HTMX swap behaves identically.
+                **_build_streamer_facts_context(),
             },
         )
 
@@ -1212,6 +1216,136 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             request, call_site,
             flash="Reverted to factory. Guided answers and custom text cleared.",
             flash_kind="success",
+        )
+
+    # Soft cap matching the loader's truncation point so the editor's
+    # counter and the loader agree on what gets sent to the LLM.
+    _STREAMER_FACTS_MAX_CHARS = 4000
+
+    def _streamer_facts_paths() -> tuple[Path | None, str]:
+        """Resolve the configured streamer-facts path. Returns
+        `(absolute_path, display_path)` — `display_path` is the value
+        as configured (relative or absolute) so the editor can show
+        the streamer where they actually pointed it. `absolute_path`
+        is None when the setting is empty / unset."""
+        live = get_settings()
+        configured = (
+            getattr(live, "streamer_facts_path", "") or ""
+        ).strip()
+        if not configured:
+            return None, ""
+        p = Path(configured)
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        return p, configured
+
+    def _build_streamer_facts_context(
+        *, flash: str | None = None, flash_kind: str = "success",
+    ) -> dict:
+        """Pull the editor's render context — current text + writable
+        check + size + cap — in one place so the GET path on /settings
+        and the POST handler return the same shape."""
+        abs_path, display = _streamer_facts_paths()
+        text = ""
+        size = 0
+        writable = False
+        if abs_path is not None:
+            try:
+                if abs_path.exists() and abs_path.is_file():
+                    text = abs_path.read_text(encoding="utf-8")
+                    size = len(text.encode("utf-8"))
+                    writable = True
+                elif not abs_path.exists():
+                    # File doesn't exist yet but we can still write to
+                    # it as long as the parent directory is real and
+                    # writable. Empty editor surfaces with a "save to
+                    # create" affordance.
+                    parent = abs_path.parent
+                    writable = parent.is_dir()
+                # Path resolves to a directory or other non-file thing
+                # → leave writable=False so the editor surfaces the
+                # warning state instead of silently overwriting.
+            except (OSError, UnicodeDecodeError):
+                writable = False
+        return {
+            "facts_path": str(abs_path) if abs_path else "",
+            "facts_path_display": display,
+            "facts_text": text,
+            "facts_size": size,
+            "facts_max": _STREAMER_FACTS_MAX_CHARS,
+            "facts_writable": writable,
+            "flash": flash,
+            "flash_kind": flash_kind,
+        }
+
+    @app.post("/settings/streamer-facts", response_class=HTMLResponse)
+    async def settings_streamer_facts_save(request: Request):
+        """Write the streamer-facts file and re-render the editor card.
+
+        On success, the InsightsService picks up the new content via
+        its mtime-cached `_load_streamer_facts` on the next LLM call
+        — no explicit cache flush needed. On failure (path unset,
+        directory unwritable, payload too large), surface a flash and
+        leave the file untouched."""
+        abs_path, display = _streamer_facts_paths()
+        if abs_path is None:
+            ctx = _build_streamer_facts_context(
+                flash=(
+                    "No path configured. Set "
+                    "streamer_facts_path in Settings → Insights first."
+                ),
+                flash_kind="error",
+            )
+            return TEMPLATES.TemplateResponse(
+                request, "partials/streamer_facts_editor.html", ctx,
+            )
+        if abs_path.exists() and not abs_path.is_file():
+            ctx = _build_streamer_facts_context(
+                flash=(
+                    f"Path {display!r} exists but is not a regular "
+                    "file. Refusing to overwrite."
+                ),
+                flash_kind="error",
+            )
+            return TEMPLATES.TemplateResponse(
+                request, "partials/streamer_facts_editor.html", ctx,
+            )
+        form = await request.form()
+        content = (form.get("content") or "").replace("\r\n", "\n")
+        # Hard cap = soft cap × 2 so the editor's counter going
+        # slightly red doesn't reject a save outright; a runaway
+        # paste 10× the cap does.
+        if len(content) > _STREAMER_FACTS_MAX_CHARS * 2:
+            ctx = _build_streamer_facts_context(
+                flash=(
+                    f"Content too long ({len(content)} chars). Trim "
+                    f"to under {_STREAMER_FACTS_MAX_CHARS * 2} chars."
+                ),
+                flash_kind="error",
+            )
+            return TEMPLATES.TemplateResponse(
+                request, "partials/streamer_facts_editor.html", ctx,
+            )
+        try:
+            abs_path.parent.mkdir(parents=True, exist_ok=True)
+            abs_path.write_text(content, encoding="utf-8")
+        except OSError as e:
+            ctx = _build_streamer_facts_context(
+                flash=f"Couldn't write file: {e}",
+                flash_kind="error",
+            )
+            return TEMPLATES.TemplateResponse(
+                request, "partials/streamer_facts_editor.html", ctx,
+            )
+        ctx = _build_streamer_facts_context(
+            flash=(
+                f"Saved ({len(content)} chars). The next AI refresh "
+                "picks up the change."
+            ),
+            flash_kind="success",
+        )
+        return TEMPLATES.TemplateResponse(
+            request, "partials/streamer_facts_editor.html", ctx,
         )
 
     # ============================================================
