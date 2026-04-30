@@ -713,6 +713,15 @@ FIELDS: dict[str, dict[str, Any]] = {
         "type": "secret",
         "advanced": True,
     },
+    # ============================================================
+    # PERSONAL TRAINING DATASET (opt-in, off by default)
+    # ============================================================
+    "dataset_capture_enabled": {
+        "label": "Capture training dataset",
+        "tooltip": "Save every AI prompt + your dashboard actions, encrypted, for future fine-tuning.",
+        "help": "Off by default. When ON (and you've run setup with a passphrase), every AI prompt + your dismiss/snooze/correct actions get encrypted and saved to data/dataset/. Down the line you can export the bundle and use it to fine-tune your own model. Setup, status, and export live on the Dataset page (look for it in the nav). Capture also needs CHATTERBOT_DATASET_PASSPHRASE in the bot/dashboard environment to unlock — without it the toggle is on but nothing gets written.",
+        "type": "bool",
+    },
 }
 
 
@@ -1099,6 +1108,18 @@ SECTIONS: list[dict[str, Any]] = [
                     "dashboard_internal_url",
                     "internal_notify_secret",
                 ],
+            },
+            {
+                "id": "advanced-dataset",
+                "title": "Personal training dataset (opt-in)",
+                "icon": "fa-solid fa-database",
+                "blurb": (
+                    "Off by default. When on, encrypts every AI prompt + "
+                    "your dashboard actions to disk so you can fine-tune "
+                    "your own model later. Setup, status, and export live "
+                    "on the Dataset page."
+                ),
+                "fields": ["dataset_capture_enabled"],
             },
         ],
     },

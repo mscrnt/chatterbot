@@ -136,6 +136,20 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             return True
     TEMPLATES.env.globals["live_widget_enabled"] = _live_widget_enabled
 
+    # Personal-dataset nav link visibility. Hidden by default to keep
+    # the nav clean for installs that don't care about capture; shown
+    # the moment the streamer opts in OR runs setup. Both cases mean
+    # they're actively engaging with the feature and want easy access.
+    def _dataset_nav_visible() -> bool:
+        try:
+            return (
+                repo.dataset_capture_enabled()
+                or bool(repo.get_app_setting("dataset_key_wrapped"))
+            )
+        except Exception:
+            return False
+    TEMPLATES.env.globals["dataset_nav_visible"] = _dataset_nav_visible
+
     # Newcomers nav pill — count of first-timers in the last 24h NEWER than
     # the streamer's last acknowledgment. Visiting /insights acks. Pill goes
     # away after the visit until a fresh chatter shows up.
@@ -981,6 +995,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "discord_enabled",
             "whisper_enabled",
             "whisper_llm_match_enabled",
+            "dataset_capture_enabled",
         }
     )
 
@@ -1006,6 +1021,277 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         tab = (form.get("_tab") or "").strip()
         url = f"/settings?saved=1&tab={tab}" if tab else "/settings?saved=1"
         return RedirectResponse(url=url, status_code=303)
+
+    # ============================================================
+    # Personal training dataset (opt-in capture system).
+    #
+    # Three browser-facing routes:
+    #   GET  /dataset           — status page, no decryption.
+    #   POST /dataset/setup     — generate + wrap a fresh DEK,
+    #                              persist, flash recovery string.
+    #   POST /dataset/export    — produce a .cbds bundle for
+    #                              download.
+    #
+    # The capture machinery itself lives in chatterbot.dataset; the
+    # routes here are thin wrappers that surface those CLI commands
+    # in the dashboard. Bot/dashboard processes still need
+    # CHATTERBOT_DATASET_PASSPHRASE in their env to actually unlock
+    # the DEK at startup — the dashboard alone can't notify the bot
+    # process about an unlock yet (slice 5+).
+    # ============================================================
+
+    def _dataset_status() -> dict:
+        """Snapshot of the capture system's runtime state for the
+        /dataset page. Read-only; never decrypts anything. Mirrors
+        the shape `chatterbot dataset info` prints to stdout."""
+        configured = bool(repo.get_app_setting("dataset_key_wrapped"))
+        from .. import dataset as dataset_pkg
+        from ..dataset import capture as _cap
+        per_kind = {}
+        total = 0
+        total_bytes = 0
+        try:
+            total = repo.dataset_event_count()
+            for k in (
+                _cap.EVENT_LLM_CALL,
+                _cap.EVENT_STREAMER_ACTION,
+                _cap.EVENT_CONTEXT_SNAPSHOT,
+            ):
+                n = repo.dataset_event_count(kind=k)
+                if n:
+                    per_kind[k] = n
+            with repo._cursor() as cur:  # noqa: SLF001 — small read
+                cur.execute(
+                    "SELECT COALESCE(SUM(byte_length), 0) AS s "
+                    "FROM dataset_events"
+                )
+                row = cur.fetchone()
+                total_bytes = int(row["s"]) if row else 0
+        except Exception:
+            logger.exception("dataset status query failed")
+        # Suppress unused-import warning while keeping the lazy
+        # import in this function (slice-4 surface keeps a reference
+        # so a future call site doesn't have to re-add it).
+        _ = dataset_pkg
+        return {
+            "configured": configured,
+            "enabled": repo.dataset_capture_enabled(),
+            "unlocked": repo.dataset_dek() is not None,
+            "fingerprint": repo.get_app_setting("dataset_key_fingerprint") or "",
+            "total_events": total,
+            "total_bytes": total_bytes,
+            "per_kind": per_kind,
+        }
+
+    @app.get("/dataset", response_class=HTMLResponse)
+    async def dataset_page(
+        request: Request,
+        flash: str | None = Query(None),
+        flash_kind: str | None = Query(None),
+        recovery: str | None = Query(None),
+    ):
+        # Recent-events list — index-only (no decryption). Last 20
+        # rows newest-first.
+        recent = []
+        try:
+            rows = list(repo.iter_dataset_events())
+            recent = list(reversed(rows[-20:]))
+        except Exception:
+            logger.exception("dataset: recent events query failed")
+        return TEMPLATES.TemplateResponse(
+            request, "dataset.html",
+            {
+                "status": _dataset_status(),
+                "recent_events": recent,
+                "flash": flash,
+                "flash_kind": (flash_kind or "info"),
+                # Setup flashes the recovery string ONCE via the
+                # redirect querystring. The page renders it inside a
+                # warning banner and tells the streamer to save it.
+                "recovery_string": recovery,
+            },
+        )
+
+    @app.post("/dataset/setup")
+    async def dataset_setup(request: Request):
+        """Generate a fresh DEK, wrap it under the streamer's
+        passphrase, persist. Refuses to overwrite an existing wrapped
+        DEK — the streamer would lose access to past events. Use
+        the CLI's `--force` flag for that case (intentionally not
+        exposed in the browser to avoid an accidental click)."""
+        if repo.get_app_setting("dataset_key_wrapped"):
+            return RedirectResponse(
+                url="/dataset?flash=Dataset+is+already+initialised.+"
+                    "Use+the+CLI+with+--force+to+rotate.&flash_kind=error",
+                status_code=303,
+            )
+        form = await request.form()
+        passphrase = (form.get("passphrase") or "").strip()
+        confirm = (form.get("passphrase_confirm") or "").strip()
+        if not passphrase or len(passphrase) < 6:
+            return RedirectResponse(
+                url="/dataset?flash=Passphrase+must+be+at+least+6+characters."
+                    "&flash_kind=error",
+                status_code=303,
+            )
+        if passphrase != confirm:
+            return RedirectResponse(
+                url="/dataset?flash=Passphrases+don%27t+match.&flash_kind=error",
+                status_code=303,
+            )
+
+        try:
+            from ..dataset import cipher
+        except ImportError:
+            return RedirectResponse(
+                url="/dataset?flash=The+dataset+extra+isn%27t+installed."
+                    "+Run+%60uv+sync+--extra+dataset%60+first.&flash_kind=error",
+                status_code=303,
+            )
+
+        # Argon2id is intentionally slow (100s of ms) — run it off the
+        # event loop so /dataset/setup doesn't block other requests.
+        def _do_setup() -> tuple[str, str]:
+            dek = cipher.generate_dek()
+            wrapped = cipher.wrap_dek(dek, passphrase)
+            fingerprint = cipher.fingerprint_dek(dek)
+            recovery = cipher.dek_to_recovery_string(dek)
+            repo.set_app_setting("dataset_key_wrapped", wrapped.to_json())
+            repo.set_app_setting("dataset_key_fingerprint", fingerprint)
+            if repo.get_app_setting("dataset_capture_enabled") is None:
+                repo.set_app_setting("dataset_capture_enabled", "false")
+            # Install the unlocked DEK so this dashboard process can
+            # immediately capture without restarting. The bot process
+            # (separate) still needs CHATTERBOT_DATASET_PASSPHRASE on
+            # its next restart.
+            repo.set_dataset_dek(dek)
+            llm.attach_dataset_capture(repo) if hasattr(
+                llm, "attach_dataset_capture"
+            ) else None
+            return fingerprint, recovery
+
+        try:
+            _, recovery = await asyncio.to_thread(_do_setup)
+        except Exception:
+            logger.exception("dataset setup failed")
+            return RedirectResponse(
+                url="/dataset?flash=Setup+failed+%E2%80%94+see+server+logs."
+                    "&flash_kind=error",
+                status_code=303,
+            )
+
+        # URL-encode the recovery string carefully — it has hyphens
+        # and base32 chars only, all URL-safe, but go through quote
+        # for safety.
+        from urllib.parse import quote
+        return RedirectResponse(
+            url=(
+                "/dataset"
+                "?flash=Dataset+key+generated.+Save+the+recovery+string+below."
+                f"&flash_kind=success&recovery={quote(recovery)}"
+            ),
+            status_code=303,
+        )
+
+    @app.post("/dataset/export")
+    async def dataset_export(request: Request):
+        """Decrypt every indexed event under the streamer's
+        passphrase, repack into a single passphrase-protected .cbds
+        bundle, return as a download. Mirrors `chatterbot dataset
+        export` from the CLI."""
+        form = await request.form()
+        passphrase = (form.get("passphrase") or "").strip()
+        since = (form.get("since") or "").strip() or None
+        until = (form.get("until") or "").strip() or None
+        if not passphrase:
+            return RedirectResponse(
+                url="/dataset?flash=Passphrase+required.&flash_kind=error",
+                status_code=303,
+            )
+
+        wrapped_raw = repo.get_app_setting("dataset_key_wrapped")
+        if not wrapped_raw:
+            return RedirectResponse(
+                url="/dataset?flash=No+dataset+key+%E2%80%94+run+setup+first."
+                    "&flash_kind=error",
+                status_code=303,
+            )
+
+        try:
+            from ..dataset import cipher
+        except ImportError:
+            return RedirectResponse(
+                url="/dataset?flash=The+dataset+extra+isn%27t+installed."
+                    "&flash_kind=error",
+                status_code=303,
+            )
+
+        def _do_export() -> bytes | None:
+            """Run the export pipeline off the event loop. Returns
+            the bundle bytes on success, None on a recoverable
+            error (wrong passphrase / no events). Reuses the CLI's
+            cmd_export logic by writing to a temp file then reading
+            back — the function already handles the encrypt-and-
+            tar pipeline correctly, no need to duplicate it."""
+            try:
+                wrapped = cipher.WrappedDEK.from_json(wrapped_raw)
+                cipher.unwrap_dek(wrapped, passphrase)  # validates passphrase
+            except Exception:
+                return None
+            import tempfile
+            from pathlib import Path
+            from ..dataset.cli import cmd_export
+
+            class _S:  # cmd_export reads .db_path / .ollama_embed_dim
+                db_path = repo.db_path
+                ollama_embed_dim = settings.ollama_embed_dim
+
+            # cmd_export prompts for the passphrase via getpass —
+            # patch it for this single invocation. The patch is
+            # local: re-imports of the cli module after this call
+            # see the original prompt function back.
+            from ..dataset import cli as _cli
+            saved = _cli._prompt_passphrase
+            _cli._prompt_passphrase = lambda *a, **k: passphrase
+            try:
+                with tempfile.NamedTemporaryFile(
+                    suffix=".cbds", delete=False,
+                ) as tf:
+                    out_path = Path(tf.name)
+                rc = cmd_export(_S(), out_path, since=since, until=until)
+                if rc != 0 or not out_path.exists():
+                    out_path.unlink(missing_ok=True)
+                    return None
+                data = out_path.read_bytes()
+                out_path.unlink(missing_ok=True)
+                return data
+            finally:
+                _cli._prompt_passphrase = saved
+
+        try:
+            bundle_bytes = await asyncio.to_thread(_do_export)
+        except Exception:
+            logger.exception("dataset export failed")
+            return RedirectResponse(
+                url="/dataset?flash=Export+failed+%E2%80%94+see+server+logs."
+                    "&flash_kind=error",
+                status_code=303,
+            )
+        if bundle_bytes is None:
+            return RedirectResponse(
+                url="/dataset?flash=Export+failed+%E2%80%94+wrong+passphrase+"
+                    "or+no+events+in+range.&flash_kind=error",
+                status_code=303,
+            )
+
+        from datetime import datetime, timezone
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        filename = f"chatterbot-dataset-{stamp}.cbds"
+        return Response(
+            content=bundle_bytes,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     _CHAT_LAG_LOOKBACK_OPTIONS = (5, 15, 30)
 

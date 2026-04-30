@@ -100,6 +100,13 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     # ---------- Cross-process bus ----------
     "dashboard_internal_url",
     "internal_notify_secret",
+    # ---------- Personal training dataset (opt-in capture) ----------
+    # Single user-facing toggle. The wrapped DEK / fingerprint /
+    # other dataset_* keys are managed by the dataset CLI + the
+    # /dataset page directly via repo.set_app_setting and aren't
+    # editable through the standard /settings form (they need
+    # passphrase derivation that the form pipeline can't model).
+    "dataset_capture_enabled",
 )
 
 # Subset that should be rendered as password inputs. Blank submissions for
@@ -189,6 +196,15 @@ class Settings(BaseSettings):
     #     X-Internal-Secret header. Empty disables auth (dev only).
     dashboard_internal_url: str = "http://dashboard:8765"
     internal_notify_secret: str = ""
+
+    # Personal training dataset capture. Off by default. When on AND
+    # a wrapped DEK has been generated (CLI: `chatterbot dataset
+    # setup`, or via /dataset in the dashboard) AND the bot/dashboard
+    # process has CHATTERBOT_DATASET_PASSPHRASE in its env, every
+    # structured LLM call + dashboard mutation is encrypted and
+    # appended to data/dataset/shards/ for later fine-tuning. See
+    # src/chatterbot/dataset/.
+    dataset_capture_enabled: bool = False
 
     # OBS (read-only status: live state + current scene). Disabled by default.
     obs_enabled: bool = False

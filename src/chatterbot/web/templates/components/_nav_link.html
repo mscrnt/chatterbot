@@ -14,6 +14,14 @@
 {% if mod_mode_enabled %}
   {% set _ = links.append(('/moderation', 'Moderation', 'fa-shield-halved', current_path == '/moderation')) %}
 {% endif %}
+{# Dataset nav — only when the streamer has opted in or done setup.
+   Hides the link entirely for default installs so it stays out of
+   the way until the streamer cares about it. Called per-request so
+   toggling the setting in /settings takes effect on the next page
+   load without a process restart. #}
+{% if dataset_nav_visible() %}
+  {% set _ = links.append(('/dataset', 'Dataset', 'fa-database', current_path == '/dataset' or current_path.startswith('/dataset/'))) %}
+{% endif %}
 {% for href, label, icon, active in links %}
 <a href="{{ href }}"
    aria-label="{{ label }}"

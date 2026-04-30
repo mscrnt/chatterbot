@@ -1,0 +1,255 @@
+{% extends "base.html" %}
+{% block title %}Personal training dataset · chatterbot{% endblock %}
+{% block content %}
+{# Personal training dataset page.
+
+   The streamer-facing surface for the opt-in dataset capture
+   feature. Drives three flows from one page:
+
+   1. Setup — generate a wrapped DEK from a passphrase the streamer
+      types here. Required before any capture can happen. Displays
+      the recovery string ONCE (after which it's gone — the page
+      tells the streamer to write it down before navigating away).
+   2. Status — fingerprint, configured/enabled/unlocked tri-state,
+      event counts by kind, last 20 events. Read-only.
+   3. Export — passphrase + optional date range → produces a
+      .cbds bundle as a download.
+
+   Capture itself happens in the bot/dashboard process via the
+   normal LLM-call wrapper; this page doesn't do capture, it just
+   manages the key + lets the streamer see what's been captured. #}
+
+<div class="space-y-6 max-w-3xl">
+
+  {# ============================================================
+     Header + status pill
+     ============================================================ #}
+  <header class="flex items-baseline justify-between gap-2 flex-wrap">
+    <h1 class="text-xl sm:text-2xl font-semibold inline-flex items-center gap-2">
+      <i class="fa-solid fa-database text-accent"></i> Personal training dataset
+    </h1>
+    <p class="text-xs text-muted">
+      Off by default. Opt-in. Encrypted with a passphrase only you know.
+    </p>
+  </header>
+
+  {# Flash banners for setup / export / error state — driven by
+     query params so the routes can redirect with a message. #}
+  {% if flash %}
+    <div class="px-3 py-2 rounded-md border text-sm
+                {% if flash_kind == 'error' %}border-danger/40 bg-danger/10 text-danger
+                {% else %}border-success/40 bg-success/10 text-success{% endif %}">
+      {{ flash }}
+    </div>
+  {% endif %}
+
+  {# Recovery string — only shown right after a successful setup,
+     never persisted. The route flashes this once. #}
+  {% if recovery_string %}
+    <div class="px-3 py-3 rounded-md border border-warning/50 bg-warning/10 space-y-2">
+      <div class="text-warning text-sm font-semibold inline-flex items-center gap-2">
+        <i class="fa-solid fa-key"></i> Save this recovery string somewhere offline
+      </div>
+      <p class="text-xs text-muted">
+        If you forget your passphrase, this string is the only way to recover
+        captured events. Without either, past events are permanently
+        unreadable — that's the encryption working. Print it, drop it in a
+        password manager, write it on a sticky note, whatever. It's shown
+        once.
+      </p>
+      <code class="block text-xs break-all bg-canvas border border-subtle p-2 rounded select-all">{{ recovery_string }}</code>
+    </div>
+  {% endif %}
+
+  {# ============================================================
+     Status panel — tri-state (configured / enabled / unlocked)
+     ============================================================ #}
+  <section class="rounded-xl border border-subtle bg-surface overflow-hidden">
+    <header class="px-3 py-2 border-b border-subtle flex items-center gap-2">
+      <i class="fa-solid fa-circle-info text-accent text-sm"></i>
+      <span class="text-sm font-medium">Status</span>
+    </header>
+    <dl class="px-3 py-3 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-sm">
+      <div class="flex items-baseline justify-between gap-3">
+        <dt class="text-muted">Configured</dt>
+        <dd>
+          {% if status.configured %}
+            <span class="text-success inline-flex items-center gap-1">
+              <i class="fa-solid fa-circle-check text-[10px]"></i> yes
+            </span>
+          {% else %}
+            <span class="text-muted inline-flex items-center gap-1">
+              <i class="fa-solid fa-circle-dashed text-[10px]"></i> no key yet
+            </span>
+          {% endif %}
+        </dd>
+      </div>
+      <div class="flex items-baseline justify-between gap-3">
+        <dt class="text-muted">Capture enabled</dt>
+        <dd>
+          {% if status.enabled %}
+            <span class="text-success inline-flex items-center gap-1">
+              <i class="fa-solid fa-toggle-on text-[10px]"></i> on
+            </span>
+          {% else %}
+            <span class="text-muted inline-flex items-center gap-1">
+              <i class="fa-solid fa-toggle-off text-[10px]"></i> off
+            </span>
+          {% endif %}
+        </dd>
+      </div>
+      <div class="flex items-baseline justify-between gap-3">
+        <dt class="text-muted">Unlocked in this process</dt>
+        <dd>
+          {% if status.unlocked %}
+            <span class="text-success inline-flex items-center gap-1">
+              <i class="fa-solid fa-lock-open text-[10px]"></i> yes
+            </span>
+          {% else %}
+            <span class="text-warning inline-flex items-center gap-1">
+              <i class="fa-solid fa-lock text-[10px]"></i> locked
+            </span>
+          {% endif %}
+        </dd>
+      </div>
+      <div class="flex items-baseline justify-between gap-3">
+        <dt class="text-muted">Key fingerprint</dt>
+        <dd class="font-mono text-xs">{{ status.fingerprint or "—" }}</dd>
+      </div>
+      <div class="flex items-baseline justify-between gap-3">
+        <dt class="text-muted">Total events</dt>
+        <dd class="tabular-nums">{{ "{:,}".format(status.total_events) }}</dd>
+      </div>
+      <div class="flex items-baseline justify-between gap-3">
+        <dt class="text-muted">Encrypted size</dt>
+        <dd class="tabular-nums">{{ "{:,}".format(status.total_bytes) }} bytes</dd>
+      </div>
+    </dl>
+    {% if status.per_kind %}
+      <div class="px-3 pb-3">
+        <p class="text-xs text-muted mb-1">Events by kind:</p>
+        <ul class="text-xs space-y-0.5">
+          {% for kind, n in status.per_kind.items() %}
+            <li class="flex items-baseline justify-between">
+              <span class="font-mono text-muted">{{ kind }}</span>
+              <span class="tabular-nums">{{ "{:,}".format(n) }}</span>
+            </li>
+          {% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+
+    {% if status.enabled and not status.unlocked %}
+      <div class="px-3 py-2 border-t border-warning/30 bg-warning/5 text-xs text-warning">
+        <i class="fa-solid fa-triangle-exclamation"></i>
+        Capture is enabled but the DEK isn't loaded in this process —
+        events are being dropped. Set <code>CHATTERBOT_DATASET_PASSPHRASE</code>
+        in the bot/dashboard environment so the unlock-at-startup hook can run.
+      </div>
+    {% endif %}
+  </section>
+
+  {# ============================================================
+     Setup panel — only when not yet configured
+     ============================================================ #}
+  {% if not status.configured %}
+  <section class="rounded-xl border border-accent/40 bg-accent/5 overflow-hidden">
+    <header class="px-3 py-2 border-b border-subtle flex items-center gap-2">
+      <i class="fa-solid fa-wand-magic-sparkles text-accent text-sm"></i>
+      <span class="text-sm font-medium">Setup</span>
+    </header>
+    <form method="post" action="/dataset/setup" class="p-3 space-y-3">
+      <p class="text-xs text-muted">
+        Choose a passphrase. The dataset key gets generated at random,
+        wrapped under your passphrase, and stored on disk in encrypted
+        form. The plaintext key never touches disk. You'll get a
+        recovery string once — save it.
+      </p>
+      <label class="block text-sm">
+        <span class="text-muted text-xs">Passphrase</span>
+        <input type="password" name="passphrase" required minlength="6"
+               autocomplete="new-password"
+               class="mt-1 w-full px-3 py-2 rounded border border-subtle bg-canvas focus:border-accent focus:outline-none text-sm">
+      </label>
+      <label class="block text-sm">
+        <span class="text-muted text-xs">Confirm passphrase</span>
+        <input type="password" name="passphrase_confirm" required minlength="6"
+               autocomplete="new-password"
+               class="mt-1 w-full px-3 py-2 rounded border border-subtle bg-canvas focus:border-accent focus:outline-none text-sm">
+      </label>
+      <button type="submit"
+              class="px-3 py-2 rounded bg-accent text-canvas text-sm font-medium hover:opacity-90">
+        Generate dataset key
+      </button>
+    </form>
+  </section>
+  {% endif %}
+
+  {# ============================================================
+     Export panel — only when configured + has events
+     ============================================================ #}
+  {% if status.configured and status.total_events > 0 %}
+  <section class="rounded-xl border border-subtle bg-surface overflow-hidden">
+    <header class="px-3 py-2 border-b border-subtle flex items-center gap-2">
+      <i class="fa-solid fa-file-export text-accent text-sm"></i>
+      <span class="text-sm font-medium">Export bundle</span>
+    </header>
+    <form method="post" action="/dataset/export" class="p-3 space-y-3">
+      <p class="text-xs text-muted">
+        Builds a single <code>.cbds</code> file containing every event
+        decrypted under your passphrase, then re-encrypted under a fresh
+        bundle key (also passphrase-wrapped). Hand the bundle to a
+        fine-tuning service / pipeline; the receiver needs your
+        passphrase to read it.
+      </p>
+      <label class="block text-sm">
+        <span class="text-muted text-xs">Passphrase</span>
+        <input type="password" name="passphrase" required
+               autocomplete="current-password"
+               class="mt-1 w-full px-3 py-2 rounded border border-subtle bg-canvas focus:border-accent focus:outline-none text-sm">
+      </label>
+      <div class="grid grid-cols-2 gap-3">
+        <label class="block text-sm">
+          <span class="text-muted text-xs">Since (ISO timestamp, optional)</span>
+          <input type="text" name="since" placeholder="2026-04-01T00:00:00Z"
+                 class="mt-1 w-full px-3 py-2 rounded border border-subtle bg-canvas focus:border-accent focus:outline-none text-sm font-mono">
+        </label>
+        <label class="block text-sm">
+          <span class="text-muted text-xs">Until (ISO timestamp, optional)</span>
+          <input type="text" name="until" placeholder="2026-04-30T23:59:59Z"
+                 class="mt-1 w-full px-3 py-2 rounded border border-subtle bg-canvas focus:border-accent focus:outline-none text-sm font-mono">
+        </label>
+      </div>
+      <button type="submit"
+              class="px-3 py-2 rounded bg-accent text-canvas text-sm font-medium hover:opacity-90">
+        Download bundle
+      </button>
+    </form>
+  </section>
+  {% endif %}
+
+  {# ============================================================
+     Recent events (last 20). Just metadata, never decrypts.
+     ============================================================ #}
+  {% if recent_events %}
+  <section class="rounded-xl border border-subtle bg-surface overflow-hidden">
+    <header class="px-3 py-2 border-b border-subtle flex items-center gap-2">
+      <i class="fa-solid fa-clock-rotate-left text-accent text-sm"></i>
+      <span class="text-sm font-medium">Recent events</span>
+      <span class="text-xs text-muted ml-auto">last {{ recent_events | length }}</span>
+    </header>
+    <ul class="divide-y divide-subtle">
+      {% for r in recent_events %}
+        <li class="px-3 py-1.5 text-xs flex items-baseline gap-3">
+          <span class="text-muted whitespace-nowrap shrink-0 tabular-nums">{{ r.ts | short_ts }}</span>
+          <span class="font-mono text-accent shrink-0">{{ r.event_kind }}</span>
+          <span class="text-muted truncate flex-1 font-mono">{{ r.shard_path }}</span>
+          <span class="text-muted shrink-0 tabular-nums">{{ "{:,}".format(r.byte_length) }}b</span>
+        </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+</div>
+{% endblock %}
