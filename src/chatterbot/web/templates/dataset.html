@@ -220,6 +220,21 @@
                  class="mt-1 w-full px-3 py-2 rounded border border-subtle bg-canvas focus:border-accent focus:outline-none text-sm font-mono">
         </label>
       </div>
+      {# Optional anonymisation. Off by default so personal-use exports
+         keep names; on if the streamer plans to share. #}
+      <label class="flex items-start gap-2 text-sm">
+        <input type="checkbox" name="redact_users" value="1"
+               class="mt-1 accent-accent">
+        <span class="flex-1">
+          <span class="font-medium">Redact chatter names</span>
+          <span class="block text-muted text-xs">
+            Replace every chatter username in the bundle with a stable
+            <code>&lt;USER_NNN&gt;</code> token. Use when you'll hand the
+            bundle to a fine-tuning service or anyone outside your
+            household.
+          </span>
+        </span>
+      </label>
       <button type="submit"
               class="px-3 py-2 rounded bg-accent text-canvas text-sm font-medium hover:opacity-90">
         Download bundle

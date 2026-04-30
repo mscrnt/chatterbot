@@ -250,7 +250,12 @@ def cmd_info(settings) -> int:
 # ---- export ----
 
 
-def cmd_export(settings, out_path: Path, *, since: str | None = None, until: str | None = None) -> int:
+def cmd_export(
+    settings, out_path: Path, *,
+    since: str | None = None,
+    until: str | None = None,
+    redact_users: bool = False,
+) -> int:
     """Decrypt every indexed event under the streamer's passphrase, then
     repackage them into a single passphrase-protected `.cbds` bundle.
 
@@ -262,7 +267,13 @@ def cmd_export(settings, out_path: Path, *, since: str | None = None, until: str
 
     Cleartext manifest is intentional: a fine-tune service can inspect
     the bundle's shape without decrypting. The events themselves stay
-    encrypted until the receiver enters the passphrase."""
+    encrypted until the receiver enters the passphrase.
+
+    `redact_users=True` runs the export-time redactor: every chatter
+    referenced via `referenced_user_ids` (or appearing in snapshot
+    messages) is replaced with a stable per-bundle anon token like
+    `<USER_001>`. Manifest gets `redacted: true` so a downstream
+    consumer can tell anonymised bundles from raw ones."""
     _require_dataset_extra()
     from . import cipher
     from .storage import read_record
@@ -282,9 +293,12 @@ def cmd_export(settings, out_path: Path, *, since: str | None = None, until: str
 
         from .capture import decrypt_event
 
-        # Walk the index, decrypt each record, accumulate as NDJSON.
+        # Walk the index, decrypt each record, accumulate as parsed
+        # dicts (so the redactor can run before serialisation if
+        # requested). Two-pass — first decrypt all, then optionally
+        # redact, then serialise.
         data_root = Path(repo.db_path).parent
-        events: list[bytes] = []
+        decoded: list[dict] = []
         kinds_count: dict[str, int] = {}
         first_ts: str | None = None
         last_ts: str | None = None
@@ -304,16 +318,36 @@ def cmd_export(settings, out_path: Path, *, since: str | None = None, until: str
             except Exception:
                 logger.warning("decrypt failed for event id=%s — skipping", row["id"])
                 continue
-            events.append(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+            decoded.append(payload)
             kinds_count[row["event_kind"]] = kinds_count.get(row["event_kind"], 0) + 1
             if first_ts is None:
                 first_ts = row["ts"]
             last_ts = row["ts"]
 
-        if not events:
+        if not decoded:
             print("no events in the requested range — nothing to export.", file=sys.stderr)
             return 1
 
+        # Optional redaction pass — replace every covered chatter
+        # name with a stable `<USER_NNN>` token. Plan is built once
+        # over all events so a chatter shows the same token across
+        # the whole bundle.
+        redaction_meta: dict | None = None
+        if redact_users:
+            from . import redactor as _redactor
+            uids = _redactor.collect_user_ids_in_events(decoded)
+            plan = _redactor.build_plan(repo, uids)
+            decoded = [_redactor.redact_event(plan, ev) for ev in decoded]
+            redaction_meta = {
+                "applied": True,
+                "strategy": "user_names",
+                "anon_user_count": len(plan.id_to_token),
+            }
+
+        events: list[bytes] = [
+            json.dumps(ev, separators=(",", ":")).encode("utf-8")
+            for ev in decoded
+        ]
         ndjson = b"\n".join(events)
         import zstandard as zstd
         compressed = zstd.ZstdCompressor(level=10).compress(ndjson)
@@ -337,6 +371,12 @@ def cmd_export(settings, out_path: Path, *, since: str | None = None, until: str
             "event_kinds": kinds_count,
             "fingerprint": cipher.fingerprint_dek(dek),
             "kdf_params": wrapped.kdf_params,
+            # Redaction status — "redacted: false" by default so a
+            # downstream consumer's policy can refuse-to-train when
+            # the field is missing OR explicitly false. `meta` carries
+            # the strategy details when redaction was applied.
+            "redacted": bool(redact_users),
+            "redaction": redaction_meta,
         }
 
         # Single tar containing manifest (cleartext) + payload (encrypted)
@@ -471,8 +511,16 @@ def register_subcommands(subparsers) -> None:
     )
     p_export.add_argument("--since", type=str, default=None, help="ISO-UTC lower bound")
     p_export.add_argument("--until", type=str, default=None, help="ISO-UTC upper bound")
+    p_export.add_argument(
+        "--redact-users", action="store_true",
+        help="anonymise chatter usernames in the bundle (replaces "
+             "names with stable <USER_NNN> tokens, marks the manifest "
+             "as redacted)",
+    )
     p_export.set_defaults(_dataset_handler=lambda args, settings: cmd_export(
-        settings, args.out, since=args.since, until=args.until,
+        settings, args.out,
+        since=args.since, until=args.until,
+        redact_users=args.redact_users,
     ))
 
     p_verify = subparsers.add_parser("verify", help="decrypt + validate a .cbds bundle")

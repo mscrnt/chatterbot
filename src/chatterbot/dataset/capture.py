@@ -107,6 +107,47 @@ def _decompress(payload: bytes) -> bytes:
 # ---- public capture API ----
 
 
+def record_context_snapshot_safe(
+    repo: "ChatterRepo | None",
+    *,
+    snapshot: dict,
+) -> None:
+    """Sync capture helper for CONTEXT_SNAPSHOT events. Persists a
+    pre-built snapshot dict (caller composes it from recent
+    messages / transcripts / threads / channel context) wrapped in
+    the same encryption + zstd pipeline as every other event.
+
+    Sync: snapshots fire on a slow timer (~5 min) from a dedicated
+    background loop, so the encrypt + write doesn't need to leave
+    the calling thread. Same opt-in gate + error-swallowing as
+    `record_streamer_action_safe`.
+
+    `snapshot` is owned by the caller — the dataset module doesn't
+    decide what goes in (loop in web/app.py picks the slices).
+    Keeps this layer thin and lets future snapshot variants
+    (screenshot blobs, viewer counts, etc.) ride the same pipe."""
+    if repo is None:
+        return
+    try:
+        if not repo.dataset_capture_enabled():
+            return
+        dek = repo.dataset_dek()
+        if dek is None:
+            _warn_no_dek_once()
+            return
+        payload = {
+            "v": CAPTURE_SCHEMA_VERSION,
+            "kind": EVENT_CONTEXT_SNAPSHOT,
+            "snapshot": snapshot,
+        }
+        _write_event_sync(repo, dek, EVENT_CONTEXT_SNAPSHOT, payload)
+    except Exception:
+        logger.debug(
+            "dataset capture: context-snapshot write failed",
+            exc_info=True,
+        )
+
+
 def record_streamer_action_safe(
     repo: "ChatterRepo | None",
     *,

@@ -233,6 +233,27 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     )
     _bg_tasks: set[asyncio.Task] = set()
 
+    async def _dataset_context_snapshot_loop():
+        """Defer the dataset-loop import — installs without the
+        optional `dataset` extra (no cryptography / zstandard) must
+        still boot the dashboard. The loop body itself gates on
+        `dataset_capture_enabled` + DEK presence, so it's idle if
+        capture is off."""
+        try:
+            from ..dataset.loops import context_snapshot_loop
+        except Exception:
+            logger.exception("dataset extra missing — context_snapshot_loop disabled")
+            return
+        await context_snapshot_loop(repo, twitch_status=twitch_status)
+
+    async def _dataset_retention_loop():
+        try:
+            from ..dataset.loops import retention_loop
+        except Exception:
+            logger.exception("dataset extra missing — retention_loop disabled")
+            return
+        await retention_loop(repo)
+
     async def _lifespan(app):
         # Background talking-points refresher. Runs inside the dashboard
         # process so the page render is always served from cache.
@@ -312,6 +333,30 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             asyncio.create_task(
                 transcript_service.screenshot_loop(),
                 name="transcript_screenshot_loop",
+            )
+        )
+        # Personal-dataset context snapshots — writes one self-
+        # contained CONTEXT_SNAPSHOT every ~5 min while capture is
+        # active so future fine-tune bundles don't need the full
+        # chatters.db attached to make sense. No-op when capture is
+        # off OR the DEK isn't loaded; both checked every iteration
+        # so toggling capture on at runtime starts producing
+        # snapshots without a restart.
+        _bg_tasks.add(
+            asyncio.create_task(
+                _dataset_context_snapshot_loop(),
+                name="dataset_context_snapshot_loop",
+            )
+        )
+        # Daily retention/compaction — prunes events older than
+        # `dataset_retention_days` (default 30, 0 = forever) and
+        # trims the on-disk size to `dataset_retention_max_mb`
+        # (default 5000, 0 = unbounded). Drops orphan shards along
+        # the way. Same opt-in gates as the snapshot loop.
+        _bg_tasks.add(
+            asyncio.create_task(
+                _dataset_retention_loop(),
+                name="dataset_retention_loop",
             )
         )
         # Chat-lag auto-tuner — every ~10 min, re-run the
@@ -1203,6 +1248,10 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         passphrase = (form.get("passphrase") or "").strip()
         since = (form.get("since") or "").strip() or None
         until = (form.get("until") or "").strip() or None
+        # Browser checkbox — anonymises chatter names in the bundle
+        # using `redactor.build_plan`. Defaults to off so a streamer
+        # who exports for personal fine-tuning gets verbatim data.
+        redact_users = form.get("redact_users") is not None
         if not passphrase:
             return RedirectResponse(
                 url="/dataset?flash=Passphrase+required.&flash_kind=error",
@@ -1258,7 +1307,11 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                     suffix=".cbds", delete=False,
                 ) as tf:
                     out_path = Path(tf.name)
-                rc = cmd_export(_S(), out_path, since=since, until=until)
+                rc = cmd_export(
+                    _S(), out_path,
+                    since=since, until=until,
+                    redact_users=redact_users,
+                )
                 if rc != 0 or not out_path.exists():
                     out_path.unlink(missing_ok=True)
                     return None
