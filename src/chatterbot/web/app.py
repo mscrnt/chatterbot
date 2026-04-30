@@ -1012,7 +1012,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
 
         from ..diagnose import make_github_issue_url
         # Build the Prompts tab state — one card per editable prompt,
-        # current mode + adlib values + custom text for each.
+        # current mode + guided values + custom text for each.
         # Cheap (in-memory dict + a few app_settings lookups). Only
         # rendered when the streamer switches to the Prompts tab.
         from ..llm import prompts as _prompts_mod
@@ -1021,7 +1021,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         for pd in prompt_defs:
             prompts_card_state[pd.call_site] = {
                 "mode": _prompts_mod.get_mode(pd.call_site, repo),
-                "adlib_values": _prompts_mod.get_adlib_values(pd.call_site, repo),
+                "guided_values": _prompts_mod.get_guided_values(pd.call_site, repo),
                 "custom_text": _prompts_mod.get_custom_text(pd.call_site, repo),
             }
         # Group by section in the order the registry declares so the
@@ -1139,7 +1139,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             {
                 "prompt": pd,
                 "mode": _prompts_mod.get_mode(call_site, repo),
-                "adlib_values": _prompts_mod.get_adlib_values(call_site, repo),
+                "guided_values": _prompts_mod.get_guided_values(call_site, repo),
                 "custom_text": _prompts_mod.get_custom_text(call_site, repo),
                 "flash": flash,
                 "flash_kind": flash_kind,
@@ -1151,7 +1151,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         """Save mode + payload for one prompt card. The mode field
         determines which payload field is meaningful:
           - factory  → no payload, just the mode flip
-          - adlibs   → form fields named `adlib__<slot>`, packed
+          - guided   → form fields named `guided__<slot>`, packed
                        into a JSON dict
           - custom   → `custom` textarea contents"""
         from ..llm import prompts as _prompts_mod
@@ -1173,26 +1173,26 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         # mode is currently active — so a streamer can switch
         # between modes without losing the values they typed in
         # the others.
-        adlib_values = {}
-        for slot in pd.adlib_slots:
-            v = form.get(f"adlib__{slot.name}")
+        guided_values = {}
+        for slot in pd.guided_slots:
+            v = form.get(f"guided__{slot.name}")
             if v is not None:
-                adlib_values[slot.name] = str(v)
-        if adlib_values:
-            _prompts_mod.save_adlib_values(call_site, adlib_values, repo)
+                guided_values[slot.name] = str(v)
+        if guided_values:
+            _prompts_mod.save_guided_values(call_site, guided_values, repo)
         custom_payload = form.get("custom")
         if custom_payload is not None:
             _prompts_mod.save_custom_text(
                 call_site, str(custom_payload), repo,
             )
 
-        # Friendly mode-aware flash text — Adlibs / Custom take
+        # Friendly mode-aware flash text — Guided / Custom take
         # effect on the next refresh of the affected feature, so
         # we explicitly tell the streamer their save IS persisted
         # but won't be visible until then.
         mode_flash = {
             "factory": "Reverted to the factory prompt.",
-            "adlibs":  "Saved. Adlib answers take effect on the next refresh.",
+            "guided":  "Saved. Guided answers take effect on the next refresh.",
             "custom":  "Saved. Custom prompt takes effect on the next refresh.",
         }.get(mode, "Saved.")
         return _render_prompt_card(
@@ -1210,7 +1210,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "prompt not editable")
         return _render_prompt_card(
             request, call_site,
-            flash="Reverted to factory. Adlib answers and custom text cleared.",
+            flash="Reverted to factory. Guided answers and custom text cleared.",
             flash_kind="success",
         )
 

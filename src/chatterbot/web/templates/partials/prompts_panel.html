@@ -5,7 +5,7 @@
 
    Context:
      - sections: list of (section_id, section_title, list[PromptDef])
-     - card_state: dict[call_site, dict] with mode + adlib_values +
+     - card_state: dict[call_site, dict] with mode + guided_values +
        custom_text per prompt #}
 
 <div class="space-y-6">
@@ -16,7 +16,7 @@
     <p class="text-xs text-muted">
       The prompts below drive the AI features on the dashboard.
       Each one ships with a carefully-tuned factory default; you can
-      switch to <em>Adlibs</em> for a few quick personality dials, or
+      switch to <em>Guided</em> for a few quick personality dials, or
       <em>Custom</em> for full control. Empty / not-yet-touched prompts
       use the factory by default — no behaviour changes until you save.
     </p>
@@ -36,7 +36,7 @@
           {% with
             prompt=prompt,
             mode=card_state[prompt.call_site]['mode'],
-            adlib_values=card_state[prompt.call_site]['adlib_values'],
+            guided_values=card_state[prompt.call_site]['guided_values'],
             custom_text=card_state[prompt.call_site]['custom_text'],
             flash=None,
             flash_kind=None

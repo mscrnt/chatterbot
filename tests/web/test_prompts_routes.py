@@ -102,21 +102,21 @@ def test_save_factory_mode_writes_setting(app_client):
     assert repo.get_app_setting("prompts.insights.talking_points.mode") == "factory"
 
 
-def test_save_adlibs_persists_form_values_as_json(app_client):
-    """Adlib slots are submitted as `adlib__<slot>` form fields.
+def test_save_guided_persists_form_values_as_json(app_client):
+    """Guided slots are submitted as `guided__<slot>` form fields.
     The route packs them into a JSON dict and stores under
-    `prompts.<site>.adlibs`."""
+    `prompts.<site>.guided`."""
     client, repo = app_client
     r = client.post(
         "/settings/prompts/insights.talking_points",
         data={
-            "mode": "adlibs",
-            "adlib__tone": "spicy and unfiltered",
-            "adlib__avoid": "office stuff",
+            "mode": "guided",
+            "guided__tone": "spicy and unfiltered",
+            "guided__avoid": "office stuff",
         },
     )
     assert r.status_code == 200
-    saved = P.get_adlib_values("insights.talking_points", repo)
+    saved = P.get_guided_values("insights.talking_points", repo)
     assert saved == {"tone": "spicy and unfiltered", "avoid": "office stuff"}
     # Resolved prompt now contains the streamer's values.
     rendered = P.resolve_prompt("insights.talking_points", repo)
@@ -167,30 +167,30 @@ def test_save_unknown_call_site_returns_404(app_client):
 
 
 def test_save_keeps_unrelated_payload_for_other_modes(app_client):
-    """Switching from adlibs → custom shouldn't wipe the saved
-    adlib values. The streamer might want to switch back. Pin
+    """Switching from guided → custom shouldn't wipe the saved
+    guided values. The streamer might want to switch back. Pin
     that we persist all submitted payloads, regardless of mode."""
     client, repo = app_client
-    # Save adlibs with values.
+    # Save guided with values.
     client.post(
         "/settings/prompts/insights.talking_points",
         data={
-            "mode": "adlibs",
-            "adlib__tone": "low-key",
-            "adlib__avoid": "(none)",
+            "mode": "guided",
+            "guided__tone": "low-key",
+            "guided__avoid": "(none)",
         },
     )
-    # Switch to custom WITHOUT submitting adlib fields again.
+    # Switch to custom WITHOUT submitting guided fields again.
     # Note: form fields not in the post body just won't be in the
     # form dict; the route persists what's there. So switching
-    # modes without re-typing adlib fields would NOT wipe them
+    # modes without re-typing guided fields would NOT wipe them
     # (we only persist when the field is present).
     client.post(
         "/settings/prompts/insights.talking_points",
         data={"mode": "custom", "custom": "my custom prompt"},
     )
-    # Adlib values still around for when the streamer flips back.
-    saved = P.get_adlib_values("insights.talking_points", repo)
+    # Guided values still around for when the streamer flips back.
+    saved = P.get_guided_values("insights.talking_points", repo)
     assert saved.get("tone") == "low-key"
 
 
@@ -213,7 +213,7 @@ def test_revert_clears_all_overrides_and_returns_card(app_client):
     # Every override key is gone.
     for key in (
         "prompts.insights.talking_points.mode",
-        "prompts.insights.talking_points.adlibs",
+        "prompts.insights.talking_points.guided",
         "prompts.insights.talking_points.custom",
     ):
         assert repo.get_app_setting(key) is None

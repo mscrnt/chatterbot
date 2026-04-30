@@ -1,6 +1,6 @@
 {# One streamer-editable prompt card.
 
-   Renders the mode picker (Factory / Adlibs / Custom), the
+   Renders the mode picker (Factory / Guided / Custom), the
    currently-selected mode's editor, and the action buttons
    (Save / Revert). Each card is its own form posting to
    /settings/prompts/<call_site>; on save the route returns the
@@ -9,8 +9,8 @@
 
    Context required from the route:
      - prompt: PromptDef
-     - mode: "factory" | "adlibs" | "custom"
-     - adlib_values: dict[slot_name, current_value]
+     - mode: "factory" | "guided" | "custom"
+     - guided_values: dict[slot_name, current_value]
      - custom_text: str (the saved custom prompt, or empty)
      - factory_preview: str (rendered factory prompt — what the
        LLM gets when mode is factory)
@@ -55,7 +55,7 @@
       <div class="inline-flex rounded-lg border border-subtle bg-canvas p-0.5">
         {% for option, label, hint in [
           ('factory', 'Factory', 'Ships-with-the-app prompt — what we maintain.'),
-          ('adlibs', 'Adlibs', 'Answer a few questions; we slot the answers in.'),
+          ('guided', 'Guided', 'Answer a few questions; we slot the answers in.'),
           ('custom', 'Custom', 'Free-form rewrite. Most flexible, easiest to break.'),
         ] %}
           <label class="relative inline-flex">
@@ -80,7 +80,7 @@
       <p class="text-xs text-muted">
         The factory prompt is what every chatterbot install uses by default.
         It ships in code; we maintain it and improve it across releases.
-        Switch to <em>Adlibs</em> to dial style with a few quick questions,
+        Switch to <em>Guided</em> to dial style with a few quick questions,
         or <em>Custom</em> to rewrite it from scratch.
       </p>
       <details class="text-xs">
@@ -91,38 +91,40 @@
       </details>
     </div>
 
-    {# ---- Adlibs mode: per-slot inputs ---- #}
-    <div x-show="mode === 'adlibs'" x-cloak class="space-y-3">
-      {% for slot in prompt.adlib_slots %}
-        <div>
-          <label class="block text-xs font-medium text-primary mb-1">
-            {{ slot.question }}
-          </label>
-          {% set _val = adlib_values.get(slot.name, slot.default) %}
-          {% if slot.options %}
-            <select name="adlib__{{ slot.name }}"
-                    class="w-full bg-surface border border-subtle rounded px-3 py-2 text-sm text-primary focus:outline-none focus:ring-2 focus:ring-accent">
-              {% for opt in slot.options %}
-                <option value="{{ opt }}" {% if opt == _val %}selected{% endif %}>{{ opt }}</option>
-              {% endfor %}
-            </select>
-          {% elif slot.multiline %}
-            <textarea name="adlib__{{ slot.name }}"
-                      rows="3"
-                      placeholder="{{ slot.placeholder }}"
-                      class="w-full bg-surface border border-subtle rounded px-3 py-2 text-sm text-primary focus:outline-none focus:ring-2 focus:ring-accent resize-y">{{ _val }}</textarea>
-          {% else %}
-            <input type="text"
-                   name="adlib__{{ slot.name }}"
-                   value="{{ _val }}"
-                   placeholder="{{ slot.placeholder }}"
-                   class="w-full bg-surface border border-subtle rounded px-3 py-2 text-sm text-primary focus:outline-none focus:ring-2 focus:ring-accent">
-          {% endif %}
-          <p class="text-[10px] text-muted mt-1">
-            Default: <span class="italic">{{ slot.default }}</span>
-          </p>
-        </div>
+    {# ---- Guided mode: per-slot inputs ----
+         Advanced slots are folded behind a "Show more" disclosure
+         so the most-personality-driven 2-3 slots stay visible by
+         default. Streamers who never expand still get the most
+         meaningful dials; power users can dive deeper. #}
+    <div x-show="mode === 'guided'" x-cloak class="space-y-3"
+         x-data="{ showAdvanced: false }">
+      {# Always-visible slots first #}
+      {% for slot in prompt.guided_slots if not slot.advanced %}
+        {% with slot=slot, val=guided_values.get(slot.name, slot.default) %}
+          {% include "partials/_guided_slot_input.html" %}
+        {% endwith %}
       {% endfor %}
+
+      {# Advanced disclosure — only renders when there are advanced slots #}
+      {% set _adv = prompt.guided_slots | selectattr('advanced') | list %}
+      {% if _adv %}
+        {% set _adv_count = _adv | length %}
+        {% set _adv_show_label = 'Show ' ~ _adv_count ~ ' more option' ~ ('' if _adv_count == 1 else 's') %}
+        <button type="button"
+                @click="showAdvanced = !showAdvanced"
+                class="text-[11px] text-muted hover:text-primary inline-flex items-center gap-1 mt-1">
+          <i class="fa-solid" :class="showAdvanced ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
+          <span x-text="showAdvanced ? 'Hide advanced options' : '{{ _adv_show_label }}'"></span>
+        </button>
+        <div x-show="showAdvanced" x-cloak class="space-y-3 pt-1">
+          {% for slot in _adv %}
+            {% with slot=slot, val=guided_values.get(slot.name, slot.default) %}
+              {% include "partials/_guided_slot_input.html" %}
+            {% endwith %}
+          {% endfor %}
+        </div>
+      {% endif %}
+
       <p class="text-[11px] text-muted italic">
         Your answers are appended to the factory prompt as a "STREAMER PREFERENCES" block.
         The factory's hard rules (no invented facts, no advice phrasing, etc.) still apply.
@@ -159,8 +161,8 @@
               hx-post="/settings/prompts/{{ prompt.call_site }}/revert"
               hx-target="#prompt-card-{{ prompt.call_site | replace('.', '-') }}"
               hx-swap="outerHTML"
-              hx-confirm="Revert to the factory prompt? Any saved adlib answers and custom text for this prompt will be cleared."
-              title="Reset this prompt to the chatterbot factory default. Clears adlib answers + custom text.">
+              hx-confirm="Revert to the factory prompt? Any saved guided answers and custom text for this prompt will be cleared."
+              title="Reset this prompt to the chatterbot factory default. Clears guided answers + custom text.">
         <i class="fa-solid fa-arrow-rotate-left text-[10px]"></i> Revert to factory
       </button>
     </div>

@@ -1,0 +1,38 @@
+{# One guided-mode slot input. Included from prompt_card.html
+   (twice — once for visible slots, once inside the advanced
+   disclosure). Caller passes `slot` + `val` via {% with %}.
+
+   Renders the right input shape based on slot config:
+     - slot.options → <select> dropdown
+     - slot.multiline → <textarea>
+     - otherwise → <input type="text">
+
+   Field name is `guided__<slot_name>` — the route picks it up
+   via `form.get(f"guided__{slot.name}")`. #}
+<div>
+  <label class="block text-xs font-medium text-primary mb-1">
+    {{ slot.question }}
+  </label>
+  {% if slot.options %}
+    <select name="guided__{{ slot.name }}"
+            class="w-full bg-surface border border-subtle rounded px-3 py-2 text-sm text-primary focus:outline-none focus:ring-2 focus:ring-accent">
+      {% for opt in slot.options %}
+        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt }}</option>
+      {% endfor %}
+    </select>
+  {% elif slot.multiline %}
+    <textarea name="guided__{{ slot.name }}"
+              rows="3"
+              placeholder="{{ slot.placeholder }}"
+              class="w-full bg-surface border border-subtle rounded px-3 py-2 text-sm text-primary focus:outline-none focus:ring-2 focus:ring-accent resize-y">{{ val }}</textarea>
+  {% else %}
+    <input type="text"
+           name="guided__{{ slot.name }}"
+           value="{{ val }}"
+           placeholder="{{ slot.placeholder }}"
+           class="w-full bg-surface border border-subtle rounded px-3 py-2 text-sm text-primary focus:outline-none focus:ring-2 focus:ring-accent">
+  {% endif %}
+  <p class="text-[10px] text-muted mt-1">
+    Default: <span class="italic">{{ slot.default }}</span>
+  </p>
+</div>

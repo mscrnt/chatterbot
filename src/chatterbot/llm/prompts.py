@@ -6,14 +6,15 @@ by the streamer through three modes:
   - **factory** (default): the carefully-tuned prompt that ships with
     chatterbot. Streamers who don't visit the Prompts settings tab
     see no behavior change.
-  - **adlibs**: a small handful of structured questions ("What tone
-    do you want?" / "What should be avoided?") whose answers slot
-    into a pre-built template. Cheap personality dialing without
-    rewriting prompt instructions.
+  - **guided**: a small set of structured questions per prompt
+    ("What tone do you want?" / "What should be avoided?") whose
+    answers slot into a pre-built template. Cheap personality
+    dialing without rewriting prompt instructions. Streamers don't
+    have to answer every question — defaults apply for any slot
+    they leave alone.
   - **custom**: free-form full-text editor. Streamer rewrites the
     entire prompt. Fastest way to bend the system but also the
-    easiest way to break it — the dashboard surfaces a "this prompt
-    may be broken — revert?" affordance when the cache empties.
+    easiest way to break it.
 
 The registry below is the SINGLE source of truth for which call
 sites are streamer-editable. Adding a new entry to `REGISTRY` makes
@@ -29,8 +30,8 @@ benefit, so we deliberately skip them.
 
 Storage shape in `app_settings`:
 
-  prompts.<call_site>.mode      = "factory" | "adlibs" | "custom"
-  prompts.<call_site>.adlibs    = JSON dict {slot_name: value}
+  prompts.<call_site>.mode      = "factory" | "guided" | "custom"
+  prompts.<call_site>.guided    = JSON dict {slot_name: value}
   prompts.<call_site>.custom    = full prompt text
 
 Empty / absent = factory mode. The streamer can revert any prompt
@@ -41,7 +42,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -54,51 +55,57 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class AdlibSlot:
-    """One adlib slot — a question the streamer answers, whose
-    answer slots into the prompt's `adlib_template` at the
+class GuidedSlot:
+    """One guided-mode slot — a question the streamer answers, whose
+    answer slots into the prompt's `guided_template` at the
     `{name}` placeholder.
 
     `default` is rendered into the form as a placeholder + used
     when the streamer hasn't saved a value. It's also what the
-    rendered prompt uses for an empty adlib config — so the
-    factory experience and "adlibs with all defaults" are identical
+    rendered prompt uses for an empty guided config — so the
+    factory experience and "guided with all defaults" are identical
     by construction.
 
     `multiline=True` → render as textarea (for free-text rules).
     `options` (when set) → render as select dropdown with these
-    choices. `placeholder` is a hint shown in the input."""
+    choices. `placeholder` is a hint shown in the input.
+
+    `advanced=True` → hide behind a "Show more" disclosure on the
+    card. Use for slots most streamers won't touch (mechanics-y
+    knobs); the 2-3 most-personality-driven slots stay visible."""
     name: str
     question: str
     default: str
     placeholder: str = ""
     multiline: bool = False
     options: tuple[str, ...] | None = None
+    advanced: bool = False
 
 
 @dataclass(frozen=True)
 class PromptDef:
     """One streamer-editable prompt site. Carries the factory text,
-    the adlib template (factory text with `{slot_name}` placeholders),
-    and the metadata the settings UI needs to render its card."""
+    the guided-mode template (factory text with `{slot_name}`
+    placeholders), and the metadata the settings UI needs to render
+    its card."""
     call_site: str
     section: str               # "insights" | "channel" | "transcripts"
     title: str
     description: str           # plain-english what-this-does
     factory: str
-    adlib_template: str
-    adlib_slots: tuple[AdlibSlot, ...]
+    guided_template: str
+    guided_slots: tuple[GuidedSlot, ...]
 
 
-# ---- helpers used to compose adlib_template values ----
+# ---- helpers used to compose guided_template values ----
 
 
 def _injection_block(label: str, content_placeholder: str) -> str:
-    """Helper to format the streamer's adlib values as a small
-    "STREAMER PREFERENCES" block. Hybrid approach: factory text
-    stays canonical, the adlib values are appended/prepended as
-    extra instructions rather than re-templating the whole prompt
-    (which would force us to maintain a near-duplicate prompt body)."""
+    """Helper to format the streamer's guided-mode values as a
+    small "STREAMER PREFERENCES" block. Hybrid approach: factory
+    text stays canonical, the guided values are appended as extra
+    instructions rather than re-templating the whole prompt (which
+    would force us to maintain a near-duplicate prompt body)."""
     return (
         f"\n\n=== STREAMER PREFERENCES — {label} ===\n"
         f"{content_placeholder}\n"
@@ -106,9 +113,6 @@ def _injection_block(label: str, content_placeholder: str) -> str:
         "conflict; otherwise treat them as additional guidance.\n"
     )
 
-
-# Stitched at bottom of file — registry assembled after the prompts
-# import to avoid circular imports.
 
 REGISTRY: dict[str, PromptDef] = {}
 
@@ -137,36 +141,62 @@ def _build_registry() -> None:
             description=(
                 "Generates one short conversation hook per active "
                 "chatter. The streamer reads these on a second "
-                "monitor and uses them to engage with chat. Tuning "
-                "this changes the TONE of the hooks (low-energy "
-                "observational vs playful) and what topics they "
-                "avoid."
+                "monitor and uses them to engage with chat."
             ),
             factory=TALKING_POINTS_SYSTEM,
-            adlib_template=(
+            guided_template=(
                 TALKING_POINTS_SYSTEM
                 + _injection_block(
                     "talking-points style",
                     "Tone — {tone}.\n"
                     "Things to avoid bringing up — {avoid}.\n"
+                    "Hook length preference — {length}.\n"
+                    "Confidence threshold — {confidence}.\n"
                     "Hooks should still follow all the HARD RULES "
                     "above (grounded paraphrases only, no invented "
                     "facts).",
                 )
             ),
-            adlib_slots=(
-                AdlibSlot(
+            guided_slots=(
+                GuidedSlot(
                     name="tone",
                     question="How should the hooks sound?",
                     default="observational and low-energy — like a casual aside",
                     placeholder="e.g. playful and joking / dry sarcasm / warm and curious",
                 ),
-                AdlibSlot(
+                GuidedSlot(
                     name="avoid",
                     question="Topics or phrases the hooks should AVOID",
                     default="(none)",
                     placeholder="e.g. anything political; references to drama; etc.",
                     multiline=True,
+                ),
+                GuidedSlot(
+                    name="length",
+                    question="How long should each hook be?",
+                    default="under 25 words (one short sentence)",
+                    options=(
+                        "very brief — under 15 words, single phrase",
+                        "under 25 words (one short sentence)",
+                        "longer — up to 40 words, allowed to set up context",
+                    ),
+                ),
+                GuidedSlot(
+                    name="confidence",
+                    question=(
+                        "How sure should the system be before surfacing "
+                        "a hook?"
+                    ),
+                    default=(
+                        "only when the chatter clearly returns to a "
+                        "topic across multiple messages"
+                    ),
+                    options=(
+                        "strict — only when the chatter clearly returns to a topic",
+                        "balanced — single mention is enough if it's recent",
+                        "permissive — surface even tangential mentions",
+                    ),
+                    advanced=True,
                 ),
             ),
         ),
@@ -178,24 +208,25 @@ def _build_registry() -> None:
             description=(
                 "Identifies the distinct conversation subjects chat "
                 "is currently discussing — what shows up in the "
-                "Engaging subjects panel on the Insights page. "
-                "Tuning this changes how SPECIFIC subject lines are "
-                "and what extra topics the filter treats as off-limits."
+                "Engaging subjects panel on the Insights page."
             ),
             factory=InsightsService.SUBJECTS_SYSTEM,
-            adlib_template=(
+            guided_template=(
                 InsightsService.SUBJECTS_SYSTEM
                 + _injection_block(
                     "subject-extraction preferences",
                     "Subject specificity preference — {specificity}.\n"
                     "Additional topics to filter (beyond the default "
                     "religion/politics/controversies) — {extra_filter}.\n"
+                    "Minimum activity threshold — {min_activity}.\n"
+                    "Surface meta-subjects (about the streamer or "
+                    "channel itself) — {meta_subjects}.\n"
                     "Subjects must still cite at least 2 supporting "
                     "message_ids per the rules above.",
                 )
             ),
-            adlib_slots=(
-                AdlibSlot(
+            guided_slots=(
+                GuidedSlot(
                     name="specificity",
                     question="How specific should subject names be?",
                     default="very specific (4-8 word lines, e.g. 'NG4 parry timing vs NG2')",
@@ -205,12 +236,39 @@ def _build_registry() -> None:
                         "broad (themes / categories rather than specific runs)",
                     ),
                 ),
-                AdlibSlot(
+                GuidedSlot(
                     name="extra_filter",
                     question="Topics to filter beyond the defaults",
                     default="(none — defaults are sufficient)",
                     placeholder="e.g. specific drama topics; competitor channel callouts; etc.",
                     multiline=True,
+                ),
+                GuidedSlot(
+                    name="min_activity",
+                    question="How active must a topic be before surfacing?",
+                    default="trust the LLM (default heuristic)",
+                    options=(
+                        "trust the LLM (default heuristic)",
+                        "require ≥ 3 distinct chatters",
+                        "require ≥ 5 messages on the topic",
+                        "require both ≥ 3 chatters AND ≥ 5 messages",
+                    ),
+                    advanced=True,
+                ),
+                GuidedSlot(
+                    name="meta_subjects",
+                    question=(
+                        "Surface subjects that are ABOUT the streamer "
+                        "or channel itself (jokes about the streamer, "
+                        "channel callbacks, etc.)?"
+                    ),
+                    default="include — they're often the most engaging",
+                    options=(
+                        "include — they're often the most engaging",
+                        "include but mark as low-priority (sort to end)",
+                        "exclude — keep the panel focused on game / chat content",
+                    ),
+                    advanced=True,
                 ),
             ),
         ),
@@ -221,23 +279,24 @@ def _build_registry() -> None:
             title="Per-subject talking points",
             description=(
                 "When the streamer opens an engaging-subject's modal, "
-                "this prompt generates 3-5 short things they could "
-                "say back to chat about it. Tuning this changes the "
-                "VOICE — how the suggested lines are phrased."
+                "this prompt generates short things they could say "
+                "back to chat about it."
             ),
             factory=InsightsService.SUBJECT_TALKING_POINTS_SYSTEM,
-            adlib_template=(
+            guided_template=(
                 InsightsService.SUBJECT_TALKING_POINTS_SYSTEM
                 + _injection_block(
                     "talking-point voice",
                     "Voice / phrasing style — {voice}.\n"
                     "Things to avoid bringing up — {avoid}.\n"
+                    "Number of points to generate — {count}.\n"
+                    "Self-disclosure level — {self_disclosure}.\n"
                     "Points must still paraphrase content visible in "
                     "the input — no invented facts.",
                 )
             ),
-            adlib_slots=(
-                AdlibSlot(
+            guided_slots=(
+                GuidedSlot(
                     name="voice",
                     question="How should the suggested lines sound?",
                     default=(
@@ -249,12 +308,36 @@ def _build_registry() -> None:
                         "to chat / dry observations"
                     ),
                 ),
-                AdlibSlot(
+                GuidedSlot(
                     name="avoid",
                     question="Things the suggested lines should AVOID",
                     default="(none)",
                     placeholder="e.g. unrelated jokes; advice phrasing; etc.",
                     multiline=True,
+                ),
+                GuidedSlot(
+                    name="count",
+                    question="How many talking points to generate?",
+                    default="3-5 (mix of options)",
+                    options=(
+                        "3 (focused — most-engaging only)",
+                        "3-5 (mix of options)",
+                        "5 (give me variety)",
+                    ),
+                ),
+                GuidedSlot(
+                    name="self_disclosure",
+                    question=(
+                        "Should the lines share opinions / preferences, "
+                        "or stay neutral?"
+                    ),
+                    default="share opinions when the streamer might naturally have one",
+                    options=(
+                        "share opinions when the streamer might naturally have one",
+                        "stay neutral — describe / observe rather than opine",
+                        "go further — invite reactions / ask chat for theirs",
+                    ),
+                    advanced=True,
                 ),
             ),
         ),
@@ -266,23 +349,20 @@ def _build_registry() -> None:
             description=(
                 "Decides which chat questions are still 'open' "
                 "(unanswered, asked of the room rather than a "
-                "specific chatter, not rhetorical). Tuning changes "
-                "how STRICT the filter is."
+                "specific chatter, not rhetorical)."
             ),
             factory=InsightsService.OPEN_QUESTIONS_SYSTEM,
-            adlib_template=(
+            guided_template=(
                 InsightsService.OPEN_QUESTIONS_SYSTEM
                 + _injection_block(
                     "open-questions filter strictness",
                     "Filter strictness — {strictness}.\n"
-                    "Streamers who want the panel to surface MORE "
-                    "questions should set this permissive; those who "
-                    "want only the most clearly-open asks should set "
-                    "it strict.",
+                    "Streamer relevance — {relevance}.\n"
+                    "Answer-recency strictness — {recency}.\n"
                 )
             ),
-            adlib_slots=(
-                AdlibSlot(
+            guided_slots=(
+                GuidedSlot(
                     name="strictness",
                     question="How strict should the filter be?",
                     default="balanced — drop rhetorical and answered, keep ambiguous-but-likely-open",
@@ -291,6 +371,31 @@ def _build_registry() -> None:
                         "balanced — drop rhetorical and answered, keep ambiguous-but-likely-open",
                         "permissive — surface anything that could be a question worth answering",
                     ),
+                ),
+                GuidedSlot(
+                    name="relevance",
+                    question="Which questions should the panel surface?",
+                    default="questions for the streamer or the room broadly",
+                    options=(
+                        "only questions clearly directed at the streamer",
+                        "questions for the streamer or the room broadly",
+                        "include 'anyone in chat?' questions even when the streamer isn't directly addressed",
+                    ),
+                    advanced=True,
+                ),
+                GuidedSlot(
+                    name="recency",
+                    question=(
+                        "How aggressively should questions get dropped "
+                        "once chat answers them?"
+                    ),
+                    default="drop once any chatter has answered substantively",
+                    options=(
+                        "drop only when the streamer themselves answers",
+                        "drop once any chatter has answered substantively",
+                        "drop on any reasonable answer attempt (more aggressive)",
+                    ),
+                    advanced=True,
                 ),
             ),
         ),
@@ -301,22 +406,22 @@ def _build_registry() -> None:
             title="Thread recaps",
             description=(
                 "Writes one observational recap per active topic "
-                "thread on the Live Conversations panel. Tuning this "
-                "changes the TONE and LENGTH of each recap."
+                "thread on the Live Conversations panel."
             ),
             factory=InsightsService.THREAD_RECAP_SYSTEM,
-            adlib_template=(
+            guided_template=(
                 InsightsService.THREAD_RECAP_SYSTEM
                 + _injection_block(
                     "recap tone + length",
                     "Recap tone — {tone}.\n"
                     "Recap length — {length}.\n"
+                    "Recap focus — {focus}.\n"
                     "Recaps must still be observational paraphrase, "
                     "never advice or speculation.",
                 )
             ),
-            adlib_slots=(
-                AdlibSlot(
+            guided_slots=(
+                GuidedSlot(
                     name="tone",
                     question="How should the recaps sound?",
                     default="clinical and observational — what was said, nothing else",
@@ -324,7 +429,7 @@ def _build_registry() -> None:
                         "e.g. warm and familiar / clinical / mildly playful"
                     ),
                 ),
-                AdlibSlot(
+                GuidedSlot(
                     name="length",
                     question="How long should each recap be?",
                     default="1-2 sentences",
@@ -333,6 +438,17 @@ def _build_registry() -> None:
                         "1-2 sentences",
                         "2-3 sentences (more context)",
                     ),
+                ),
+                GuidedSlot(
+                    name="focus",
+                    question="What should each recap emphasise?",
+                    default="what chatters are saying (the content of the discussion)",
+                    options=(
+                        "what chatters are saying (the content of the discussion)",
+                        "the mood / energy of the discussion (how chatters feel)",
+                        "both content and mood",
+                    ),
+                    advanced=True,
                 ),
             ),
         ),
@@ -347,20 +463,21 @@ def _build_registry() -> None:
             title="Channel topic snapshots",
             description=(
                 "Summarizes the channel-wide topics chat is touching "
-                "on at a given moment. These feed the Topics view + "
-                "are passed into other LLM prompts as context. "
-                "Tuning changes how SPECIFIC the topic labels are."
+                "on at a given moment. Feeds the Topics view + is "
+                "passed into other LLM prompts as context."
             ),
             factory=TOPICS_SYSTEM,
-            adlib_template=(
+            guided_template=(
                 TOPICS_SYSTEM
                 + _injection_block(
-                    "topic-snapshot specificity",
-                    "Topic-label specificity — {specificity}.",
+                    "topic-snapshot specificity + tone",
+                    "Topic-label specificity — {specificity}.\n"
+                    "Maximum topics per snapshot — {max_topics}.\n"
+                    "Tone of topic descriptions — {tone}.\n"
                 )
             ),
-            adlib_slots=(
-                AdlibSlot(
+            guided_slots=(
+                GuidedSlot(
                     name="specificity",
                     question="How specific should topic labels be?",
                     default="moderately specific (e.g. 'speedrun route discussion' rather than 'gaming')",
@@ -369,6 +486,24 @@ def _build_registry() -> None:
                         "moderately specific (e.g. 'speedrun route discussion')",
                         "very specific (e.g. 'NG4 stage 3 boss strategy comparison')",
                     ),
+                ),
+                GuidedSlot(
+                    name="max_topics",
+                    question="Maximum number of topics per snapshot?",
+                    default="up to 5 (current default)",
+                    options=(
+                        "up to 3 (focused)",
+                        "up to 5 (current default)",
+                        "up to 8 (when chat is fragmented)",
+                    ),
+                    advanced=True,
+                ),
+                GuidedSlot(
+                    name="tone",
+                    question="How should topic descriptions read?",
+                    default="neutral and observational",
+                    placeholder="e.g. neutral / dry-clinical / mildly familiar",
+                    advanced=True,
                 ),
             ),
         ),
@@ -384,22 +519,22 @@ def _build_registry() -> None:
             description=(
                 "Summarizes ~60-second windows of streamer voice "
                 "transcripts (with screenshot context) into one "
-                "observational paragraph. Tuning changes the FOCUS — "
-                "what the summary emphasises — and the tone."
+                "observational paragraph."
             ),
             factory=TranscriptService.GROUP_SUMMARY_SYSTEM,
-            adlib_template=(
+            guided_template=(
                 TranscriptService.GROUP_SUMMARY_SYSTEM
                 + _injection_block(
                     "group-summary focus + tone",
                     "Focus — {focus}.\n"
                     "Tone — {tone}.\n"
+                    "Length — {length}.\n"
                     "Summaries must still be observational and "
                     "grounded in the actual utterances + screenshot.",
                 )
             ),
-            adlib_slots=(
-                AdlibSlot(
+            guided_slots=(
+                GuidedSlot(
                     name="focus",
                     question="What should each summary emphasise?",
                     default="both what's happening on screen and what the streamer is talking about",
@@ -409,11 +544,22 @@ def _build_registry() -> None:
                         "both what's happening on screen and what the streamer is talking about",
                     ),
                 ),
-                AdlibSlot(
+                GuidedSlot(
                     name="tone",
                     question="Tone preference",
                     default="neutral and descriptive",
                     placeholder="e.g. dry and clinical / warm and familiar / mildly playful",
+                ),
+                GuidedSlot(
+                    name="length",
+                    question="How long should each summary be?",
+                    default="2-4 sentences (current default)",
+                    options=(
+                        "1 sentence (terse)",
+                        "2-4 sentences (current default)",
+                        "4-6 sentences (more context)",
+                    ),
+                    advanced=True,
                 ),
             ),
         ),
@@ -462,12 +608,12 @@ def _setting_keys(call_site: str) -> tuple[str, str, str]:
     """Stable app_settings key triple for one call site."""
     return (
         f"prompts.{call_site}.mode",
-        f"prompts.{call_site}.adlibs",
+        f"prompts.{call_site}.guided",
         f"prompts.{call_site}.custom",
     )
 
 
-VALID_MODES: frozenset[str] = frozenset({"factory", "adlibs", "custom"})
+VALID_MODES: frozenset[str] = frozenset({"factory", "guided", "custom"})
 
 
 def get_mode(call_site: str, repo: "ChatterRepo") -> str:
@@ -480,12 +626,12 @@ def get_mode(call_site: str, repo: "ChatterRepo") -> str:
     return raw if raw in VALID_MODES else "factory"
 
 
-def get_adlib_values(call_site: str, repo: "ChatterRepo") -> dict[str, str]:
-    """Streamer-saved adlib values for this call site. Missing
+def get_guided_values(call_site: str, repo: "ChatterRepo") -> dict[str, str]:
+    """Streamer-saved guided-mode values for this call site. Missing
     slots fall back to their defaults at render time, so an
     incomplete dict is fine."""
-    _, adlib_key, _ = _setting_keys(call_site)
-    raw = repo.get_app_setting(adlib_key) or ""
+    _, guided_key, _ = _setting_keys(call_site)
+    raw = repo.get_app_setting(guided_key) or ""
     if not raw:
         return {}
     try:
@@ -513,10 +659,10 @@ def resolve_prompt(call_site: str, repo: "ChatterRepo") -> str:
     the streamer's mode + saved values.
 
     Defensive: any error path (unknown call site, malformed
-    app_settings, template format failure) falls back to the
-    factory prompt rather than serving an empty / broken prompt to
-    the LLM. Logs at warning so a misconfigured prompt doesn't
-    silently produce garbage output.
+    app_settings, template substitution mismatch) falls back to
+    the factory prompt rather than serving an empty / broken
+    prompt to the LLM. Logs at warning so a misconfigured prompt
+    doesn't silently produce garbage output.
 
     Production replacement pattern:
 
@@ -542,11 +688,11 @@ def resolve_prompt(call_site: str, repo: "ChatterRepo") -> str:
     if mode == "factory":
         return pd.factory
 
-    if mode == "adlibs":
-        saved = get_adlib_values(call_site, repo)
+    if mode == "guided":
+        saved = get_guided_values(call_site, repo)
         slot_values = {
             slot.name: (saved.get(slot.name) or slot.default)
-            for slot in pd.adlib_slots
+            for slot in pd.guided_slots
         }
         # Targeted replace rather than `str.format()` — factory
         # prompts can contain literal `{` characters (e.g. the
@@ -554,7 +700,7 @@ def resolve_prompt(call_site: str, repo: "ChatterRepo") -> str:
         # and `format()` would try to interpret those as
         # placeholders. We only substitute the well-known
         # `{slot_name}` markers our injection block defines.
-        rendered = pd.adlib_template
+        rendered = pd.guided_template
         for name, value in slot_values.items():
             rendered = rendered.replace("{" + name + "}", value)
         return rendered
@@ -588,22 +734,22 @@ def save_mode(call_site: str, mode: str, repo: "ChatterRepo") -> bool:
     return True
 
 
-def save_adlib_values(
+def save_guided_values(
     call_site: str, values: dict[str, str], repo: "ChatterRepo",
 ) -> bool:
-    """Persist the streamer's adlib values as JSON. Filters to only
-    the slot names the prompt actually defines, so a stale form
-    submission with extra keys can't pollute storage."""
+    """Persist the streamer's guided-mode values as JSON. Filters
+    to only the slot names the prompt actually defines, so a
+    stale form submission with extra keys can't pollute storage."""
     pd = get_prompt_def(call_site)
     if pd is None:
         return False
-    valid_names = {s.name for s in pd.adlib_slots}
+    valid_names = {s.name for s in pd.guided_slots}
     filtered = {
         k: str(v).strip() for k, v in values.items()
         if k in valid_names and v is not None
     }
-    _, adlib_key, _ = _setting_keys(call_site)
-    repo.set_app_setting(adlib_key, json.dumps(filtered, ensure_ascii=False))
+    _, guided_key, _ = _setting_keys(call_site)
+    repo.set_app_setting(guided_key, json.dumps(filtered, ensure_ascii=False))
     return True
 
 
@@ -618,7 +764,7 @@ def save_custom_text(call_site: str, text: str, repo: "ChatterRepo") -> bool:
 
 def revert_to_factory(call_site: str, repo: "ChatterRepo") -> bool:
     """Wipe every streamer override for one call site. Resets mode
-    to factory + clears adlib + custom values. Idempotent — safe
+    to factory + clears guided + custom values. Idempotent — safe
     to call when no overrides exist."""
     if get_prompt_def(call_site) is None:
         return False
