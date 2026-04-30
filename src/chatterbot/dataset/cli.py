@@ -329,18 +329,22 @@ def cmd_export(
             return 1
 
         # Optional redaction pass — replace every covered chatter
-        # name with a stable `<USER_NNN>` token. Plan is built once
-        # over all events so a chatter shows the same token across
-        # the whole bundle.
+        # name with a stable `<USER_NNN>` token. `build_plan_for_export`
+        # does both passes (explicit user_ids + @-mention sweep
+        # against user_aliases) so chatters that appear in chat
+        # PROSE — not just in declared metadata — also get redacted.
         redaction_meta: dict | None = None
         if redact_users:
             from . import redactor as _redactor
-            uids = _redactor.collect_user_ids_in_events(decoded)
-            plan = _redactor.build_plan(repo, uids)
+            plan = _redactor.build_plan_for_export(repo, decoded)
             decoded = [_redactor.redact_event(plan, ev) for ev in decoded]
             redaction_meta = {
                 "applied": True,
-                "strategy": "user_names",
+                # `user_names_with_at_mentions` documents the
+                # expanded coverage so a downstream consumer can
+                # tell this bundle apart from one redacted with the
+                # narrower v1 strategy.
+                "strategy": "user_names_with_at_mentions",
                 "anon_user_count": len(plan.id_to_token),
             }
 

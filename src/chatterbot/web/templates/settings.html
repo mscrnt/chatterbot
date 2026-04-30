@@ -211,7 +211,7 @@
     {# Diagnostics tab — keep existing behaviour, no settings keys here #}
     <section x-show="tab === 'diagnostics'" x-cloak
              class="rounded-xl border border-subtle bg-surface p-3 sm:p-4 space-y-3"
-             x-data="{ withRecent: false }">
+             x-data="{ withRecent: false, anonymize: false }">
       <header class="flex items-center justify-between gap-2">
         <h2 class="font-semibold text-primary inline-flex items-center gap-2">
           <i class="fa-solid fa-life-ring text-accent"></i> Diagnostic bundle
@@ -222,15 +222,24 @@
         Downloads a <code>.cbreport</code> file (a renamed zip — won't get filtered
         by mail / Discord) for bug reports. Privacy-safe by default: NO chat
         content, NO usernames, NO secrets. Includes log tails, system info,
-        DB row counts, and which <code>.env</code> keys are set.
+        DB row counts, dataset capture status, and which <code>.env</code> keys are set.
       </p>
-      <label class="inline-flex items-center gap-2 text-sm">
-        <input type="checkbox" x-model="withRecent" class="h-4 w-4 accent-accent">
-        Include 50 recent log lines + 5 recent error tracebacks
-      </label>
+      <div class="space-y-1.5">
+        <label class="inline-flex items-center gap-2 text-sm">
+          <input type="checkbox" x-model="withRecent" class="h-4 w-4 accent-accent">
+          Include last-24h chatter usernames + per-user message counts
+        </label>
+        <label class="inline-flex items-center gap-2 text-sm" :class="!withRecent && 'opacity-50'">
+          <input type="checkbox" x-model="anonymize" :disabled="!withRecent"
+                 class="h-4 w-4 accent-accent">
+          Anonymise — replace chatter names with <code>&lt;USER_NNN&gt;</code> tokens
+        </label>
+      </div>
       <div class="flex flex-wrap items-center gap-2">
         <a class="tap inline-flex items-center justify-center gap-2 px-3 py-2 rounded bg-accent hover:bg-accent-600 text-white text-sm font-medium"
-           :href="withRecent ? '/diagnose?with_recent_activity=1' : '/diagnose'">
+           :href="withRecent
+             ? ('/diagnose?with_recent_activity=1' + (anonymize ? '&amp;anonymize=1' : ''))
+             : '/diagnose'">
           <i class="fa-solid fa-download"></i> Download bundle
         </a>
         {% if github_issue_url %}

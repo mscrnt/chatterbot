@@ -222,12 +222,26 @@ def run_dashboard(settings: Settings) -> None:
         repo.close()
 
 
-def run_diagnose(settings: Settings, with_recent_activity: bool) -> Path:
+def run_diagnose(
+    settings: Settings,
+    with_recent_activity: bool,
+    anonymize_recent_activity: bool = False,
+) -> Path:
     out = Path(default_bundle_filename())
-    path = build_diagnostic_bundle(out, settings, with_recent_activity=with_recent_activity)
+    path = build_diagnostic_bundle(
+        out, settings,
+        with_recent_activity=with_recent_activity,
+        anonymize_recent_activity=anonymize_recent_activity,
+    )
     print(f"wrote {path}  ({path.stat().st_size:,} bytes)")
     if with_recent_activity:
-        print("(includes opt-in recent_activity.json — usernames + per-user message counts)")
+        if anonymize_recent_activity:
+            print(
+                "(includes recent_activity.json with anonymised "
+                "<USER_NNN> tokens — no real chatter names)"
+            )
+        else:
+            print("(includes opt-in recent_activity.json — usernames + per-user message counts)")
     else:
         print("(minimal mode — no chat content, no usernames, no secrets)")
     return path
@@ -267,6 +281,13 @@ def main() -> None:
         help="(diagnose only) include usernames + per-user message counts "
              "from the last 24h. Off by default for privacy.",
     )
+    parser.add_argument(
+        "--anonymize",
+        action="store_true",
+        help="(diagnose only, with --with-recent-activity) replace chatter "
+             "usernames with stable <USER_NNN> tokens via the dataset "
+             "redactor. Lets you share activity SHAPE without identities.",
+    )
 
     args = parser.parse_args()
 
@@ -293,7 +314,13 @@ def main() -> None:
     elif mode == "dashboard":
         run_dashboard(settings)
     elif mode == "diagnose":
-        run_diagnose(settings, with_recent_activity=args.with_recent_activity)
+        run_diagnose(
+            settings,
+            with_recent_activity=args.with_recent_activity,
+            anonymize_recent_activity=(
+                args.anonymize and args.with_recent_activity
+            ),
+        )
     else:
         parser.error(f"unknown mode: {mode!r}")
 

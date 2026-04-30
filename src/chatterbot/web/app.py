@@ -1660,9 +1660,16 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     # ---------------- diagnostic bundle ----------------
 
     @app.get("/diagnose")
-    async def diagnose(with_recent_activity: int = Query(0)):
+    async def diagnose(
+        with_recent_activity: int = Query(0),
+        anonymize: int = Query(0),
+    ):
         """Build a privacy-safe .cbreport zip and stream it back as a download.
-        See diagnose.py for what's in / out of the bundle."""
+        See diagnose.py for what's in / out of the bundle.
+
+        `anonymize=1` is meaningful only with `with_recent_activity=1` —
+        runs the dataset redactor over the activity slice so the
+        bundle can be shared without revealing chatter usernames."""
         from ..diagnose import build_diagnostic_bundle, default_bundle_filename
         import tempfile
         from fastapi import BackgroundTasks
@@ -1680,6 +1687,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             build_diagnostic_bundle,
             out_path, settings,
             with_recent_activity=bool(with_recent_activity),
+            anonymize_recent_activity=bool(anonymize) and bool(with_recent_activity),
         )
         bg = BackgroundTasks()
         bg.add_task(lambda p=out_path: p.unlink(missing_ok=True))

@@ -241,3 +241,143 @@ def collect_user_ids_in_events(events: list[dict[str, Any]]) -> list[str]:
                     if isinstance(uid, str) and uid:
                         seen.add(uid)
     return sorted(seen)
+
+
+# ---- @-mention sweep ----
+#
+# An event's `referenced_user_ids` only covers chatters the call site
+# explicitly declared (typically the focal user of a per-user pass).
+# Chat content often mentions OTHER chatters via @handle — those slip
+# through the explicit list but are obvious enough to catch with a
+# narrow regex. The `@` prefix is the high-precision signal: random
+# words in prose don't get a leading `@`, so this won't false-match
+# common english nouns.
+#
+# Twitch usernames are [A-Za-z0-9_], length 4-25; the regex matches
+# anything starting with `@` followed by 1+ word characters. Caller
+# resolves each captured handle against `user_aliases` — handles that
+# don't match a known chatter pass through untouched.
+
+_AT_MENTION_RE = re.compile(r"@([A-Za-z0-9_]{2,})")
+
+
+def _scan_text_for_handles(text: str) -> set[str]:
+    """Pull every @-mention token from a string. Lowercased so the
+    caller can match case-insensitively against `user_aliases`.
+    Empty string in → empty set out."""
+    if not text:
+        return set()
+    return {m.group(1).lower() for m in _AT_MENTION_RE.finditer(text)}
+
+
+def collect_at_mention_handles_in_events(
+    events: list[dict[str, Any]],
+) -> set[str]:
+    """Walk every text-bearing field across all event types and
+    collect @-mention candidates. Lowercased, deduped. The set is
+    LOSSY — handles that don't map to known chatters in
+    `user_aliases` get filtered later in `resolve_handles_to_user_ids`."""
+    handles: set[str] = set()
+    text_fields = ("prompt", "system_prompt", "response_text", "note", "error")
+    for ev in events:
+        for field in text_fields:
+            v = ev.get(field)
+            if isinstance(v, str):
+                handles |= _scan_text_for_handles(v)
+        # STREAMER_ACTION events with action_kind='note' put the note
+        # text inline in `note` (handled above) but item_key may
+        # carry user-facing strings too.
+        if ev.get("action_kind") in ("note", "engaging_subject"):
+            ik = ev.get("item_key")
+            if isinstance(ik, str):
+                handles |= _scan_text_for_handles(ik)
+        # CONTEXT_SNAPSHOT — message bodies + thread recaps. Driver
+        # names already redact via the explicit user_id path so we
+        # don't double-scan that list.
+        snap = ev.get("snapshot")
+        if isinstance(snap, dict):
+            for m in snap.get("messages") or []:
+                if isinstance(m, dict):
+                    c = m.get("content")
+                    if isinstance(c, str):
+                        handles |= _scan_text_for_handles(c)
+                    rpl = m.get("reply_parent_login")
+                    if isinstance(rpl, str) and rpl:
+                        # reply_parent_login is a bare username (no
+                        # @ prefix) but it IS a known username field
+                        # — treat it like an @-mention by definition.
+                        handles.add(rpl.lower())
+            for t in snap.get("threads") or []:
+                if isinstance(t, dict):
+                    r = t.get("recap")
+                    if isinstance(r, str):
+                        handles |= _scan_text_for_handles(r)
+    return handles
+
+
+def resolve_handles_to_user_ids(
+    repo: "ChatterRepo", handles: set[str],
+) -> set[str]:
+    """Look up each handle (case-insensitive) against `user_aliases`.
+    Returns the set of user_ids any of these handles map to. Unknown
+    handles drop silently — they're not chatters we're tracking, so
+    leaving them in prose is fine.
+
+    A single handle can resolve to multiple user_ids (two different
+    chatters with the same display name across different time
+    windows). All matching ids land in the result; the redactor's
+    plan covers all of them."""
+    if not handles:
+        return set()
+    # Lowercase on bind so the column-side LOWER() in the WHERE
+    # clause has matching values to compare against. Callers may
+    # pass either lowercased handles (e.g. from
+    # `_scan_text_for_handles`) or original-case strings (tests,
+    # ad-hoc lookups); we normalise here so both work.
+    handles_list = sorted({h.lower() for h in handles})
+    placeholders = ",".join("?" for _ in handles_list)
+    found: set[str] = set()
+    try:
+        with repo._cursor() as cur:  # noqa: SLF001 — internal redactor
+            cur.execute(
+                f"SELECT DISTINCT user_id FROM user_aliases "
+                f"WHERE LOWER(name) IN ({placeholders})",
+                handles_list,
+            )
+            for row in cur.fetchall():
+                uid = row["user_id"]
+                if isinstance(uid, str) and uid:
+                    found.add(uid)
+    except Exception:
+        # Defensive — schema absence / connection error / etc.
+        # shouldn't take down the export. Falls back to "no
+        # @-mention expansion this run."
+        pass
+    return found
+
+
+def build_plan_for_export(
+    repo: "ChatterRepo", events: list[dict[str, Any]],
+) -> RedactionPlan:
+    """One-stop plan builder for the export path. Two passes:
+
+      1. Collect every user_id explicitly declared in the events
+         (`referenced_user_ids` + nested snapshot.messages.user_id).
+      2. Scan every text field for @-mentions, resolve handles to
+         user_ids via `user_aliases`.
+
+    The union of (1) and (2) goes through `build_plan`, so the
+    resulting plan covers chatters the events know about by id AND
+    chatters that only appear by name in prose. High-precision —
+    only @-prefixed tokens count, so unrelated words can't false-
+    match a chatter handle that happens to be a common english noun.
+
+    Direct callers that already have a user_id list should keep
+    using `build_plan(repo, user_ids)`. This helper exists for the
+    bundle export which needs to handle both kinds of references at
+    once."""
+    explicit = set(collect_user_ids_in_events(events))
+    mention_handles = collect_at_mention_handles_in_events(events)
+    resolved = resolve_handles_to_user_ids(repo, mention_handles)
+    union = sorted(explicit | resolved)
+    return build_plan(repo, union)

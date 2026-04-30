@@ -219,3 +219,178 @@ def test_collect_user_ids_aggregates_across_events(tmp_repo):
     ]
     ids = redactor.collect_user_ids_in_events(events)
     assert sorted(ids) == ["u_a", "u_b", "u_c"]
+
+
+# ---- @-mention sweep ----
+
+
+def test_scan_text_extracts_at_mentions():
+    """Bare regex test — pulls every `@handle` token out of prose,
+    lowercases for case-insensitive matching downstream."""
+    handles = redactor._scan_text_for_handles(
+        "ping @Alice and @bob_speedrun, also @CAROL"
+    )
+    assert handles == {"alice", "bob_speedrun", "carol"}
+
+
+def test_scan_text_ignores_one_char_handles():
+    """Single-letter `@a` is more likely to be Twitch shorthand or
+    a typo than a real handle. Twitch handles are 4-25 chars in
+    practice; we settle on a 2-char minimum to be safe but exclude
+    the obvious noise like `@!` or `@?`."""
+    handles = redactor._scan_text_for_handles("hi @a what about @bob")
+    assert "bob" in handles
+    assert "a" not in handles
+
+
+def test_collect_at_mentions_walks_every_event_kind():
+    """The collector must look in: prompt, system_prompt,
+    response_text, note, error, snapshot.messages.content,
+    snapshot.threads.recap, and reply_parent_login. Pinning every
+    field path so a refactor that drops one is caught."""
+    events = [
+        {"kind": "llm_call",
+         "prompt": "@alice asked",
+         "system_prompt": "context: @bob",
+         "response_text": "@carol mentioned",
+         "error": "@dave failed"},
+        {"kind": "streamer_action",
+         "action_kind": "note",
+         "note": "@eve made a point"},
+        {"kind": "context_snapshot", "snapshot": {
+            "messages": [
+                {"content": "love @frank's runs",
+                 "reply_parent_login": "grace"},
+            ],
+            "threads": [
+                {"recap": "@henry led the discussion"},
+            ],
+        }},
+    ]
+    handles = redactor.collect_at_mention_handles_in_events(events)
+    assert {"alice", "bob", "carol", "dave", "eve",
+            "frank", "grace", "henry"} <= handles
+
+
+def test_resolve_handles_filters_unknown(tmp_repo, make_user):
+    """Handles that don't appear in user_aliases get dropped — they
+    aren't chatters we're tracking. The export pipeline keeps them
+    in the prose untouched, which is the right call for "I went to
+    the store and saw @signage" type false-positives."""
+    make_user(name="alice")
+    found = redactor.resolve_handles_to_user_ids(
+        tmp_repo, {"alice", "neverseen"},
+    )
+    assert len(found) == 1
+
+
+def test_resolve_handles_case_insensitive(tmp_repo, make_user):
+    """`@Alice` and `@ALICE` both resolve to the same user because
+    the SQL uses LOWER() on both sides. Catches a regression where
+    someone removes the case fold and Twitch's case-insensitive
+    handles silently miss."""
+    make_user(name="alice")
+    found_lower = redactor.resolve_handles_to_user_ids(tmp_repo, {"alice"})
+    found_upper = redactor.resolve_handles_to_user_ids(tmp_repo, {"ALICE"})
+    found_mixed = redactor.resolve_handles_to_user_ids(tmp_repo, {"Alice"})
+    assert found_lower == found_upper == found_mixed
+    assert len(found_lower) == 1
+
+
+def test_build_plan_for_export_redacts_unreferenced_at_mentions(
+    tmp_repo, make_user,
+):
+    """The whole point of the enhancement: a CONTEXT_SNAPSHOT
+    message that mentions `@bob` must redact bob even when bob
+    isn't in any event's `referenced_user_ids`. Catches the leak
+    case the user flagged — '@charlie nice run' would previously
+    pass through untouched."""
+    alice_uid = make_user(name="alice")
+    bob_uid = make_user(name="bob")  # mentioned only in prose
+
+    events = [
+        # Explicit reference: alice. @-mention only: bob.
+        {"kind": "llm_call",
+         "referenced_user_ids": [alice_uid],
+         "prompt": "alice's chat: @bob nice run",
+         "response_text": "{}"},
+    ]
+    plan = redactor.build_plan_for_export(tmp_repo, events)
+    # Both users now in the plan even though bob was prose-only.
+    assert alice_uid in plan.id_to_token
+    assert bob_uid in plan.id_to_token
+
+    # Apply the plan and assert the prompt has bob redacted.
+    out = redactor.redact_event(plan, events[0])
+    assert "bob" not in out["prompt"].lower()
+    assert "<USER_" in out["prompt"]
+    # `@bob` becomes `@<USER_NNN>` — keeps the @ shape so a reader
+    # still sees "this was an @-mention" without seeing who.
+    assert "@<USER_" in out["prompt"]
+
+
+def test_build_plan_for_export_skips_unknown_at_mentions(
+    tmp_repo, make_user,
+):
+    """`@somenobody` that doesn't resolve to a real chatter must
+    pass through untouched — false-matching is the bigger sin."""
+    make_user(name="alice")
+    events = [
+        {"kind": "llm_call",
+         "referenced_user_ids": [],
+         "prompt": "alice asked about @somenobody"},
+    ]
+    plan = redactor.build_plan_for_export(tmp_repo, events)
+    out = redactor.redact_event(plan, events[0])
+    assert "@somenobody" in out["prompt"]
+
+
+def test_at_mention_in_snapshot_message_content_redacted(
+    tmp_repo, make_user,
+):
+    """The exact scenario from the user's question: a CONTEXT_SNAPSHOT
+    message contains `@charlie nice run` where charlie ISN'T in
+    referenced_user_ids. Must still get redacted via the @-mention
+    sweep."""
+    charlie_uid = make_user(name="charlie")
+    events = [
+        {"kind": "context_snapshot", "snapshot": {
+            "messages": [
+                {"id": 1, "user_id": "u_alice", "name": "alice",
+                 "content": "@charlie nice run"},
+            ],
+            "threads": [],
+        }},
+    ]
+    plan = redactor.build_plan_for_export(tmp_repo, events)
+    assert charlie_uid in plan.id_to_token
+
+    out = redactor.redact_event(plan, events[0])
+    msg = out["snapshot"]["messages"][0]
+    assert "charlie" not in msg["content"].lower()
+    assert "<USER_" in msg["content"]
+
+
+def test_reply_parent_login_resolves_via_at_mention_path(
+    tmp_repo, make_user,
+):
+    """Bare `reply_parent_login` field carries a username (no @
+    prefix). The collector treats it as if it were @-prefixed so
+    the plan picks up the chatter even when they're not declared
+    elsewhere."""
+    bob_uid = make_user(name="bob")
+    events = [
+        {"kind": "context_snapshot", "snapshot": {
+            "messages": [
+                {"id": 1, "user_id": "u_alice", "name": "alice",
+                 "content": "yeah", "reply_parent_login": "bob"},
+            ],
+            "threads": [],
+        }},
+    ]
+    plan = redactor.build_plan_for_export(tmp_repo, events)
+    assert bob_uid in plan.id_to_token
+
+    out = redactor.redact_event(plan, events[0])
+    msg = out["snapshot"]["messages"][0]
+    assert msg["reply_parent_login"].startswith("<USER_")
