@@ -28,6 +28,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
+    # async test support — capture / insights / repo helpers are all
+    # `async def` and pytest needs the asyncio plugin to run them.
+    "pytest-asyncio>=0.23.0",
     "ruff>=0.1.0",
 ]
 # Real-time stream transcription via the OBS audio relay. Pulls in
@@ -74,6 +77,22 @@ packages = ["src/chatterbot"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.pytest.ini_options]
+# auto-mode lets us write `async def test_…` without decorating each
+# test with @pytest.mark.asyncio. Aligns with how every coroutine in
+# this codebase is consumed (asyncio.run, asyncio.create_task).
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# Show short tracebacks by default; the full versions are noisy on
+# pydantic ValidationError chains.
+addopts = "-ra --tb=short"
+filterwarnings = [
+    # The `audioop` deprecation comes from a transitive dep we don't
+    # control (and is gone in 3.13 anyway). Suppress so CI isn't
+    # noisy.
+    "ignore::DeprecationWarning:audioop",
+]
 
 [dependency-groups]
 dev = [

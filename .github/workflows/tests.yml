@@ -1,0 +1,60 @@
+name: tests
+
+# Runs on every push to main and every PR. The unit suite is fast
+# (~15s end-to-end at the time of writing) and uses zero external
+# services — no Ollama, no Twitch, no OBS — so it slots into a free
+# ubuntu-latest runner without rate limits or fixtures.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs on the same ref when a new commit lands.
+# Avoids paying for stale runs that the developer has already
+# superseded.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # uv is the project's standard package manager (see uv.lock at
+      # the repo root). astral-sh/setup-uv handles caching of the
+      # download + the cache dir so warm runs are sub-second on the
+      # install step.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      # `--extra dataset --extra dev` mirrors what the test suite
+      # needs: cryptography + zstandard for the dataset capture
+      # tests, pytest + pytest-asyncio for the runner. Skipping the
+      # `whisper` extra keeps the install fast (whisper pulls
+      # ~300 MB of ctranslate2 / faster-whisper that no test needs).
+      - name: Install dependencies
+        run: uv sync --extra dataset --extra dev
+
+      - name: Run pytest
+        run: uv run pytest
+
+      # Surface a friendly summary in the GitHub Actions UI even on
+      # failure. Helps spot flaky tests at a glance without opening
+      # the full log.
+      - name: Test summary (on failure)
+        if: failure()
+        run: |
+          echo "::group::Last 50 lines of pytest output"
+          uv run pytest --tb=short -q || true
+          echo "::endgroup::"
