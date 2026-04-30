@@ -142,6 +142,17 @@ class AnthropicClient(_EmbeddingDelegator):
         self.model = model
         self.timeout = timeout
         self.thinking_budget_tokens = thinking_budget_tokens
+        # Optional ChatterRepo handle for personal-dataset capture —
+        # mirrors OllamaClient's surface. None until the
+        # bot/dashboard startup unlock attaches one.
+        self._dataset_repo = None
+
+    def attach_dataset_capture(self, repo) -> None:
+        """Wire a ChatterRepo into this client so structured calls
+        record LLM_CALL events into the encrypted dataset shards.
+        Capture is still gated by the repo's own toggle; attaching
+        without the streamer opting in is a no-op."""
+        self._dataset_repo = repo
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -238,19 +249,45 @@ class AnthropicClient(_EmbeddingDelegator):
         num_predict: int | None = None,
         images: list[str] | None = None,
         think: bool = False,
+        call_site: str = "unknown",
     ) -> T:
+        import time as _time
         schema = response_model.model_json_schema()
-        raw = await self.generate(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            format_schema=schema,
-            model_override=model_override,
-            num_ctx=num_ctx,
-            num_predict=num_predict,
-            images=images,
-            think=think,
-        )
-        return response_model.model_validate_json(raw)
+        started = _time.monotonic()
+        raw = ""
+        error: str | None = None
+        try:
+            raw = await self.generate(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                format_schema=schema,
+                model_override=model_override,
+                num_ctx=num_ctx,
+                num_predict=num_predict,
+                images=images,
+                think=think,
+            )
+            return response_model.model_validate_json(raw)
+        except Exception as e:
+            error = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            from ..dataset.capture import record_llm_call_safe
+            await record_llm_call_safe(
+                self._dataset_repo,
+                call_site=call_site,
+                model_id=model_override or self.model,
+                provider="anthropic",
+                system_prompt=system_prompt,
+                prompt=prompt,
+                response_text=raw,
+                response_schema_name=response_model.__name__,
+                num_ctx=num_ctx,
+                num_predict=num_predict,
+                think=think,
+                latency_ms=int((_time.monotonic() - started) * 1000),
+                error=error,
+            )
 
     async def stream_generate(
         self,
@@ -347,6 +384,17 @@ class OpenAIClient(_EmbeddingDelegator):
         self.reasoning_model = reasoning_model
         self.timeout = timeout
         self.organization = organization
+        # Optional ChatterRepo handle for personal-dataset capture —
+        # mirrors OllamaClient + AnthropicClient. None until the
+        # bot/dashboard startup unlock attaches one.
+        self._dataset_repo = None
+
+    def attach_dataset_capture(self, repo) -> None:
+        """Wire a ChatterRepo into this client so structured calls
+        record LLM_CALL events into the encrypted dataset shards.
+        Capture is still gated by the repo's own toggle; attaching
+        without the streamer opting in is a no-op."""
+        self._dataset_repo = repo
 
     def _headers(self) -> dict[str, str]:
         h = {
@@ -418,19 +466,45 @@ class OpenAIClient(_EmbeddingDelegator):
         num_predict: int | None = None,
         images: list[str] | None = None,
         think: bool = False,
+        call_site: str = "unknown",
     ) -> T:
+        import time as _time
         schema = response_model.model_json_schema()
-        raw = await self.generate(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            format_schema=schema,
-            model_override=model_override,
-            num_ctx=num_ctx,
-            num_predict=num_predict,
-            images=images,
-            think=think,
-        )
-        return response_model.model_validate_json(raw)
+        started = _time.monotonic()
+        raw = ""
+        error: str | None = None
+        try:
+            raw = await self.generate(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                format_schema=schema,
+                model_override=model_override,
+                num_ctx=num_ctx,
+                num_predict=num_predict,
+                images=images,
+                think=think,
+            )
+            return response_model.model_validate_json(raw)
+        except Exception as e:
+            error = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            from ..dataset.capture import record_llm_call_safe
+            await record_llm_call_safe(
+                self._dataset_repo,
+                call_site=call_site,
+                model_id=self._pick_model(model_override, think),
+                provider="openai",
+                system_prompt=system_prompt,
+                prompt=prompt,
+                response_text=raw,
+                response_schema_name=response_model.__name__,
+                num_ctx=num_ctx,
+                num_predict=num_predict,
+                think=think,
+                latency_ms=int((_time.monotonic() - started) * 1000),
+                error=error,
+            )
 
     async def stream_generate(
         self,

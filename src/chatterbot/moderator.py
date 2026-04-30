@@ -132,6 +132,7 @@ class Moderator:
                 # moderation is the highest-frequency LLM call and benefits
                 # most from running on dedicated capacity.
                 model_override=self.settings.ollama_mod_model or None,
+                call_site="moderator.incident_classification",
             )
         except ValidationError:
             logger.exception("moderation classifier validation failed")

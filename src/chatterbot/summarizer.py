@@ -602,6 +602,7 @@ class Summarizer:
                     response_model=ProfileExtractionResponse,
                     num_ctx=INFORMED_NUM_CTX,
                     think=True,
+                    call_site="summarizer.profile_extraction",
                 )
                 await asyncio.to_thread(
                     self.repo.update_user_profile, user_id,
@@ -1064,6 +1065,7 @@ Bad output (DO NOT DO):
                 response_model=TopicsResponse,
                 num_ctx=INFORMED_NUM_CTX,
                 think=True,
+                call_site="summarizer.topics_snapshot",
             )
         except ValidationError:
             logger.exception("topics extraction validation failed")

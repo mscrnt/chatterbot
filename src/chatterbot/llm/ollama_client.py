@@ -213,33 +213,26 @@ class OllamaClient:
             error = f"{type(e).__name__}: {e}"
             raise
         finally:
-            # Capture is always opt-in and gated by `dataset_capture_enabled()`
-            # inside `record_llm_call`. The hot path when capture is off
-            # is one attribute access + one method call returning False.
-            if self._dataset_repo is not None:
-                latency_ms = int((time.monotonic() - started) * 1000)
-                try:
-                    from ..dataset.capture import record_llm_call
-                    await record_llm_call(
-                        self._dataset_repo,
-                        call_site=call_site,
-                        model_id=model_override or self.model,
-                        provider="ollama",
-                        system_prompt=system_prompt,
-                        prompt=prompt,
-                        response_text=raw,
-                        response_schema_name=response_model.__name__,
-                        num_ctx=num_ctx,
-                        num_predict=num_predict,
-                        think=think,
-                        latency_ms=latency_ms,
-                        error=error,
-                    )
-                except Exception:
-                    # Capture must never break the LLM call path. Log
-                    # at debug level — the capture module itself logs
-                    # at warning when it actually drops something.
-                    logger.debug("dataset capture failed", exc_info=True)
+            # Capture is always opt-in. `record_llm_call_safe` no-ops when
+            # `_dataset_repo is None` (default) and again when the toggle
+            # is off — single attribute read + one cached dict lookup
+            # in the hot path.
+            from ..dataset.capture import record_llm_call_safe
+            await record_llm_call_safe(
+                self._dataset_repo,
+                call_site=call_site,
+                model_id=model_override or self.model,
+                provider="ollama",
+                system_prompt=system_prompt,
+                prompt=prompt,
+                response_text=raw,
+                response_schema_name=response_model.__name__,
+                num_ctx=num_ctx,
+                num_predict=num_predict,
+                think=think,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                error=error,
+            )
 
     async def stream_generate(
         self,

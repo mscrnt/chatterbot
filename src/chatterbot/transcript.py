@@ -902,6 +902,7 @@ When in doubt, return NO match. Empty `matches` list is the expected, common out
                 system_prompt=self.LLM_MATCH_SYSTEM,
                 response_model=TranscriptMatchResponse,
                 num_ctx=self.LLM_MATCH_NUM_CTX,
+                call_site="transcript.llm_match",
             )
         except Exception:
             logger.exception("transcript: llm match call failed")
@@ -1561,6 +1562,7 @@ Reply with `summary` = the line(s) (or empty string).
                 num_ctx=self.GROUP_SUMMARY_NUM_CTX,
                 images=[grid_b64] if grid_b64 else None,
                 think=True,
+                call_site="transcript.group_summary",
             )
         except Exception:
             logger.exception("transcript: group summary call failed")

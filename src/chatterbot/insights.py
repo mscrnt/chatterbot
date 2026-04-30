@@ -427,6 +427,7 @@ class InsightsService:
                     num_ctx=INFORMED_NUM_CTX,
                     images=[grid_b64] if grid_b64 else None,
                     think=True,
+                    call_site="insights.talking_points",
                 )
             except ValidationError as e:
                 logger.exception("talking-points validation failed")
@@ -585,6 +586,7 @@ Empty / partial replies are fine. Skipping is the right call when in doubt.
                 num_ctx=self.THREAD_RECAP_NUM_CTX,
                 images=[grid_b64] if grid_b64 else None,
                 think=True,
+                call_site="insights.thread_recaps",
             )
         except ValidationError as e:
             logger.warning("thread-recap validation failed: %s", e)
@@ -1429,6 +1431,7 @@ Good output:
                             num_ctx=self.SUBJECTS_NUM_CTX,
                             images=[grid_b64] if grid_b64 else None,
                             think=True,
+                            call_site="insights.engaging_subjects",
                         )
                         response_subjects = response.subjects
                         if not response_subjects:
@@ -1766,6 +1769,7 @@ When uncertain, drop. Chat will re-ask anything that matters; surfacing an alrea
                     response_model=OpenQuestionsResponse,
                     num_ctx=self.OPEN_QUESTIONS_NUM_CTX,
                     think=True,
+                    call_site="insights.open_questions",
                 )
             except ValidationError as e:
                 logger.warning("open-questions validation failed: %s", e)

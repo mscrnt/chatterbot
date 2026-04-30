@@ -96,6 +96,61 @@ def _decompress(payload: bytes) -> bytes:
 # ---- public capture API ----
 
 
+async def record_llm_call_safe(
+    repo: "ChatterRepo | None",
+    *,
+    call_site: str,
+    model_id: str,
+    provider: str,
+    system_prompt: str | None,
+    prompt: str,
+    response_text: str,
+    response_schema_name: str,
+    num_ctx: int | None,
+    num_predict: int | None,
+    think: bool,
+    latency_ms: int,
+    error: str | None = None,
+) -> None:
+    """Drop-in wrapper for `record_llm_call` that swallows errors and
+    no-ops when `repo is None`. Provider clients call this from their
+    `generate_structured` finally-block so the capture path is one
+    line per provider and can never break the LLM call.
+
+    Three things this guarantees the caller doesn't have to:
+      1. `repo is None` (capture never attached) → silent return.
+      2. Any exception inside the capture pipeline → log at DEBUG and
+         continue. Capture is a side-effect; failures are non-fatal.
+      3. The actual capture call is `await`ed only when capture is
+         going to do something — saves an event-loop hop in the
+         common no-capture-attached case.
+    """
+    if repo is None:
+        return
+    try:
+        await record_llm_call(
+            repo,
+            call_site=call_site,
+            model_id=model_id,
+            provider=provider,
+            system_prompt=system_prompt,
+            prompt=prompt,
+            response_text=response_text,
+            response_schema_name=response_schema_name,
+            num_ctx=num_ctx,
+            num_predict=num_predict,
+            think=think,
+            latency_ms=latency_ms,
+            error=error,
+        )
+    except Exception:
+        # Capture must never propagate. The capture pipeline already
+        # logs at WARNING when individual writes fail; this is the
+        # last-resort net for everything else (import errors, repo
+        # disconnects, etc).
+        logger.debug("dataset capture: record_llm_call_safe swallowed", exc_info=True)
+
+
 async def record_llm_call(
     repo: "ChatterRepo",
     *,

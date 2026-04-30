@@ -92,7 +92,7 @@ async def test_llm_response_re_attaches_drivers(
     # prompt's "lightly clean" allowance) for one and keeps the other
     # verbatim — exercises both paths.
     mock_llm.queue_response(
-        call_site="unknown",  # production code currently doesn't pass call_site
+        call_site="insights.open_questions",  # production code currently doesn't pass call_site
         response=OpenQuestionsResponse(questions=[
             OpenQuestion(candidate_id=mid_a, question="Any tips for boss 3?"),
             OpenQuestion(candidate_id=mid_b, question="When does the new patch drop?"),
@@ -127,7 +127,7 @@ async def test_dropped_candidate_does_not_appear_in_cache(
 
     svc = _service(tmp_repo, mock_llm)
     mock_llm.queue_response(
-        call_site="unknown",
+        call_site="insights.open_questions",
         response=OpenQuestionsResponse(questions=[
             OpenQuestion(candidate_id=mid_a, question="when's the next stream?"),
             # mid_b deliberately omitted — LLM filtered it.
@@ -153,7 +153,7 @@ async def test_hallucinated_candidate_id_is_dropped(
 
     svc = _service(tmp_repo, mock_llm)
     mock_llm.queue_response(
-        call_site="unknown",
+        call_site="insights.open_questions",
         response=OpenQuestionsResponse(questions=[
             OpenQuestion(candidate_id=mid_a, question="real question?"),
             OpenQuestion(candidate_id=999_999, question="hallucinated"),
@@ -201,7 +201,7 @@ async def test_duplicate_candidate_id_in_response_kept_once(
 
     svc = _service(tmp_repo, mock_llm)
     mock_llm.queue_response(
-        call_site="unknown",
+        call_site="insights.open_questions",
         response=OpenQuestionsResponse(questions=[
             OpenQuestion(candidate_id=mid, question="How to parry?"),
             OpenQuestion(candidate_id=mid, question="how do you parry"),
@@ -232,7 +232,7 @@ async def test_cache_entry_has_all_template_fields(
 
     svc = _service(tmp_repo, mock_llm)
     mock_llm.queue_response(
-        call_site="unknown",
+        call_site="insights.open_questions",
         response=OpenQuestionsResponse(questions=[
             OpenQuestion(candidate_id=mid, question="Any good route tips?"),
         ]),
