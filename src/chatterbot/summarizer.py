@@ -546,6 +546,13 @@ class Summarizer:
                     num_ctx=INFORMED_NUM_CTX,
                     think=True,
                     call_site="summarizer.note_extraction",
+                    # Per-user pass — the focal chatter is the only
+                    # user whose chat content is in this prompt
+                    # by definition. Declaring them lets the dataset
+                    # capture pipeline drop the event if they ever
+                    # opt out (defense in depth on top of the
+                    # is_opted_out gate above this call).
+                    referenced_user_ids=[user_id],
                 )
             except ValidationError:
                 logger.exception("note extraction validation failed for %s", user_id)
@@ -603,6 +610,8 @@ class Summarizer:
                     num_ctx=INFORMED_NUM_CTX,
                     think=True,
                     call_site="summarizer.profile_extraction",
+                    # Same per-user reasoning as note_extraction above.
+                    referenced_user_ids=[user_id],
                 )
                 await asyncio.to_thread(
                     self.repo.update_user_profile, user_id,

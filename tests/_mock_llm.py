@@ -158,6 +158,7 @@ class MockLLMClient:
         images: list[str] | None = None,
         think: bool = False,
         call_site: str = "unknown",
+        referenced_user_ids: list[str] | None = None,
     ) -> T:
         rec = RecordedCall(
             call_site=call_site,
@@ -213,6 +214,7 @@ class MockLLMClient:
                     num_predict=num_predict,
                     think=think,
                     latency_ms=0,
+                    referenced_user_ids=referenced_user_ids,
                 )
             except Exception:
                 pass  # capture must never break the call path

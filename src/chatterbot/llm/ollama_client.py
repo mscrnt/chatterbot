@@ -174,6 +174,7 @@ class OllamaClient:
         images: list[str] | None = None,
         think: bool = False,
         call_site: str = "unknown",
+        referenced_user_ids: list[str] | None = None,
     ) -> T:
         """Run a generation that returns a validated `response_model` instance.
 
@@ -232,6 +233,7 @@ class OllamaClient:
                 think=think,
                 latency_ms=int((time.monotonic() - started) * 1000),
                 error=error,
+                referenced_user_ids=referenced_user_ids,
             )
 
     async def stream_generate(

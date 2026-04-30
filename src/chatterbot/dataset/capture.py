@@ -51,6 +51,17 @@ EVENT_STREAMER_ACTION = "streamer_action"
 EVENT_CONTEXT_SNAPSHOT = "context_snapshot"
 
 
+# Stable kind identifiers for STREAMER_ACTION events. Anything that
+# the streamer does on the dashboard that the dataset reader might
+# care about gets one of these. Pinning the strings here means a
+# future export pipeline can filter on them without grepping
+# production code for the literal.
+ACTION_KIND_INSIGHT_STATE = "insight_state"          # dismiss / addressed / snooze / pin / skip
+ACTION_KIND_NOTE = "note"                            # add / update / delete
+ACTION_KIND_SUBJECT = "engaging_subject"             # reject one
+ACTION_KIND_SUBJECT_BLOCKLIST = "engaging_subject_blocklist"  # clear all
+
+
 # Process-wide singleton — one ShardWriter, guarded by a lock so the
 # (rare) parallel capture writes from different background tasks
 # serialize cleanly. Lazy-initialised on first capture so no-capture
@@ -96,6 +107,57 @@ def _decompress(payload: bytes) -> bytes:
 # ---- public capture API ----
 
 
+def record_streamer_action_safe(
+    repo: "ChatterRepo | None",
+    *,
+    kind: str,
+    item_key: str,
+    action: str,
+    note: str | None = None,
+) -> None:
+    """Sync capture helper for STREAMER_ACTION events. Hooks at the
+    repo / insights mutation chokepoints (set_insight_state, note
+    CRUD, reject_subject, clear_subject_blocklist) call this right
+    after the SQL write succeeds.
+
+    Sync on purpose — streamer actions fire at human cadence
+    (a handful per minute at most), so the encrypt-and-write doesn't
+    need to leave the calling thread. Avoids the "fire-and-forget
+    asyncio.create_task from a sync method" footgun (no event loop
+    in CLI / TUI / sync test contexts).
+
+    Hot-path no-op when:
+      - repo is None (capture not wired into this repo)
+      - dataset_capture_enabled() is false
+      - DEK isn't loaded into process memory
+    Errors swallowed at debug level — capture must never break the
+    streamer-facing mutation it's observing.
+    """
+    if repo is None:
+        return
+    try:
+        if not repo.dataset_capture_enabled():
+            return
+        dek = repo.dataset_dek()
+        if dek is None:
+            _warn_no_dek_once()
+            return
+        payload = {
+            "v": CAPTURE_SCHEMA_VERSION,
+            "kind": EVENT_STREAMER_ACTION,
+            "action_kind": kind,
+            "item_key": item_key,
+            "action": action,
+            "note": note,
+        }
+        _write_event_sync(repo, dek, EVENT_STREAMER_ACTION, payload)
+    except Exception:
+        logger.debug(
+            "dataset capture: streamer-action write failed for kind=%r action=%r",
+            kind, action, exc_info=True,
+        )
+
+
 async def record_llm_call_safe(
     repo: "ChatterRepo | None",
     *,
@@ -111,6 +173,7 @@ async def record_llm_call_safe(
     think: bool,
     latency_ms: int,
     error: str | None = None,
+    referenced_user_ids: list[str] | None = None,
 ) -> None:
     """Drop-in wrapper for `record_llm_call` that swallows errors and
     no-ops when `repo is None`. Provider clients call this from their
@@ -124,6 +187,14 @@ async def record_llm_call_safe(
       3. The actual capture call is `await`ed only when capture is
          going to do something — saves an event-loop hop in the
          common no-capture-attached case.
+
+    `referenced_user_ids` lists every chatter the prompt references
+    by user_id. The capture pipeline drops the event entirely if any
+    listed user has `users.opt_out=1`, so opted-out chatters never
+    enter the dataset on disk. Default `None` means "I don't know /
+    don't care" — capture proceeds unconditionally. Most call sites
+    that build prompts from chatter content already filter on
+    opt_out=0 at SQL query time; this is defense in depth.
     """
     if repo is None:
         return
@@ -142,6 +213,7 @@ async def record_llm_call_safe(
             think=think,
             latency_ms=latency_ms,
             error=error,
+            referenced_user_ids=referenced_user_ids,
         )
     except Exception:
         # Capture must never propagate. The capture pipeline already
@@ -166,6 +238,7 @@ async def record_llm_call(
     think: bool,
     latency_ms: int,
     error: str | None = None,
+    referenced_user_ids: list[str] | None = None,
 ) -> None:
     """Persist one LLM_CALL event. Hot-path no-op when capture is off.
 
@@ -191,6 +264,29 @@ async def record_llm_call(
         _warn_no_dek_once()
         return
 
+    # Opt-out filter at capture time, not export time. A chatter who
+    # opts out today should never have a prompt mentioning them
+    # written to encrypted disk — even with a valid DEK, the act of
+    # capturing them violates the consent we promised. Cheap to skip
+    # here; expensive to scan-and-rewrite shards later.
+    if referenced_user_ids:
+        try:
+            if await asyncio.to_thread(repo.any_opted_out, referenced_user_ids):
+                logger.debug(
+                    "dataset capture: dropped %s event — referenced an "
+                    "opted-out user", call_site,
+                )
+                return
+        except Exception:
+            # If the opt-out check itself errors, fail closed (drop the
+            # event). Better to lose one row than to capture an
+            # opted-out user against the streamer's consent.
+            logger.exception(
+                "dataset capture: opt-out check failed for call_site=%r — "
+                "dropping event defensively", call_site,
+            )
+            return
+
     payload = {
         "v": CAPTURE_SCHEMA_VERSION,
         "kind": EVENT_LLM_CALL,
@@ -206,6 +302,11 @@ async def record_llm_call(
         "think": bool(think),
         "latency_ms": int(latency_ms),
         "error": error,
+        # List of user_ids the caller declared the prompt references.
+        # Persisted so a future redaction pass can scrub specific
+        # chatters from old captures without re-running the original
+        # opt-out check.
+        "referenced_user_ids": list(referenced_user_ids or []),
     }
 
     try:

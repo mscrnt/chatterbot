@@ -77,6 +77,8 @@ class LLMProvider(Protocol):
         num_predict: int | None = None,
         images: list[str] | None = None,
         think: bool = False,
+        call_site: str = "unknown",
+        referenced_user_ids: list[str] | None = None,
     ) -> T: ...
 
     async def stream_generate(
@@ -250,6 +252,7 @@ class AnthropicClient(_EmbeddingDelegator):
         images: list[str] | None = None,
         think: bool = False,
         call_site: str = "unknown",
+        referenced_user_ids: list[str] | None = None,
     ) -> T:
         import time as _time
         schema = response_model.model_json_schema()
@@ -287,6 +290,7 @@ class AnthropicClient(_EmbeddingDelegator):
                 think=think,
                 latency_ms=int((_time.monotonic() - started) * 1000),
                 error=error,
+                referenced_user_ids=referenced_user_ids,
             )
 
     async def stream_generate(
@@ -467,6 +471,7 @@ class OpenAIClient(_EmbeddingDelegator):
         images: list[str] | None = None,
         think: bool = False,
         call_site: str = "unknown",
+        referenced_user_ids: list[str] | None = None,
     ) -> T:
         import time as _time
         schema = response_model.model_json_schema()
@@ -504,6 +509,7 @@ class OpenAIClient(_EmbeddingDelegator):
                 think=think,
                 latency_ms=int((_time.monotonic() - started) * 1000),
                 error=error,
+                referenced_user_ids=referenced_user_ids,
             )
 
     async def stream_generate(

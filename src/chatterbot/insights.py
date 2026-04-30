@@ -916,12 +916,31 @@ Good output:
             refreshed_at=self._subjects_cache.refreshed_at,
             error=self._subjects_cache.error,
         )
+        # Negative supervision for the engaging-subjects extractor:
+        # streamer judged this subject as wrong/hallucinated. Captured
+        # for the personal training dataset so future fine-tunes can
+        # learn what NOT to surface.
+        self.repo._capture_streamer_action(
+            action_kind="engaging_subject",
+            item_key=slug_lc,
+            action="rejected",
+            note=name.strip(),
+        )
 
     def clear_subject_blocklist(self) -> int:
         """Wipe all rejections — used when the streamer wants to reset
         (e.g., new stream, different topic). Returns the count cleared."""
         n = len(self._load_subject_blocklist())
         self.repo.set_app_setting(self.SUBJECTS_BLOCKLIST_KEY, "[]")
+        # Reset signal — the streamer wants a fresh slate. Useful for
+        # the dataset reader to know "everything before this point is
+        # a different feedback regime."
+        self.repo._capture_streamer_action(
+            action_kind="engaging_subject_blocklist",
+            item_key="",
+            action="cleared",
+            note=None,
+        )
         return n
 
     def _build_channel_context(self, *, authoritative: bool = False) -> str:

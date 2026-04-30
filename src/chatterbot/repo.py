@@ -1536,6 +1536,26 @@ class ChatterRepo:
             row = cur.fetchone()
             return bool(row and row["opt_out"])
 
+    def any_opted_out(self, user_ids: Iterable[str]) -> bool:
+        """True if ANY user in the list has opt_out=1. Single SQL
+        round trip via IN(...) so the dataset capture filter can
+        decide whether to drop an event without N round trips.
+
+        Empty input returns False (no users to check). Unknown user
+        ids return False — they aren't in the table so there's no
+        opt-out to honour."""
+        ids = [u for u in user_ids if u]
+        if not ids:
+            return False
+        placeholders = ",".join("?" for _ in ids)
+        with self._cursor() as cur:
+            cur.execute(
+                f"SELECT 1 FROM users WHERE opt_out = 1 "
+                f"AND twitch_id IN ({placeholders}) LIMIT 1",
+                ids,
+            )
+            return cur.fetchone() is not None
+
     # ============================ Summarizer-pipeline surface ==============
 
     def get_watermark(self, user_id: str) -> int:
@@ -1674,7 +1694,18 @@ class ChatterRepo:
                     "VALUES (?, ?)",
                     (note_id, mid),
                 )
-            return note_id
+        # Capture for the streamer-personal training dataset. Origin
+        # rides along in the action label so the reader can tell
+        # human-authored notes from LLM-extracted ones — both are
+        # useful supervision signals but they mean different things
+        # for fine-tuning.
+        self._capture_streamer_action(
+            action_kind="note",
+            item_key=str(note_id),
+            action=f"created:{origin}",
+            note=text,
+        )
+        return note_id
 
     def arrival_signals_for_users(
         self, user_ids: Iterable[str], *, returning_min_hours: int = 6
@@ -2150,6 +2181,12 @@ class ChatterRepo:
                     "VALUES (?, ?, ?, 'open', NULL, NULL)",
                     (now, kind, item_key),
                 )
+            self._capture_streamer_action(
+                action_kind="insight_state",
+                item_key=f"{kind}:{item_key}",
+                action="open",
+                note=None,
+            )
             return
         with self._cursor() as cur:
             cur.execute(
@@ -2170,6 +2207,16 @@ class ChatterRepo:
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (now, kind, item_key, state, due_ts, note),
             )
+        # Capture AFTER the SQL commits — a row that wasn't actually
+        # written must not leave a STREAMER_ACTION trail. Compose the
+        # key as `<insight_kind>:<item_key>` so the dataset reader can
+        # filter by kind without parsing.
+        self._capture_streamer_action(
+            action_kind="insight_state",
+            item_key=f"{kind}:{item_key}",
+            action=state,
+            note=note,
+        )
 
     def list_state_history(
         self, *, since: str | None = None, limit: int = 200,
@@ -4859,11 +4906,22 @@ class ChatterRepo:
                 (text, note_id),
             )
             cur.execute("DELETE FROM vec_notes WHERE note_id = ?", (note_id,))
+        # Streamer correcting an LLM-extracted note is the highest-
+        # signal supervision example we have — fine-tuning gold.
+        self._capture_streamer_action(
+            action_kind="note", item_key=str(note_id),
+            action="updated", note=text,
+        )
 
     def delete_note(self, note_id: int) -> None:
         with self._cursor() as cur:
             cur.execute("DELETE FROM vec_notes WHERE note_id = ?", (note_id,))
             cur.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+        # Negative supervision: the streamer rejected this note.
+        self._capture_streamer_action(
+            action_kind="note", item_key=str(note_id),
+            action="deleted", note=None,
+        )
 
     def set_user_followed_at(self, twitch_id: str, followed_at: str | None) -> None:
         """Update users.followed_at without touching anything else.
@@ -7231,6 +7289,31 @@ class ChatterRepo:
                     "byte_length": int(r["byte_length"]),
                     "schema_version": int(r["schema_version"]),
                 }
+
+    def _capture_streamer_action(
+        self, *, action_kind: str, item_key: str, action: str,
+        note: str | None = None,
+    ) -> None:
+        """Internal helper: forward to the dataset capture pipeline if
+        attached. Keeps the import lazy so the optional `dataset`
+        extra doesn't load on bot/dashboard runs without capture
+        enabled. Errors swallowed inside `record_streamer_action_safe`
+        — calling this from a mutator method must never surface a
+        capture error to the caller."""
+        try:
+            from .dataset.capture import record_streamer_action_safe
+            record_streamer_action_safe(
+                self,
+                kind=action_kind,
+                item_key=item_key,
+                action=action,
+                note=note,
+            )
+        except Exception:
+            # Defense-in-depth — record_streamer_action_safe already
+            # swallows, but if importing the module itself fails (e.g.
+            # the optional extra is missing), don't break the mutator.
+            pass
 
     def dataset_event_count(self, *, kind: str | None = None) -> int:
         """Total event count, optionally filtered by kind. Used by the
