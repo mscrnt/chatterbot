@@ -2579,10 +2579,14 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     @app.get("/insights/subject/{slug}/expand", response_class=HTMLResponse)
     async def subject_expand(request: Request, slug: str):
         """Render the expand-on-click body for an engaging subject:
-        the brief + angles (already in cache) + recent verbatim
-        messages from the subject's drivers within the lookback
-        window. No LLM call — pure SQL."""
-        # Find the cached subject by slug
+        the brief + angles (already in cache) + the verbatim messages
+        the LLM cited as supporting this subject. No LLM call — pure
+        SQL.
+
+        Pulls by `msg_ids` directly when the cache has them
+        (slice-7 pipeline cites supporting message ids per subject).
+        Falls back to the older driver-based name lookup for any
+        cache entry that pre-dates the new field."""
         subject = next(
             (s for s in insights.subjects_cache.subjects if s.slug == slug),
             None,
@@ -2592,12 +2596,19 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         within = int(getattr(
             settings, "engaging_subjects_lookback_minutes", 20,
         ))
-        msgs = (
-            repo.messages_for_names_within(
+        if getattr(subject, "msg_ids", None):
+            # Cited messages = exactly what the LLM grounded the
+            # subject in. Far more accurate than re-querying every
+            # message a driver sent in the lookback window.
+            msgs = await asyncio.to_thread(
+                repo.get_messages_by_ids, list(subject.msg_ids),
+            )
+        elif subject.drivers:
+            msgs = repo.messages_for_names_within(
                 subject.drivers, within_minutes=within, limit=40,
             )
-            if subject.drivers else []
-        )
+        else:
+            msgs = []
         return TEMPLATES.TemplateResponse(
             request,
             "partials/engaging_subject_expand.html",

@@ -274,23 +274,38 @@ EngagingSubjectName = Annotated[
 
 
 class EngagingSubject(BaseModel):
-    """One distinct conversation subject the LLM extracted from a window
-    of recent chat messages.
+    """One distinct conversation subject the LLM extracted from a
+    window of numbered chat messages.
 
-    `drivers` is the list of chatters actually engaging with this
-    subject (not just present in chat). `msg_count` is approximate —
-    how many recent messages the model judged to be on this subject.
-    `is_sensitive` flags subjects involving religion, politics, or
-    other controversies that the streamer probably wants the dashboard
-    to silently filter out.
+    The schema is built around the LLM doing the topic modeling
+    directly — the dashboard sends a numbered list of recent
+    messages, and the LLM groups them into 0..8 distinct subjects
+    by citing supporting message ids. Persistent identity across
+    refreshes is then resolved on the dashboard side by embedding
+    the subject NAME and matching against previously-seen subjects
+    (which is what embeddings are good at — short, clean strings —
+    rather than centroid clustering of raw chat).
 
-    `brief` is a 1-2 sentence observational summary of what chatters
-    are actually saying about the subject — paraphrase, not advice.
-    `angles` is up to 3 sub-aspects of the subject that have come up
-    in the messages (e.g. for "Resident Evil parry timing": "aim-parry
-    vs perfect parry", "comparison to Ninja Gaiden 4"). These ride
-    along with the subject so they're available the moment the
-    streamer expands the row — no on-demand LLM call needed."""
+    `name`           — short subject line (4-8 words ideal).
+    `brief`          — 1-2 sentence observational summary.
+    `angles`         — up to 4 sub-aspects observed in the messages.
+    `drivers`        — chatter names actively engaging. Names only;
+                       the dashboard re-resolves to user_ids by
+                       cross-referencing message_ids against the
+                       sender map.
+    `msg_count`      — rough count of supporting messages (the
+                       length of `message_ids` is the authoritative
+                       count, but the LLM may want to indicate
+                       "lots more like these" without exhaustively
+                       citing every one).
+    `message_ids`    — integer ids from the numbered input that
+                       support this subject. These ground the
+                       extraction — the dashboard uses them to
+                       resolve drivers and to surface "click to
+                       see the messages that drove this subject".
+    `is_sensitive`   — religion / politics / controversy flag. The
+                       dashboard silently filters these out.
+    """
 
     name: EngagingSubjectName
     drivers: list[str] = Field(default_factory=list, max_length=20)
@@ -298,11 +313,12 @@ class EngagingSubject(BaseModel):
     is_sensitive: bool = False
     brief: str = Field(default="", max_length=400)
     angles: list[str] = Field(default_factory=list, max_length=4)
-    # Echoed-back identifier from the input prompt so we can match the
-    # LLM's labels to the persistent cluster they belong to. Empty when
-    # the LLM doesn't know about persistent clustering (legacy / one-off
-    # extraction without prior state).
-    cluster_id: str = Field(default="", max_length=64)
+    # Cited supporting messages — replaces the slice-2 `cluster_id`
+    # echo. The LLM does the topic modeling and tells us WHICH
+    # numbered messages support each subject; we use those ids to
+    # resolve drivers and to power the "see source messages"
+    # expansion on the dashboard.
+    message_ids: list[int] = Field(default_factory=list, max_length=40)
 
 
 class EngagingSubjectsResponse(BaseModel):

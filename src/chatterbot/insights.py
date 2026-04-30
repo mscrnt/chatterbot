@@ -44,27 +44,41 @@ INFORMED_NUM_CTX = 32768
 
 
 @dataclass
-class _PersistentCluster:
-    """One persistent engaging-subject cluster carried across refreshes
-    of the extractor. Centroid is the running unit-vector mean of all
-    messages ever attached to this cluster; new messages attach by
-    cosine similarity above threshold rather than re-clustering from
-    scratch each pass.
+class _PersistentSubject:
+    """One persistent engaging-subject identity carried across
+    refreshes of the extractor.
 
-    Stable identity (cluster_id) means the LLM-assigned name/brief
-    sticks across passes — we only relabel when the cluster has grown
-    substantially or has no name yet. That fixes the "subjects rename
-    every refresh" problem the streamer was seeing."""
-    cluster_id: str
-    centroid: list[float]   # current unit-vector centroid
-    n: int                   # total messages ever attached
-    name: str = ""
+    Replaces the slice-2 `_PersistentCluster` model, which tried to
+    cluster raw chat messages by embedding cosine and then label the
+    clusters. That approach collapsed under centroid drift on short
+    noisy chat strings — one mega-cluster ate everything, and the
+    "extract distinct subjects" feature had no distinct clusters to
+    extract from.
+
+    The new model inverts the work split: the LLM does the topic
+    modeling on raw chat (naming + grouping by cited message_ids)
+    and embeddings drive cross-refresh identity matching by comparing
+    the SUBJECT NAME's embedding against previously-seen subjects.
+    Embeddings are now matching short clean strings (subject names),
+    which is what they're good at.
+
+    Identity invariant: same subject across refreshes → same
+    `subject_id`, even if the LLM phrasing drifts slightly between
+    runs. Names update in place; the id is forever.
+    """
+    subject_id: str            # uuid hex; stable across refreshes
+    name: str
+    name_embedding: list[float]  # unit-vector embedding of `name`
     brief: str = ""
     angles: list[str] = field(default_factory=list)
     is_sensitive: bool = False
-    n_at_last_label: int = 0  # cluster size when the LLM last labeled
-    last_added_ts: float = 0.0  # unix ts of most-recent attached msg
-    msg_ids: list[int] = field(default_factory=list)  # capped list of recent attached msg ids
+    first_seen_ts: float = 0.0
+    last_seen_ts: float = 0.0    # most-recent refresh that surfaced this subject
+    refresh_count: int = 0       # how many refreshes have surfaced it
+    # Capped recent message_ids the LLM cited for this subject across
+    # refreshes. Used to power the "see source messages" expansion
+    # when the streamer clicks a subject row.
+    msg_ids: list[int] = field(default_factory=list)
 
 
 TALKING_POINTS_SYSTEM = """You help a Twitch streamer remember conversation hooks for chatters who are active in their chat right now. The streamer reads your output on a second monitor while streaming and uses it to engage with chat — your output never returns to chat itself.
@@ -120,14 +134,22 @@ class EngagingSubjectEntry:
 
     `brief` + `angles` ride along so the row can expand without another
     LLM call. `slug` is a deterministic short id derived from the name,
-    used by the on-demand /insights/subject-messages route to identify
-    a subject without leaking cache indices."""
+    used by the on-demand /insights/subject/{slug}/expand route and the
+    reject-subject flow to identify a subject without leaking cache
+    indices.
+
+    `msg_ids` is the list of message ids the LLM cited as supporting
+    this subject in the most recent refresh. Powers the "see source
+    messages" expansion — the dashboard hydrates these ids directly
+    rather than guessing from driver names + lookback window. Empty
+    list is safe (route falls back to driver-based lookup)."""
     name: str
     drivers: list[str]
     msg_count: int
     brief: str = ""
     angles: list[str] = field(default_factory=list)
     slug: str = ""
+    msg_ids: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -204,16 +226,18 @@ class InsightsService:
         self._lock = asyncio.Lock()
         self._subjects_lock = asyncio.Lock()
         self._questions_lock = asyncio.Lock()
-        # Persistent engaging-subject clusters carried across refreshes.
-        # New messages append to existing clusters when the cosine
-        # similarity to the centroid clears the threshold; only orphans
-        # spawn new clusters. Names stick across passes unless the
-        # cluster has substantially grown — keeps the dashboard from
-        # renaming subjects every 3 min.
-        self._clusters: dict[str, _PersistentCluster] = {}
-        # msg_id -> cluster_id, so a window pull can render historical
-        # cluster membership without re-running the cosine match.
-        self._msg_to_cluster: dict[int, str] = {}
+        # Persistent engaging-subjects carried across refreshes,
+        # keyed by stable subject_id (uuid hex). Cross-refresh
+        # identity is resolved by cosine-matching the SUBJECT NAME's
+        # embedding against existing entries — embeddings work well
+        # on short clean strings (subject names) but poorly on raw
+        # noisy chat (which is why slice-2's centroid clustering of
+        # message embeddings collapsed into one mega-cluster).
+        self._subjects: dict[str, _PersistentSubject] = {}
+        # Watermark — the highest message id we've seen in a refresh.
+        # When latest_message_id hasn't moved since the last pass,
+        # we skip the LLM call entirely (same input → same output).
+        self._subjects_last_msg_id: int = 0
         # In-memory embedding cache for blocklisted subject names —
         # populated lazily during _refresh_engaging_subjects so new
         # subject names can be cosine-matched against rejected
@@ -635,14 +659,15 @@ Empty / partial replies are fine. Skipping is the right call when in doubt.
     # re-extract a hallucinated subject the streamer already rejected.
     SUBJECTS_BLOCKLIST_KEY = "engaging_subjects_blocklist"
 
-    SUBJECTS_SYSTEM = """You're identifying distinct conversation subjects in a Twitch chat for the streamer's dashboard.
+    SUBJECTS_SYSTEM = """You're identifying distinct conversation subjects in a Twitch chat for the streamer's dashboard. The streamer reads your output on a second monitor while streaming — your output never goes back to chat.
 
-Look at the recent messages and extract SEPARATE subjects — not vague themes. The streamer wants to see *what specific things* are being discussed so they can pivot toward the most engaging one.
+You'll receive a NUMBERED LIST of recent chat messages (each line starts with `[id N] [chatter]`). Group them into 0-8 distinct subjects and CITE the supporting message ids for each.
 
 DEFINITION OF A SUBJECT:
 - Specific: "Ninja Gaiden 4 parry timing", not "video games"
 - Distinct: "Resident Evil aim-parry strats" and "Resident Evil no-damage runs" can be separate subjects even if they share vocabulary; merge only when they're really the same conversation
 - 4-8 word subject line, no fluff
+- Each subject MUST cite at least 2 supporting message ids. A subject grounded in only one message is just a one-off.
 
 DO NOT EMIT (mark `is_sensitive: true` and the dashboard filters them out):
 - religion, faith traditions, religious holidays as moral commentary
@@ -650,20 +675,23 @@ DO NOT EMIT (mark `is_sensitive: true` and the dashboard filters them out):
 - controversies: war, abortion, gun control, immigration, race discourse, etc.
 The streamer doesn't want these surfaced. If chatters are talking about them, just flag `is_sensitive: true` and the dashboard hides the row.
 
-ALSO SKIP (don't emit at all — empty `name` is fine):
+ALSO SKIP (don't emit — empty `subjects` list is fine):
 - Pure greeting / lurking ("hi", "lol", "first time here")
 - One-off reactions with no follow-up
 - Bot commands
 
-For each remaining subject:
+For each remaining subject return:
 - name: the subject line
-- drivers: distinct chatters actually engaged (NOT just present in the window)
+- drivers: distinct chatters actually engaged with this subject (their names from the input). Do NOT list chatters who only sent unrelated messages.
 - msg_count: rough number of messages on this subject in the window
-- is_sensitive: false (you've already filtered the sensitive ones)
+- is_sensitive: false (you've already filtered the sensitive ones; only set true if you DO emit a sensitive subject for completeness)
 - brief: 1-2 sentence OBSERVATIONAL summary of what chatters are actually saying about it. Paraphrase. NO "you should…", NO "the streamer could…". Pure description.
-- angles: up to 3 distinct SUB-ASPECTS that have come up *within this subject* in the messages. Example for subject "Resident Evil parry timing": ["aim-parry vs perfect parry", "comparison to Ninja Gaiden 4", "no-save-no-damage feasibility"]. These are sub-aspects observed in the messages, NOT recommendations.
+- angles: up to 3 distinct SUB-ASPECTS that have come up *within this subject* in the messages. Example for "Resident Evil parry timing": ["aim-parry vs perfect parry", "comparison to Ninja Gaiden 4", "no-save-no-damage feasibility"]. Sub-aspects observed in the messages, NOT recommendations.
+- message_ids: integer ids from the input lines that support this subject. The dashboard uses these ids to resolve who-said-what without parsing prose, so cite EVERY message that's clearly on this subject. Cite ids only — don't make them up.
 
-Return AT MOST 8 subjects, sorted by len(drivers) desc. Empty list is the right answer when chat is too quiet or unfocused.
+If a `KNOWN ACTIVE SUBJECTS` list appears in the input, REUSE the wording verbatim when the same conversation continues. Pick a different name only when the subject has clearly drifted to a new sub-topic. Stable wording across refreshes lets the dashboard maintain identity.
+
+Return AT MOST 8 subjects, sorted by len(drivers) desc. Empty `subjects` is the right answer when chat is too quiet or unfocused.
 
 IMPORTANT: emit observation, not advice. No "you should…", no "the streamer could ask about…". Pure description of what people are talking about.
 
@@ -675,11 +703,11 @@ between a grounded extraction and a hallucinated one.
 EXAMPLE 1 — GOOD (grounded, specific, observational)
 
 Input messages:
-  [alice] yo this parry timing in ng4 is brutal compared to ng2
-  [bob] ng4 the windows feel way tighter, esp on izuna drop counters
-  [alice] yeah and izuna's hyper-armor isn't carrying the way it used to
-  [carol] anyone else getting wrecked by the boss on stage 3
-  [bob] stage 3 boss is the wall fr
+  [id 101] [alice] yo this parry timing in ng4 is brutal compared to ng2
+  [id 102] [bob] ng4 the windows feel way tighter, esp on izuna drop counters
+  [id 103] [alice] yeah and izuna's hyper-armor isn't carrying the way it used to
+  [id 104] [carol] anyone else getting wrecked by the boss on stage 3
+  [id 105] [bob] stage 3 boss is the wall fr
 
 Good output:
 {
@@ -690,7 +718,8 @@ Good output:
       "msg_count": 3,
       "is_sensitive": false,
       "brief": "Alice and Bob are comparing parry windows in NG4 to NG2 and noting izuna drop counters feel tighter, with izuna's hyper-armor less reliable.",
-      "angles": ["parry window tightness vs NG2", "izuna drop counters", "hyper-armor reliability"]
+      "angles": ["parry window tightness vs NG2", "izuna drop counters", "hyper-armor reliability"],
+      "message_ids": [101, 102, 103]
     },
     {
       "name": "NG4 stage 3 boss difficulty",
@@ -698,7 +727,8 @@ Good output:
       "msg_count": 2,
       "is_sensitive": false,
       "brief": "Carol asks if anyone else is struggling with the stage 3 boss; Bob agrees it's a wall.",
-      "angles": ["stage 3 boss as a difficulty wall"]
+      "angles": ["stage 3 boss as a difficulty wall"],
+      "message_ids": [104, 105]
     }
   ]
 }
@@ -713,20 +743,21 @@ Same input as above, BAD output:
       "drivers": ["alice", "bob", "carol"],
       "msg_count": 5,
       "brief": "You should ask them about the new NG4 DLC.",  // ADVICE + invented DLC
-      "angles": ["challenging boss fights"]      // generic, not from messages
+      "angles": ["challenging boss fights"],     // generic, not from messages
+      "message_ids": [101, 102, 103, 104, 105]   // lumps two distinct subjects
     }
   ]
 }
 
-Why it's bad: subject name is too vague; "DLC" is invented (not in messages); "you should" is advice not observation; angles are generic instead of message-specific.
+Why it's bad: subject name is too vague; "DLC" is invented (not in messages); "you should" is advice not observation; angles are generic instead of message-specific; message_ids lump two distinct conversations into one row.
 
 EXAMPLE 3 — GOOD (correct skip when chat is just lurkers)
 
 Input messages:
-  [dave] hi
-  [eve] just got here
-  [frank] lol
-  [dave] !lurk
+  [id 200] [dave] hi
+  [id 201] [eve] just got here
+  [id 202] [frank] lol
+  [id 203] [dave] !lurk
 
 Good output:
 { "subjects": [] }
@@ -736,20 +767,22 @@ Good output:
 EXAMPLE 4 — GOOD (filtering sensitive)
 
 Input:
-  [g] honestly the election was rigged
-  [h] dont start
-  [i] meanwhile the new patch dropped
+  [id 300] [g] honestly the election was rigged
+  [id 301] [h] dont start
+  [id 302] [i] meanwhile the new patch dropped
+  [id 303] [j] yeah finally fixed the lag
 
 Good output:
 {
   "subjects": [
     {
-      "name": "new game patch release",
-      "drivers": ["i"],
-      "msg_count": 1,
+      "name": "new game patch fixing lag",
+      "drivers": ["i", "j"],
+      "msg_count": 2,
       "is_sensitive": false,
-      "brief": "i mentions a new patch dropped.",
-      "angles": []
+      "brief": "Chatters note the new patch dropped and observe it fixed lag they'd been seeing.",
+      "angles": ["lag improvement"],
+      "message_ids": [302, 303]
     }
   ]
 }
@@ -986,166 +1019,108 @@ Good output:
             text = text[:4000] + "\n\n[…truncated…]"
         return text
 
-    def _attach_or_create_clusters(
-        self,
-        items: list[tuple],  # list[(Message, list[float])]
-        *, threshold: float, min_size: int, age_out_minutes: int,
-    ) -> tuple[set[str], set[str]]:
-        """Persistent cosine clustering. For each new (msg, vec):
-          1. Look up an existing assignment; if present, skip.
-          2. Else find the existing-cluster centroid with max cosine;
-             if max sim ≥ threshold, attach (update centroid running
-             mean + msg_ids + last_added_ts).
-          3. Orphans (no match) go to a holding list.
-        Then orphans get greedy-clustered among themselves; only groups
-        of size ≥ `min_size` spawn NEW persistent clusters.
-
-        Aging: clusters with last_added_ts older than `age_out_minutes`
-        are dropped, along with their msg_ids in the lookup map.
-
-        Returns:
-          (live_cluster_ids, dirty_cluster_ids)
-          - live: clusters with at least one msg in the current window
-          - dirty: clusters that need (re)labeling — brand new, or
-            n ≥ 2 * n_at_last_label (substantial growth)."""
+    @staticmethod
+    def _unit_vec(v: list[float]):
+        """Unit-normalize a vector, returning the original on zero-
+        norm (caller treats this as "no usable embedding")."""
         try:
             import numpy as np
         except ImportError:
-            return set(), set()
-        if not items:
-            return set(), set()
+            return None
+        arr = np.array(v, dtype=np.float32)
+        n = float(np.linalg.norm(arr))
+        return (arr / n).tolist() if n > 0 else None
 
-        now_ts = time.time()
-        # Aging — drop stale clusters before doing anything else so we
-        # don't try to attach new messages to dead ones.
-        cutoff = now_ts - (age_out_minutes * 60)
+    async def _embed_subject_name(self, name: str) -> list[float] | None:
+        """Embed a subject NAME for cross-refresh identity matching.
+        Falls back to None on any failure — the caller treats that as
+        "spawn a new persistent identity" rather than blocking on
+        embedding hiccups."""
+        try:
+            raw = await self.llm.embed(name.strip())
+        except Exception:
+            return None
+        return self._unit_vec(raw)
+
+    def _match_subject_by_name_embedding(
+        self, query_unit: list[float], threshold: float = 0.75,
+    ) -> tuple[str | None, float]:
+        """Find the persistent subject whose name-embedding is most
+        similar to `query_unit`. Returns `(subject_id, sim)` if the
+        best match clears `threshold`, otherwise `(None, best_sim)`
+        so the caller can log near-misses if they want.
+
+        Threshold 0.75 is empirically the right cut for nomic-embed-
+        text on subject-line-length strings:
+          - "RE9 parry timing" vs "Resident Evil 9 parry windows"  → ~0.82
+          - "RE9 parry timing" vs "RE9 boss strats"                → ~0.55
+          - "RE9 parry timing" vs "Final Fantasy speedrun routes"  → ~0.20
+
+        Same-subject rephrasing clears 0.75 comfortably; genuinely-
+        different subjects don't. Tunable via app_setting if needed."""
+        if not self._subjects or query_unit is None:
+            return None, 0.0
+        try:
+            import numpy as np
+        except ImportError:
+            return None, 0.0
+        ids: list[str] = []
+        vecs: list[list[float]] = []
+        for sid, s in self._subjects.items():
+            if s.name_embedding:
+                ids.append(sid)
+                vecs.append(s.name_embedding)
+        if not vecs:
+            return None, 0.0
+        q = np.asarray(query_unit, dtype=np.float32)
+        mat = np.asarray(vecs, dtype=np.float32)
+        sims = mat @ q
+        best = int(np.argmax(sims))
+        best_sim = float(sims[best])
+        if best_sim >= threshold:
+            return ids[best], best_sim
+        return None, best_sim
+
+    def _age_out_persistent_subjects(self, *, max_idle_seconds: float) -> int:
+        """Drop persistent subjects whose `last_seen_ts` is older
+        than `max_idle_seconds`. Returns the number removed.
+
+        Aging is by REFRESH presence, not message attachment: a
+        subject ages out when N consecutive refreshes have failed to
+        surface it, NOT when N minutes pass since the last cited
+        message. This is more robust to noisy refresh cadence."""
+        if not self._subjects:
+            return 0
+        now = time.time()
         stale = [
-            cid for cid, c in self._clusters.items()
-            if c.last_added_ts and c.last_added_ts < cutoff
+            sid for sid, s in self._subjects.items()
+            if s.last_seen_ts and (now - s.last_seen_ts) > max_idle_seconds
         ]
-        for cid in stale:
-            for mid in self._clusters[cid].msg_ids:
-                self._msg_to_cluster.pop(mid, None)
-            self._clusters.pop(cid, None)
-
-        # Cap _msg_to_cluster size — the dict grows unbounded otherwise.
-        # Drop oldest message ids (smallest ints) when over the cap.
-        max_map = 5000
-        if len(self._msg_to_cluster) > max_map:
-            keep = sorted(self._msg_to_cluster.keys())[-max_map:]
-            keep_set = set(keep)
-            self._msg_to_cluster = {
-                k: v for k, v in self._msg_to_cluster.items() if k in keep_set
-            }
-
-        # Step 1: try to attach each not-yet-assigned message to an
-        # existing cluster.
-        cluster_ids = list(self._clusters.keys())
-        if cluster_ids:
-            centroids = np.array(
-                [self._clusters[cid].centroid for cid in cluster_ids],
-                dtype=np.float32,
-            )
-        else:
-            centroids = np.zeros((0, 1), dtype=np.float32)
-
-        orphan_msgs: list = []   # list[Message]
-        orphan_vecs: list = []   # list[np.ndarray] (unit)
-        attached_to: dict[int, str] = {}
-
-        def _unit(v: list[float]) -> np.ndarray:
-            arr = np.array(v, dtype=np.float32)
-            n = float(np.linalg.norm(arr))
-            return arr / n if n > 0 else arr
-
-        for msg, vec in items:
-            if msg.id in self._msg_to_cluster:
-                continue  # already assigned on a prior pass
-            uvec = _unit(vec)
-            if cluster_ids and centroids.shape[0] > 0:
-                sims = centroids @ uvec
-                best = int(np.argmax(sims))
-                if float(sims[best]) >= threshold:
-                    cid = cluster_ids[best]
-                    attached_to[msg.id] = cid
-                    c = self._clusters[cid]
-                    c.n += 1
-                    # Running-mean update of the unit centroid.
-                    new_centroid = (
-                        (np.array(c.centroid, dtype=np.float32) * (c.n - 1)) + uvec
-                    ) / c.n
-                    cn = float(np.linalg.norm(new_centroid))
-                    if cn > 0:
-                        new_centroid = new_centroid / cn
-                    c.centroid = new_centroid.tolist()
-                    centroids[best] = new_centroid  # keep parallel array fresh
-                    c.last_added_ts = now_ts
-                    c.msg_ids.append(msg.id)
-                    if len(c.msg_ids) > 200:
-                        c.msg_ids = c.msg_ids[-200:]
-                    self._msg_to_cluster[msg.id] = cid
-                    continue
-            orphan_msgs.append(msg)
-            orphan_vecs.append(uvec)
-
-        # Step 2: greedy-cluster the orphans among themselves; promote
-        # groups of size ≥ min_size into NEW persistent clusters.
-        new_cluster_ids: set[str] = set()
-        if orphan_msgs:
-            buckets: list[list[int]] = []
-            bucket_centroids: list[np.ndarray] = []
-            for i, uvec in enumerate(orphan_vecs):
-                if not buckets:
-                    buckets.append([i])
-                    bucket_centroids.append(uvec.copy())
-                    continue
-                sims = np.array([float(c @ uvec) for c in bucket_centroids])
-                best = int(np.argmax(sims))
-                if float(sims[best]) >= threshold:
-                    buckets[best].append(i)
-                    k = len(buckets[best])
-                    new_c = ((bucket_centroids[best] * (k - 1)) + uvec) / k
-                    cn = float(np.linalg.norm(new_c))
-                    if cn > 0:
-                        new_c = new_c / cn
-                    bucket_centroids[best] = new_c
-                else:
-                    buckets.append([i])
-                    bucket_centroids.append(uvec.copy())
-
-            for bi, idxs in enumerate(buckets):
-                if len(idxs) < min_size:
-                    continue
-                cid = uuid.uuid4().hex[:12]
-                new_cluster_ids.add(cid)
-                self._clusters[cid] = _PersistentCluster(
-                    cluster_id=cid,
-                    centroid=bucket_centroids[bi].tolist(),
-                    n=len(idxs),
-                    last_added_ts=now_ts,
-                    msg_ids=[orphan_msgs[i].id for i in idxs],
-                )
-                for i in idxs:
-                    self._msg_to_cluster[orphan_msgs[i].id] = cid
-
-        # Determine live + dirty clusters relative to the current items.
-        live: set[str] = set()
-        for m, _ in items:
-            cid = self._msg_to_cluster.get(m.id)
-            if cid:
-                live.add(cid)
-        dirty: set[str] = set(new_cluster_ids)
-        for cid in live:
-            c = self._clusters.get(cid)
-            if c is None:
-                continue
-            if not c.name:
-                dirty.add(cid)
-            elif c.n >= max(c.n_at_last_label * 2, c.n_at_last_label + 4):
-                dirty.add(cid)
-        return live, dirty
+        for sid in stale:
+            self._subjects.pop(sid, None)
+        return len(stale)
 
     async def _refresh_engaging_subjects(self) -> None:
+        """One refresh pass over the engaging-subjects pipeline.
+
+        High-level shape (LLM-first, embedding-for-identity):
+
+          1. Pull the recent-messages window (no clustering).
+          2. Skip the LLM entirely when latest_message_id hasn't
+             moved since last pass — same input, same output.
+          3. Build a numbered-messages prompt + the usual context
+             blocks (channel + streamer voice + driver notes +
+             known subjects + blocklist).
+          4. Call the LLM. It returns subjects with cited
+             message_ids (no cluster matching, no positional voodoo).
+          5. For each returned subject: embed the NAME and look for
+             a match in `_subjects` (cos sim ≥ 0.75) → reuse
+             persistent ID, else spawn a new one.
+          6. Materialize the cache from this-pass's surfaced
+             subjects (with drivers resolved from cited message_ids
+             → user_ids → names).
+          7. Age out persistent subjects unseen for 2x the lookback
+             window."""
         async with self._subjects_lock:
             window_min = int(getattr(
                 self.settings, "engaging_subjects_lookback_minutes",
@@ -1156,65 +1131,50 @@ Good output:
                 self.SUBJECTS_MAX_MESSAGES,
             ))
             try:
-                items = await asyncio.to_thread(
+                msgs = await asyncio.to_thread(
                     self.repo.recent_messages,
-                    limit=limit,
-                    within_minutes=window_min,
-                    with_embeddings=True,
+                    limit=limit, within_minutes=window_min,
                 )
             except Exception:
                 logger.exception(
                     "engaging-subjects: recent_messages failed",
                 )
                 return
-            msgs = [m for m, _ in items]
             if len(msgs) < 5:
                 # Too quiet to bother. Reset the cache so the panel
-                # shows the empty state instead of stale subjects. Don't
-                # nuke the persistent clusters though — a brief lull
-                # doesn't mean the subjects are dead.
+                # shows the empty state instead of stale subjects.
+                # Persistent identities stay (they age out by
+                # last_seen_ts, not message volume).
                 self._subjects_cache = EngagingSubjectsCache(
                     subjects=[], refreshed_at=time.time(), error=None,
                 )
                 return
 
-            cluster_threshold = float(getattr(
-                self.settings, "engaging_subjects_cluster_threshold", 0.55,
-            ))
-            min_cluster_size = int(getattr(
-                self.settings, "engaging_subjects_min_cluster_size", 3,
-            ))
-            # Persistent clusters age out at 2x the lookback window so a
-            # brief lull doesn't kill them.
-            live_ids, dirty_ids = self._attach_or_create_clusters(
-                items,
-                threshold=cluster_threshold,
-                min_size=min_cluster_size,
-                age_out_minutes=window_min * 2,
-            )
+            # Skip-if-unchanged: when the highest message id hasn't
+            # moved since our last refresh, the inputs are identical
+            # and the LLM would produce identical output. Cheaper to
+            # serve the existing cache. Same trick the talking-points
+            # loop uses.
+            current_max = max(m.id for m in msgs)
+            if current_max == self._subjects_last_msg_id and self._subjects_cache.subjects:
+                logger.debug(
+                    "engaging-subjects: skip — latest_message_id "
+                    "unchanged (%d), cached subjects=%d",
+                    current_max, len(self._subjects_cache.subjects),
+                )
+                return
+            self._subjects_last_msg_id = current_max
 
-            # Resolve user names once for prompt formatting + driver lists.
+            # --- Resolve user names (one DB hit per distinct user) ---
             user_id_to_name: dict[str, str] = {}
             for m in msgs:
                 if m.user_id and m.user_id not in user_id_to_name:
                     u = await asyncio.to_thread(self.repo.get_user, m.user_id)
                     if u:
                         user_id_to_name[m.user_id] = u.name
-
-            # Index window messages by cluster for prompt formatting +
-            # cache rendering. Falls back to the persistent cluster's
-            # broader msg_ids if needed.
             id_to_msg = {m.id: m for m in msgs}
-            cluster_msgs: dict[str, list] = {cid: [] for cid in live_ids}
-            for m in msgs:
-                cid = self._msg_to_cluster.get(m.id)
-                if cid in cluster_msgs:
-                    cluster_msgs[cid].append(m)
 
-            # Streamer voice — recent transcript chunks let the LLM tell
-            # "chat reacting to what the streamer just said" from
-            # "chat-driven subject". Also useful for grounding game-
-            # specific jargon to what's actually on screen.
+            # --- Streamer voice (transcript chunks) ---
             try:
                 transcripts = await asyncio.to_thread(
                     self.repo.recent_transcripts,
@@ -1237,9 +1197,7 @@ Good output:
                         + "\n\n"
                     )
 
-            # Per-driver notes — for the most-active drivers in this
-            # window, pull a few of their stored notes so the LLM has
-            # background on who's talking and what they care about.
+            # --- Per-driver notes (background on most-active chatters) ---
             from collections import Counter as _Counter
             driver_counts = _Counter(
                 user_id_to_name[m.user_id]
@@ -1282,10 +1240,10 @@ Good output:
                     + "\n\n"
                 )
 
-            # Active topic-thread titles — already-identified ongoing
-            # subjects. The LLM gets them as "known subjects" so it
-            # matches new messages against these rather than inventing
-            # near-duplicates.
+            # --- Known active subjects (channel-wide topic threads
+            # + still-alive persistent subjects) so the LLM matches
+            # new messages to existing wording rather than inventing
+            # near-duplicate names. ---
             try:
                 active_threads = await asyncio.to_thread(
                     self.repo.list_threads,
@@ -1294,11 +1252,9 @@ Good output:
             except Exception:
                 active_threads = []
             known_titles: list[str] = [t.title for t in active_threads if t.title]
-            # Also include any ALREADY-NAMED persistent clusters in the
-            # known list so the LLM doesn't pick a duplicative new label.
-            for cid, c in self._clusters.items():
-                if c.name and c.name not in known_titles:
-                    known_titles.append(c.name)
+            for s in self._subjects.values():
+                if s.name and not s.is_sensitive and s.name not in known_titles:
+                    known_titles.append(s.name)
             known_section = ""
             if known_titles:
                 known_section = (
@@ -1311,8 +1267,7 @@ Good output:
                     + "\n\n"
                 )
 
-            # Blocklist injection — the streamer has flagged these
-            # subjects as hallucinated / wrong / irrelevant.
+            # --- Blocklist injection ---
             blocklist = await asyncio.to_thread(self._load_subject_blocklist)
             blocklist_lines = ""
             if blocklist:
@@ -1328,274 +1283,232 @@ Good output:
                         "include it in your output."
                     )
 
-            # Channel context — what the streamer is actually playing /
-            # streaming right now. Helps the LLM ground game-specific
-            # jargon, scale interpretation by chat size, and respect
-            # streamer-declared content classifications. Sourced from
-            # the Helix /streams + /channels poll on TwitchService;
-            # silently skipped when Helix isn't connected.
-            # authoritative=True — the engaging-subjects call now also
-            # rides with a screenshot grid, same as talking-points.
             channel_context = self._build_channel_context(authoritative=True)
 
-            # === LLM labeling pass — only for dirty clusters. ===
-            # Carry-forward names mean stable identity; the LLM only
-            # gets called when there's a genuinely new or substantially
-            # grown cluster to label.
-            response_subjects: list = []
-            # Track the order in which we send clusters to the LLM so
-            # we can match responses back positionally when the model
-            # forgets to echo `cluster_id` (Qwen sometimes drops the
-            # field even though the schema lists it as optional with
-            # default "").
-            sent_cluster_ids: list[str] = []
-            if dirty_ids:
-                cluster_blocks: list[str] = []
-                # Sort by current window driver count desc so the LLM
-                # processes the hottest clusters first.
-                def _cluster_priority(cid: str) -> int:
-                    return len({
-                        m.user_id for m in cluster_msgs.get(cid, [])
-                    })
-                sorted_dirty = sorted(
-                    dirty_ids, key=_cluster_priority, reverse=True,
+            # --- Numbered messages block. The LLM does the topic
+            # modeling directly over these and cites message_ids
+            # (the integer at the start of each line) for each
+            # subject it returns. No clustering on our side. ---
+            #
+            # Cap at SUBJECTS_MAX_MESSAGES (default 250) which fits
+            # comfortably in INFORMED_NUM_CTX (32k) — typical msg is
+            # ~50 chars, so 250 msgs ≈ 12 KB plus the per-line `[id N]
+            # [name]` prefix. Plenty of headroom for the surrounding
+            # context blocks.
+            messages_block = "\n".join(
+                f"  [id {m.id}] [{user_id_to_name.get(m.user_id, m.user_id)}] "
+                f"{m.content[:240]}"
+                for m in msgs[-limit:]
+            )
+
+            prompt = (
+                channel_context
+                + transcript_section
+                + known_section
+                + driver_notes_section
+                + f"RECENT CHAT (last {window_min} min, numbered by `id` — "
+                "cite ids in your `message_ids` for each subject):\n\n"
+                + messages_block
+                + blocklist_lines
+                + "\n\nReturn distinct subjects you can cite supporting "
+                "message_ids for. 0-8 subjects; empty list is fine when "
+                "chat is too unfocused."
+            )
+
+            facts = await asyncio.to_thread(self._load_streamer_facts)
+            system_prompt = self.SUBJECTS_SYSTEM
+            if facts:
+                system_prompt = (
+                    "STREAMER-AUTHORED CHANNEL FACTS (treat as ground "
+                    "truth about the streamer / channel — chat "
+                    "references to these are real, not hallucinations "
+                    "to be flagged):\n\n"
+                    + facts
+                    + "\n\n==================================================================\n\n"
+                    + self.SUBJECTS_SYSTEM
                 )
-                for cid in sorted_dirty[:8]:  # cap LLM payload
-                    block_msgs = cluster_msgs.get(cid, [])
-                    if not block_msgs:
-                        # Brand new cluster from orphans — fall back to
-                        # the persistent msg_ids list so the LLM has
-                        # SOMETHING to label.
-                        block_msgs = [
-                            id_to_msg[mid]
-                            for mid in self._clusters[cid].msg_ids
-                            if mid in id_to_msg
-                        ]
-                    if not block_msgs:
-                        continue
-                    prior_name = self._clusters[cid].name
-                    name_hint = (
-                        f" (currently labeled: {prior_name!r}; reuse if "
-                        "still fits, rename only if drifted)"
-                        if prior_name else " (NEW — needs a label)"
-                    )
-                    lines = [
-                        f"    [{user_id_to_name.get(m.user_id, m.user_id)}] "
-                        f"{m.content[:200]}"
-                        for m in block_msgs[-30:]
-                    ]
-                    cluster_blocks.append(
-                        f"  CLUSTER {cid}{name_hint} ({len(block_msgs)} msgs):\n"
-                        + "\n".join(lines)
-                    )
-                    sent_cluster_ids.append(cid)
 
-                if cluster_blocks:
-                    prompt = (
-                        channel_context
-                        + transcript_section
-                        + known_section
-                        + driver_notes_section
-                        + f"Recent chat clusters needing labels (over the last "
-                        f"{window_min} min). Each block has a CLUSTER id — "
-                        "ECHO that id back in your `cluster_id` field so the "
-                        "dashboard can match your label to the cluster. "
-                        "Reuse the existing label verbatim when it still fits "
-                        "the messages; only rename if the conversation has "
-                        "clearly drifted:\n\n"
-                        + "\n\n".join(cluster_blocks)
-                        + blocklist_lines
-                        + "\n\nReturn one subject per cluster (or skip a "
-                        "cluster if it's too noisy / sensitive)."
-                    )
+            grid_b64 = await self._latest_screenshot_grid(
+                window_minutes=window_min,
+            )
+            if grid_b64:
+                prompt += (
+                    "\n\nAn image is attached showing what is "
+                    "currently on screen. Use it ONLY as silent "
+                    "context (identify the game/app, ground "
+                    "vague subject names). Do NOT describe the "
+                    "image or mention that it's attached."
+                )
 
-                    facts = await asyncio.to_thread(self._load_streamer_facts)
-                    system_prompt = self.SUBJECTS_SYSTEM
-                    if facts:
-                        system_prompt = (
-                            "STREAMER-AUTHORED CHANNEL FACTS (treat as ground "
-                            "truth about the streamer / channel — chat "
-                            "references to these are real, not hallucinations "
-                            "to be flagged):\n\n"
-                            + facts
-                            + "\n\n==================================================================\n\n"
-                            + self.SUBJECTS_SYSTEM
-                        )
+            # --- LLM call ---
+            response_subjects: list = []
+            try:
+                from .llm.schemas import EngagingSubjectsResponse
+                response = await self.llm.generate_structured(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    response_model=EngagingSubjectsResponse,
+                    num_ctx=self.SUBJECTS_NUM_CTX,
+                    images=[grid_b64] if grid_b64 else None,
+                    think=True,
+                    call_site="insights.engaging_subjects",
+                )
+                response_subjects = response.subjects
+            except ValidationError as e:
+                logger.warning("engaging-subjects validation failed: %s", e)
+            except Exception:
+                logger.exception("engaging-subjects LLM call failed")
 
-                    # Visual context — same screenshot grid the
-                    # transcript group summary uses, so the LLM can
-                    # ground game-specific jargon when chat references
-                    # something on-screen.
-                    grid_b64 = await self._latest_screenshot_grid(
-                        window_minutes=window_min,
-                    )
-                    if grid_b64:
-                        prompt += (
-                            "\n\nAn image is attached showing what is "
-                            "currently on screen. Use it ONLY as silent "
-                            "context (identify the game/app, ground "
-                            "vague subject names). Do NOT describe the "
-                            "image or mention that it's attached."
-                        )
-                    try:
-                        from .llm.schemas import EngagingSubjectsResponse
-                        # think=True — engaging-subjects feeds the
-                        # dashboard's main "what's chat talking about"
-                        # panel; same accuracy-over-latency tradeoff as
-                        # talking points. Cadence (~3 min) absorbs it.
-                        response = await self.llm.generate_structured(
-                            prompt=prompt,
-                            system_prompt=system_prompt,
-                            response_model=EngagingSubjectsResponse,
-                            num_ctx=self.SUBJECTS_NUM_CTX,
-                            images=[grid_b64] if grid_b64 else None,
-                            think=True,
-                            call_site="insights.engaging_subjects",
-                        )
-                        response_subjects = response.subjects
-                        if not response_subjects:
-                            logger.info(
-                                "engaging-subjects: LLM returned 0 subjects "
-                                "for %d dirty cluster(s) — chat may be too "
-                                "noisy/sensitive to label",
-                                len(sorted_dirty[:8]),
-                            )
-                        else:
-                            # Light diagnostic so we can spot when the LLM
-                            # is producing labels but the apply step is
-                            # dropping them on the floor (cluster_id
-                            # mismatch, sensitivity flagging, blocklist).
-                            logger.debug(
-                                "engaging-subjects: LLM returned %d subject(s): %s",
-                                len(response_subjects),
-                                [
-                                    {
-                                        "name": s.name[:40],
-                                        "cid": s.cluster_id[:12],
-                                        "sens": s.is_sensitive,
-                                        "drv": len(s.drivers),
-                                    }
-                                    for s in response_subjects[:8]
-                                ],
-                            )
-                    except ValidationError as e:
-                        logger.warning("engaging-subjects validation failed: %s", e)
-                    except Exception:
-                        logger.exception("engaging-subjects LLM call failed")
-
-            # Apply LLM labels back onto the persistent clusters.
-            # Match each response subject to a cluster:
-            #   1. Prefer the echoed `cluster_id` field — most reliable.
-            #   2. Fall back to positional matching against
-            #      `sent_cluster_ids` when cluster_id is missing/empty.
-            #      Qwen's structured output sometimes drops the field
-            #      even though the schema includes it; positional is a
-            #      strong second since the LLM tends to return subjects
-            #      in input order.
+            # --- Apply: match each returned subject to a persistent
+            # identity (or spawn a new one) and update its state. ---
+            await self._ensure_blocklist_embeddings(blocklist)
             block_set_slug = {(b.get("slug") or "").lower() for b in blocklist}
             block_set_name = {(b.get("name") or "").lower() for b in blocklist}
-            # Pre-embed every blocklisted name so we can cosine-dedup
-            # the LLM's new picks against historical rejections — same
-            # threshold even when the model rephrases ("FF8 remake" vs
-            # "Final Fantasy 8 remake"). Cheap (capped at 50 entries,
-            # cache reused across passes).
-            await self._ensure_blocklist_embeddings(blocklist)
-            applied = 0
-            empty_id_count = 0
-            for idx, s in enumerate(response_subjects):
-                cid = (s.cluster_id or "").strip()
-                if not cid:
-                    empty_id_count += 1
-                    if idx < len(sent_cluster_ids):
-                        cid = sent_cluster_ids[idx]
-                if not cid or cid not in self._clusters:
-                    continue
-                if s.is_sensitive:
-                    self._clusters[cid].is_sensitive = True
-                    self._clusters[cid].n_at_last_label = self._clusters[cid].n
-                    continue
-                clean_name = s.name.strip()
+            now_ts = time.time()
+            applied: list[tuple[_PersistentSubject, list[int]]] = []
+            dropped_blocklist = 0
+            dropped_sensitive = 0
+            dropped_orphan_msgs = 0
+            valid_msg_ids = set(id_to_msg.keys())
+
+            for s in response_subjects:
+                clean_name = (s.name or "").strip()
                 if not clean_name:
                     continue
+                # Filter out sensitive/blocked before doing any
+                # embedding work — cheap shortcuts first.
+                if s.is_sensitive:
+                    dropped_sensitive += 1
+                    continue
                 if clean_name.lower() in block_set_name:
+                    dropped_blocklist += 1
                     logger.info(
-                        "engaging-subjects: dropped re-extracted blocklisted "
-                        "subject %r", clean_name,
+                        "engaging-subjects: dropped blocklisted subject %r",
+                        clean_name,
                     )
                     continue
-                # Embedding-based near-dup gate. Catches the same
-                # subject under a slightly different name. Threshold
-                # is intentionally strict (0.85) so we don't smother
-                # legitimate new subjects that share theme words.
+                # Embedding-based blocklist near-dup check (catches
+                # rephrased rejections like "FF8 remake" vs "Final
+                # Fantasy 8 remake"). 0.85 is intentionally strict.
                 blocked_by_emb, matched_slug, sim = (
                     await self._is_blocked_by_embedding(clean_name)
                 )
                 if blocked_by_emb:
+                    dropped_blocklist += 1
                     logger.info(
-                        "engaging-subjects: dropped re-extracted "
-                        "blocklisted subject %r (matched %r via "
-                        "embedding sim=%.2f)",
-                        clean_name, matched_slug, sim,
+                        "engaging-subjects: dropped near-duplicate of "
+                        "blocklisted subject %r (matched %r via embedding "
+                        "sim=%.2f)", clean_name, matched_slug, sim,
                     )
                     continue
-                c = self._clusters[cid]
-                c.name = clean_name
-                c.brief = (s.brief or "").strip()
-                c.angles = [
-                    a.strip() for a in (s.angles or []) if a and a.strip()
-                ][:3]
-                c.is_sensitive = False
-                c.n_at_last_label = c.n
-                applied += 1
-            if response_subjects and empty_id_count:
-                logger.info(
-                    "engaging-subjects: %d/%d responses missing cluster_id "
-                    "(matched positionally); applied %d total",
-                    empty_id_count, len(response_subjects), applied,
-                )
-            if response_subjects and applied == 0:
-                # Bug bait — LLM gave us labels but every single one
-                # got dropped (sensitivity flag / blocklist / cluster
-                # mismatch). Worth a louder log so future regressions
-                # don't silently empty the panel.
-                logger.warning(
-                    "engaging-subjects: %d response(s) returned but 0 applied — "
-                    "all dropped via sensitivity/blocklist/missing-cluster. "
-                    "First response: %r (sens=%s, cid=%r)",
-                    len(response_subjects),
-                    response_subjects[0].name[:80],
-                    response_subjects[0].is_sensitive,
-                    response_subjects[0].cluster_id[:32],
+                # Filter cited message_ids to ones actually in the
+                # current window. The LLM is supposed to cite only
+                # input ids but a hallucinated id should be ignored
+                # rather than crash.
+                cited = [
+                    int(mid) for mid in (s.message_ids or [])
+                    if isinstance(mid, int) and mid in valid_msg_ids
+                ]
+                if not cited:
+                    # Subject with zero grounded message_ids is too
+                    # weak to surface — there's nothing for the
+                    # streamer to click into. The system prompt
+                    # tells the LLM "at least 2 supporting ids"
+                    # already; this is the final guard.
+                    dropped_orphan_msgs += 1
+                    continue
+
+                # --- Persistent identity match by name embedding ---
+                name_unit = await self._embed_subject_name(clean_name)
+                identity_threshold = float(getattr(
+                    self.settings, "engaging_subjects_identity_threshold", 0.75,
+                ))
+                matched_id, _ = self._match_subject_by_name_embedding(
+                    name_unit or [], threshold=identity_threshold,
                 )
 
-            # Materialize the cache from live clusters (window-filtered).
+                if matched_id and matched_id in self._subjects:
+                    subj = self._subjects[matched_id]
+                    # Reuse existing identity. Update name to the
+                    # current LLM phrasing (often slight evolution),
+                    # refresh brief/angles, bump counters.
+                    subj.name = clean_name
+                    subj.brief = (s.brief or "").strip()
+                    subj.angles = [
+                        a.strip() for a in (s.angles or []) if a and a.strip()
+                    ][:4]
+                    if name_unit is not None:
+                        subj.name_embedding = name_unit
+                    subj.is_sensitive = False
+                    subj.last_seen_ts = now_ts
+                    subj.refresh_count += 1
+                    # Append cited message_ids; cap to keep the
+                    # persistent record bounded.
+                    existing = set(subj.msg_ids)
+                    for mid in cited:
+                        if mid not in existing:
+                            subj.msg_ids.append(mid)
+                            existing.add(mid)
+                    if len(subj.msg_ids) > 200:
+                        subj.msg_ids = subj.msg_ids[-200:]
+                else:
+                    # Spawn new persistent identity. If we couldn't
+                    # embed the name, fall back to an empty embedding
+                    # — next refresh's identity match will retry.
+                    sid = uuid.uuid4().hex[:12]
+                    subj = _PersistentSubject(
+                        subject_id=sid,
+                        name=clean_name,
+                        name_embedding=name_unit or [],
+                        brief=(s.brief or "").strip(),
+                        angles=[
+                            a.strip() for a in (s.angles or []) if a and a.strip()
+                        ][:4],
+                        is_sensitive=False,
+                        first_seen_ts=now_ts,
+                        last_seen_ts=now_ts,
+                        refresh_count=1,
+                        msg_ids=list(cited),
+                    )
+                    self._subjects[sid] = subj
+                applied.append((subj, cited))
+
+            # --- Age out persistent subjects unseen for 2× window ---
+            aged = self._age_out_persistent_subjects(
+                max_idle_seconds=window_min * 60 * 2,
+            )
+
+            # --- Materialize the cache from THIS pass's surfaced
+            # subjects, with drivers resolved from cited message_ids. ---
             import hashlib as _h
             entries: list[EngagingSubjectEntry] = []
-            for cid in live_ids:
-                c = self._clusters.get(cid)
-                if c is None or c.is_sensitive or not c.name:
+            for subj, cited in applied:
+                slug = _h.sha1(subj.name.lower().encode("utf-8")).hexdigest()[:12]
+                if slug in block_set_slug or subj.name.lower() in block_set_name:
                     continue
-                slug = _h.sha1(c.name.lower().encode("utf-8")).hexdigest()[:12]
-                if slug in block_set_slug or c.name.lower() in block_set_name:
-                    continue
-                window_msgs_for_cid = cluster_msgs.get(cid, [])
-                drivers = []
-                seen_drivers = set()
-                # newest-first so the most-recent driver shows first.
-                for m in reversed(window_msgs_for_cid):
-                    name = user_id_to_name.get(m.user_id)
+                # Drivers: walk cited message_ids → user_ids →
+                # names. Newest cited first so the most-recent
+                # contributor shows first in the UI.
+                drivers: list[str] = []
+                seen_drivers: set[str] = set()
+                for mid in reversed(cited):
+                    msg = id_to_msg.get(mid)
+                    if msg is None:
+                        continue
+                    name = user_id_to_name.get(msg.user_id)
                     if name and name.lower() not in seen_drivers:
                         drivers.append(name)
                         seen_drivers.add(name.lower())
                 if not drivers:
                     continue
                 entries.append(EngagingSubjectEntry(
-                    name=c.name,
+                    name=subj.name,
                     drivers=drivers[:20],
-                    msg_count=len(window_msgs_for_cid),
-                    brief=c.brief,
-                    angles=list(c.angles),
+                    msg_count=len(cited),
+                    brief=subj.brief,
+                    angles=list(subj.angles),
                     slug=slug,
+                    msg_ids=list(cited),
                 ))
             entries.sort(key=lambda e: (-len(e.drivers), -e.msg_count))
             entries = entries[:8]
@@ -1603,10 +1516,17 @@ Good output:
             self._subjects_cache = EngagingSubjectsCache(
                 subjects=entries, refreshed_at=time.time(), error=None,
             )
+
+            # Single info log per refresh — covers every gate so a
+            # future "why is the panel empty" investigation can be
+            # answered from this line alone.
             logger.info(
-                "engaging subjects refreshed: %d msgs, %d live clusters, "
-                "%d dirty (relabeled), %d cached subjects",
-                len(msgs), len(live_ids), len(dirty_ids), len(entries),
+                "engaging subjects refreshed: %d msgs → LLM returned %d, "
+                "applied %d (dropped %d sensitive, %d blocklisted, "
+                "%d ungrounded), cached %d, persistent %d (aged out %d)",
+                len(msgs), len(response_subjects), len(applied),
+                dropped_sensitive, dropped_blocklist, dropped_orphan_msgs,
+                len(entries), len(self._subjects), aged,
             )
 
     # =========================================================
