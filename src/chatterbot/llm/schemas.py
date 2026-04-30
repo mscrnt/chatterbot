@@ -393,3 +393,23 @@ class OpenQuestionsResponse(BaseModel):
     nothing in the candidate pool is genuinely open."""
 
     questions: list[OpenQuestion] = Field(default_factory=list, max_length=8)
+
+
+# ---- per-question answer angles (modal) ----
+
+QuestionAngleText = Annotated[
+    str,
+    StringConstraints(min_length=4, max_length=180, strip_whitespace=True),
+]
+
+
+class QuestionAnswerAnglesResponse(BaseModel):
+    """Reply for the per-question modal's "answer angles" generator.
+    The LLM gets ONE chat question (plus the verbatim asks, surrounding
+    chat, streamer transcript, and channel context) and returns 3-5
+    short bullets the streamer could offer back. These are angles /
+    starter phrases — not full scripts — so the streamer's voice stays
+    in charge. Output never returns to chat; it's only displayed on
+    the streamer's dashboard."""
+
+    angles: list[QuestionAngleText] = Field(default_factory=list, max_length=5)

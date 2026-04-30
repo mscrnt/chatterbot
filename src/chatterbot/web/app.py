@@ -2829,6 +2829,87 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         n = await asyncio.to_thread(insights.clear_subject_blocklist)
         return Response(status_code=200, content=f"cleared {n} rejection(s)")
 
+    @app.get("/modals/question/{last_msg_id}", response_class=HTMLResponse)
+    async def modal_question(request: Request, last_msg_id: int):
+        """Open-question modal body. Built from the cached question
+        entry plus a freshly-pulled chat window (so the streamer sees
+        what's been said since the last refresh). The answer-angles
+        section loads async via /insights/question/{id}/answer-angles
+        so the modal opens instantly even when the LLM call is slow.
+
+        Mirrors the engaging-subject modal pattern."""
+        entry = next(
+            (q for q in insights.open_questions_cache.questions
+             if q.last_msg_id == last_msg_id),
+            None,
+        )
+        if entry is None:
+            raise HTTPException(404, "question not found in cache")
+
+        window_min = int(getattr(
+            settings, "open_questions_lookback_minutes",
+            insights.OPEN_QUESTIONS_LOOKBACK_MINUTES,
+        ))
+        try:
+            chat_msgs = await asyncio.to_thread(
+                repo.recent_messages,
+                limit=80, within_minutes=window_min,
+            )
+        except Exception:
+            logger.exception("question modal: recent_messages failed")
+            chat_msgs = []
+
+        # Verbatim asks = messages from the cluster's drivers within
+        # the window that contain '?'. The cluster identity is by
+        # token-overlap not exact ids, so we re-derive here rather
+        # than carrying message_ids on OpenQuestionEntry.
+        driver_ids = {d.user_id for d in entry.drivers}
+        verbatim_asks = [
+            m for m in chat_msgs
+            if m.user_id in driver_ids and "?" in (m.content or "")
+        ][-12:]
+        verbatim_ids = {m.id for m in verbatim_asks}
+
+        return TEMPLATES.TemplateResponse(
+            request,
+            "modals/_open_question.html",
+            {
+                "entry": entry,
+                "chat_msgs": chat_msgs,
+                "verbatim_asks": verbatim_asks,
+                "verbatim_ids": verbatim_ids,
+                "window_min": window_min,
+            },
+        )
+
+    @app.get(
+        "/insights/question/{last_msg_id}/answer-angles",
+        response_class=HTMLResponse,
+    )
+    async def question_answer_angles(request: Request, last_msg_id: int):
+        """Async-loaded answer angles for the open-question modal.
+        Fired by the modal's HTMX `intersect once` trigger so the
+        modal opens instantly and this lazy-loads in the background.
+
+        Cached on `_question_angles_cache` keyed by last_msg_id —
+        re-opening the modal within the same question identity is
+        free, no LLM call."""
+        try:
+            angles, error = await insights.generate_question_answer_angles(
+                last_msg_id,
+            )
+        except Exception:
+            logger.exception("question answer-angles: unexpected error")
+            angles, error = [], "internal error generating angles"
+        return TEMPLATES.TemplateResponse(
+            request,
+            "partials/open_question_answer_angles.html",
+            {
+                "angles": angles, "error": error,
+                "last_msg_id": last_msg_id,
+            },
+        )
+
     _GOAL_KINDS = (
         "address_first_timers", "clear_due_snoozes", "address_returning_regulars",
     )

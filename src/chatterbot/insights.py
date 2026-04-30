@@ -254,6 +254,12 @@ class InsightsService:
         # would miss. Keyed by slug so it stays in sync with the
         # blocklist's own dedupe key.
         self._blocklist_embed_cache: dict[str, list[float]] = {}
+        # Per-question answer-angles cache, keyed by last_msg_id (the
+        # cluster's identity). Populated on first modal-open; reused
+        # while the question is still surfaced (same identity). Pruned
+        # in _refresh_open_questions when a question drops off the
+        # cache so memory doesn't accumulate forever.
+        self._question_angles_cache: dict[int, list[str]] = {}
 
     @property
     def cache(self) -> InsightsCache:
@@ -1941,6 +1947,14 @@ When uncertain, drop. Chat will re-ask anything that matters; surfacing an alrea
             self._questions_cache = OpenQuestionsCache(
                 questions=entries, refreshed_at=time.time(), error=None,
             )
+            # Prune the answer-angles cache to only entries still
+            # surfaced. Bounds the cache to current panel size +
+            # release LLM-generated content for clusters that have
+            # since been answered or aged out.
+            live_ids = {e.last_msg_id for e in entries}
+            stale = [k for k in self._question_angles_cache if k not in live_ids]
+            for k in stale:
+                self._question_angles_cache.pop(k, None)
             logger.info(
                 "open questions refreshed: %d candidates → %d open "
                 "(LLM kept %d, dropped %d)",
@@ -1948,3 +1962,171 @@ When uncertain, drop. Chat will re-ask anything that matters; surfacing an alrea
                 len(response.questions),
                 max(0, len(response.questions) - len(entries)),
             )
+
+    # =========================================================
+    # Per-question answer angles — async-loaded by the open-question
+    # modal. Generates 3-5 short bullets the streamer could offer
+    # back to chat. Cached on _question_angles_cache by last_msg_id;
+    # cache invalidates when the question drops off the panel.
+    # =========================================================
+
+    QUESTION_ANSWER_ANGLES_NUM_CTX = INFORMED_NUM_CTX
+
+    QUESTION_ANSWER_ANGLES_SYSTEM = """You're helping a Twitch streamer figure out angles for answering one specific chat question. Your output is shown ONLY on the streamer's private dashboard — it never returns to chat. The streamer reads your bullets and chooses how to actually respond out loud.
+
+You'll receive:
+  - QUESTION — the wording chat is asking.
+  - VERBATIM ASKS — the actual chat messages from the chatters who asked it (so you can read tone + specifics, not just the cleaned-up wording).
+  - RECENT CHAT — the surrounding window, oldest → newest.
+  - STREAMER VOICE — what the streamer has said out loud recently.
+  - CHANNEL CONTEXT — what's currently being streamed.
+
+Produce 3-5 SHORT angles (one line each) the streamer could OFFER BACK. Angles ≠ scripts:
+- Each angle is one direction the answer could go ("share what your current setup is", "ask chat what they'd recommend", "give the short answer + a fun aside about X").
+- Phrase as a starter / direction, not a full sentence the streamer has to read aloud verbatim.
+- Stay grounded in the streamer's actual context — don't invent facts. If the streamer's voice has already touched the topic, mention that as one angle.
+- Mix shapes when possible: a direct answer angle, a turn-it-back-to-chat angle, a tangent angle.
+
+If the question is genuinely unanswerable from the available context (asking about something the streamer hasn't shown / talked about), say so as one of the angles ("acknowledge you don't have a take on this yet") instead of fabricating.
+
+Return AT MOST 5 angles. 3 is a fine answer when the question is narrow.
+"""
+
+    async def generate_question_answer_angles(
+        self, last_msg_id: int, *, force: bool = False,
+    ) -> tuple[list[str], str | None]:
+        """Generate per-question answer angles for the open-question
+        modal.
+
+        Returns `(angles, error)` — `error` is None on success, a
+        short string when the LLM call failed (caller surfaces it on
+        the modal so the streamer knows why the section is empty).
+
+        Cached on `_question_angles_cache` keyed by last_msg_id. Same
+        question identity (same last_msg_id) re-opens for free. The
+        cache is pruned in `_refresh_open_questions` when the question
+        drops off the panel."""
+        # Cache hit — re-opens within the same question identity are
+        # free, no LLM call.
+        if not force and last_msg_id in self._question_angles_cache:
+            return list(self._question_angles_cache[last_msg_id]), None
+
+        # Find the entry. The questions cache is small (<= 8) so a
+        # linear walk is fine.
+        entry: OpenQuestionEntry | None = next(
+            (q for q in self._questions_cache.questions
+             if q.last_msg_id == last_msg_id),
+            None,
+        )
+        if entry is None:
+            return [], "question not found in cache"
+
+        # Pull surrounding context. Same lookback as the filter pass
+        # so the LLM sees the same chat the filter saw + a bit more.
+        window_min = int(getattr(
+            self.settings, "open_questions_lookback_minutes",
+            self.OPEN_QUESTIONS_LOOKBACK_MINUTES,
+        ))
+        try:
+            chat_msgs = await asyncio.to_thread(
+                self.repo.recent_messages,
+                limit=120, within_minutes=window_min,
+            )
+        except Exception:
+            logger.exception("question-angles: recent_messages failed")
+            chat_msgs = []
+        try:
+            transcripts = await asyncio.to_thread(
+                self.repo.recent_transcripts,
+                within_minutes=window_min, limit=60,
+            )
+        except Exception:
+            transcripts = []
+
+        # Verbatim asks — pull messages from the cluster's drivers
+        # that contain '?' within the window. Heuristic but good
+        # enough; the cluster identity is by token-overlap not by
+        # exact id list.
+        driver_ids = {d.user_id for d in entry.drivers}
+        verbatim_asks: list = []
+        for m in chat_msgs:
+            if m.user_id in driver_ids and "?" in (m.content or ""):
+                verbatim_asks.append(m)
+        # Cap so the prompt stays bounded on a long-running question.
+        verbatim_asks = verbatim_asks[-12:]
+
+        verbatim_block = ""
+        if verbatim_asks:
+            lines = [
+                f"  - <{m.name}> {m.ts} {m.content[:240].strip()}"
+                for m in verbatim_asks
+            ]
+            verbatim_block = "VERBATIM ASKS:\n" + "\n".join(lines) + "\n\n"
+
+        chat_lines = [
+            f"  [{m.id}] {m.ts} <{m.name}> {m.content[:200]}"
+            for m in chat_msgs
+        ]
+        chat_section = (
+            f"RECENT CHAT (oldest → newest, last {window_min} min):\n"
+            + "\n".join(chat_lines)
+            + "\n\n"
+            if chat_lines else ""
+        )
+
+        transcript_section = ""
+        if transcripts:
+            tlines = [
+                f"  - {t.text[:240].strip()}"
+                for t in transcripts if t.text and t.text.strip()
+            ]
+            if tlines:
+                transcript_section = (
+                    f"STREAMER VOICE (last {window_min} min, oldest first):\n"
+                    + "\n".join(tlines[-50:])
+                    + "\n\n"
+                )
+
+        channel_context = self._build_channel_context(authoritative=False)
+        grid_b64 = await self._latest_screenshot_grid(window_minutes=15)
+
+        prompt = (
+            channel_context
+            + transcript_section
+            + chat_section
+            + verbatim_block
+            + f"QUESTION: {entry.question}\n\n"
+            + "Produce 3-5 short angles the streamer could offer back. "
+            "Each one is a direction, not a script."
+        )
+        if grid_b64:
+            prompt += (
+                "\n\nAn image is attached showing what is currently "
+                "on screen. Use it ONLY as silent context. Do NOT "
+                "describe the image."
+            )
+
+        from .llm.schemas import QuestionAnswerAnglesResponse
+        from .llm.prompts import resolve_prompt
+        try:
+            response = await self.llm.generate_structured(
+                prompt=prompt,
+                system_prompt=resolve_prompt(
+                    "insights.question_answer_angles", self.repo,
+                ),
+                response_model=QuestionAnswerAnglesResponse,
+                num_ctx=self.QUESTION_ANSWER_ANGLES_NUM_CTX,
+                images=[grid_b64] if grid_b64 else None,
+                think=True,
+                call_site="insights.question_answer_angles",
+            )
+        except ValidationError as e:
+            logger.warning("question-angles validation failed: %s", e)
+            return [], "the model's response didn't validate"
+        except Exception:
+            logger.exception("question-angles LLM call failed")
+            return [], "LLM call failed (check server logs)"
+
+        angles = [a.strip() for a in response.angles if a.strip()]
+        self._question_angles_cache[last_msg_id] = angles
+        return list(angles), None

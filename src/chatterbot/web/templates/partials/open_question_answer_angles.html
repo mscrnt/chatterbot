@@ -1,0 +1,37 @@
+{# Answer-angles partial — replaces the placeholder block in
+   modals/_open_question.html via HTMX outerHTML swap.
+
+   Rendered three ways depending on the route's outcome:
+     - `angles` non-empty       → ordered list, accent bullet
+     - `angles` empty + `error` → small inline warning with the
+                                  reason, no fake content
+     - `angles` empty + no err  → "no angles to surface" empty state #}
+<div>
+  <div class="flex items-baseline justify-between mb-1">
+    <p class="text-[11px] uppercase tracking-wider text-muted">answer angles</p>
+    {% if angles %}
+      <span class="text-[10px] text-muted">
+        {{ angles | length }} angle{{ '' if angles|length == 1 else 's' }}
+      </span>
+    {% endif %}
+  </div>
+  {% if angles %}
+    <ul class="space-y-1.5 rounded-xl border border-accent/20 bg-accent/5 p-3">
+      {% for a in angles %}
+        <li class="flex items-start gap-2 text-sm text-primary leading-snug">
+          <i class="fa-solid fa-comment-dots text-accent text-[11px] mt-1 shrink-0"></i>
+          <span>{{ a }}</span>
+        </li>
+      {% endfor %}
+    </ul>
+  {% elif error %}
+    <p class="text-xs text-warning italic inline-flex items-center gap-1">
+      <i class="fa-solid fa-triangle-exclamation"></i> {{ error }}
+    </p>
+  {% else %}
+    <p class="text-xs text-muted italic">
+      No grounded angles to surface — the question may be too thin
+      on context for a useful answer suggestion.
+    </p>
+  {% endif %}
+</div>

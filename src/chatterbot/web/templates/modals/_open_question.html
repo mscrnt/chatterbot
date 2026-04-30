@@ -1,0 +1,165 @@
+{# Open-question modal — opened from a row in the Questions panel.
+
+   Sections (top → bottom):
+     - Header: meta pills (chatter count, similar-ask count, time)
+     - Verbatim asks: the actual messages from the cluster's drivers
+     - AI answer angles: async-loaded via HTMX (3-5 short lines the
+       streamer could offer back). Cached on _question_angles_cache
+       by last_msg_id; cache invalidates when the question drops off
+       the panel.
+     - Drivers: clickable pills → /users
+     - Recent chat: surrounding window so the streamer reads the room
+       before answering. The cluster's verbatim asks are highlighted
+       in this list with a question-mark icon.
+
+   Footer mirrors the card's inline actions (Mark addressed / Skip)
+   as bigger buttons — modal is the deliberate place to act.
+
+   Mirrors the engaging-subject modal pattern. #}
+{% set modal_title = entry.question %}
+{% set modal_icon = 'fa-circle-question' %}
+{% set modal_tone = 'accent' %}
+{% set modal_size = 'lg' %}
+{% extends "components/_modal.html" %}
+{% block modal_body %}
+{% set _ikey = entry.last_msg_id | string %}
+<div class="space-y-4 text-sm">
+
+  {# Meta strip — chatter count, similar-ask count, latest ask time #}
+  <div class="flex items-center gap-2 flex-wrap text-xs">
+    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-accent/30 bg-accent/15 text-accent">
+      <i class="fa-solid fa-users text-[10px]"></i>
+      {{ entry.drivers | length }} chatter{{ '' if entry.drivers|length == 1 else 's' }}
+    </span>
+    {% if entry.count > 1 %}
+      <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-subtle bg-surface-raised text-muted">
+        <i class="fa-solid fa-repeat text-[10px]"></i>
+        ×{{ entry.count }} similar asks
+      </span>
+    {% endif %}
+    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-subtle bg-surface-raised text-muted">
+      <i class="fa-solid fa-clock text-[10px]"></i>
+      latest {{ entry.latest_ts | short_ts }}
+    </span>
+  </div>
+
+  {# Verbatim asks — the actual chat messages that put each driver
+     in the cluster. The cluster wording is a representative; this
+     section shows what each chatter actually typed. #}
+  {% if verbatim_asks %}
+  <div>
+    <p class="text-[11px] uppercase tracking-wider text-muted mb-1">
+      verbatim asks
+      <span class="text-[10px]">({{ verbatim_asks | length }})</span>
+    </p>
+    <ul class="divide-y divide-subtle rounded-xl border border-subtle bg-surface overflow-hidden">
+      {% for m in verbatim_asks %}
+        <li class="px-3 py-2 text-sm flex items-baseline gap-2">
+          <span class="text-[11px] text-muted whitespace-nowrap shrink-0">{{ m.ts | short_ts }}</span>
+          <i class="fa-solid fa-circle-question text-accent text-[10px] shrink-0"></i>
+          <a href="/users/{{ m.user_id }}"
+             class="text-accent hover:underline font-medium shrink-0"
+             onclick="window.chatterbotCloseModal()">{{ m.name }}</a>
+          <span class="break-words text-primary">{{ m.content }}</span>
+        </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {# AI answer angles — async-loaded. Endpoint returns a partial
+     that replaces this whole div on success; on failure it returns
+     a small error block. Loads on `intersect once` so it fires the
+     moment the modal becomes visible. #}
+  <div hx-get="/insights/question/{{ entry.last_msg_id }}/answer-angles"
+       hx-trigger="intersect once"
+       hx-swap="outerHTML">
+    <p class="text-[11px] uppercase tracking-wider text-muted mb-1">answer angles</p>
+    <div class="flex items-center gap-2 text-xs text-muted italic py-2">
+      <i class="fa-solid fa-spinner fa-spin text-accent"></i>
+      thinking up directions you could take this…
+    </div>
+  </div>
+
+  {# Drivers — clickable to jump to per-user page. Resolved at
+     refresh time on the OpenQuestionDriver. #}
+  {% if entry.drivers %}
+  <div>
+    <p class="text-[11px] uppercase tracking-wider text-muted mb-1">drivers</p>
+    <div class="flex flex-wrap gap-1">
+      {% for d in entry.drivers %}
+        <a href="/users/{{ d.user_id }}"
+           class="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full border border-accent/30 bg-accent/15 text-accent hover:bg-accent/25 transition-all duration-150 ease-out"
+           onclick="window.chatterbotCloseModal()">
+          {% with name=d.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+          {{ d.name }}
+        </a>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {# Recent chat — the lookback window so the streamer can read what
+     was being said before/after the asks. Driver asks (verbatim
+     ids) are highlighted; everything else is regular context. #}
+  {% if chat_msgs %}
+  <div>
+    <p class="text-[11px] uppercase tracking-wider text-muted mb-1">
+      recent chat
+      <span class="text-[10px]">({{ chat_msgs | length }} message{{ '' if chat_msgs|length == 1 else 's' }} · last {{ window_min }} min)</span>
+    </p>
+    <ul class="divide-y divide-subtle rounded-xl border border-subtle bg-surface max-h-72 overflow-y-auto">
+      {% for m in chat_msgs %}
+        {% set _is_ask = m.id in verbatim_ids %}
+        <li class="px-3 py-2 text-sm flex items-baseline gap-2 {% if _is_ask %}bg-accent/5{% endif %}">
+          <span class="text-[11px] text-muted whitespace-nowrap shrink-0">{{ m.ts | short_ts }}</span>
+          {% if _is_ask %}
+            <i class="fa-solid fa-circle-question text-accent text-[10px] shrink-0"
+               title="part of this question cluster"></i>
+          {% endif %}
+          <a href="/users/{{ m.user_id }}"
+             class="text-accent hover:underline font-medium shrink-0"
+             onclick="window.chatterbotCloseModal()">{{ m.name }}</a>
+          <span class="break-words text-primary">{{ m.content }}</span>
+        </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {# Footer — mirror the card's inline actions as deliberate
+     buttons. Same kind/item_key the card uses, so a modal-side
+     state change flips the card's state too on next refresh. #}
+  <div class="pt-2 border-t border-subtle flex items-center justify-between gap-2">
+    <div class="flex items-center gap-2">
+      <form hx-post="/insights/state" hx-swap="none" class="inline-flex"
+            hx-on::after-request="if(event.detail.successful) window.chatterbotCloseModal()">
+        <input type="hidden" name="kind" value="chat_question">
+        <input type="hidden" name="item_key" value="{{ _ikey }}">
+        <input type="hidden" name="action" value="addressed">
+        <button type="submit"
+                class="text-xs inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-success/30 bg-success/5 hover:bg-success/15 text-success transition-all duration-150 ease-out"
+                title="I spoke to this on stream">
+          <i class="fa-solid fa-check text-[11px]"></i> Mark answered
+        </button>
+      </form>
+      <form hx-post="/insights/state" hx-swap="none" class="inline-flex"
+            hx-on::after-request="if(event.detail.successful) window.chatterbotCloseModal()">
+        <input type="hidden" name="kind" value="chat_question">
+        <input type="hidden" name="item_key" value="{{ _ikey }}">
+        <input type="hidden" name="action" value="skip">
+        <button type="submit"
+                class="text-xs inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-danger/30 bg-danger/5 hover:bg-danger/15 text-danger transition-all duration-150 ease-out"
+                title="Skip — won't show again for this cluster">
+          <i class="fa-solid fa-eye-slash text-[11px]"></i> Skip
+        </button>
+      </form>
+    </div>
+    <button type="button"
+            class="text-xs inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-subtle bg-surface-raised hover:bg-surface-raised/80 text-muted transition-all duration-150 ease-out"
+            onclick="window.chatterbotCloseModal()">
+      Close
+    </button>
+  </div>
+</div>
+{% endblock %}

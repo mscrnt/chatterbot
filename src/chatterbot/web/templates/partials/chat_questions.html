@@ -43,7 +43,14 @@
   <ul class="divide-y divide-subtle rounded-xl border border-subtle bg-surface overflow-hidden">
     {% for q, _s in _visible_questions %}
       {% set _ikey = q.last_msg_id | string %}
-      <li class="insight-card-root px-3 py-2 sm:py-3 hover:bg-surface-raised transition-all duration-150 ease-out">
+      {# Whole row is clickable to open the modal. Inline action
+         buttons + driver pills carry their own onclick / stopPropagation
+         so they stay useful without bubbling up to the row trigger. #}
+      <li class="insight-card-root px-3 py-2 sm:py-3 hover:bg-surface-raised transition-all duration-150 ease-out cursor-pointer"
+          hx-get="/modals/question/{{ q.last_msg_id }}"
+          hx-target="#modal-root"
+          hx-swap="innerHTML"
+          title="Open with verbatim asks, answer angles, and chat context">
         <div class="flex items-baseline gap-2 flex-wrap">
           <i class="fa-solid fa-circle-question text-accent text-[11px] shrink-0"></i>
           <p class="text-primary text-sm break-words flex-1 leading-snug">{{ q.question }}</p>
@@ -61,11 +68,14 @@
             {% endwith %}
           </div>
         </div>
-        {# Driver pills — clickable shortcut to /users/<id> #}
+        {# Driver pills — clickable shortcut to /users/<id>. Each
+           link calls stopPropagation so a chatter-pill click jumps
+           to /users instead of opening the modal. #}
         {% if q.drivers %}
           <div class="flex flex-wrap gap-1 mt-1.5 ml-5">
             {% for d in q.drivers[:8] %}
               <a href="/users/{{ d.user_id }}"
+                 onclick="event.stopPropagation()"
                  class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-subtle bg-canvas hover:bg-surface-raised text-[11px] text-accent hover:underline"
                  title="{{ d.ts }}">
                 {% with name=d.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}

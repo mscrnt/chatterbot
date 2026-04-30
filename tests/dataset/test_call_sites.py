@@ -78,6 +78,7 @@ EXPECTED_CALL_SITES = {
     "insights.thread_recaps",
     "insights.engaging_subjects",
     "insights.open_questions",
+    "insights.question_answer_angles",
     "insights.subject_talking_points",
     "transcript.llm_match",
     "transcript.group_summary",

@@ -400,6 +400,66 @@ def _build_registry() -> None:
             ),
         ),
 
+        "insights.question_answer_angles": PromptDef(
+            call_site="insights.question_answer_angles",
+            section="insights",
+            title="Per-question answer angles",
+            description=(
+                "When the streamer opens a chat question's modal, "
+                "this prompt suggests 3-5 short angles they could "
+                "offer back to chat."
+            ),
+            factory=InsightsService.QUESTION_ANSWER_ANGLES_SYSTEM,
+            guided_template=(
+                InsightsService.QUESTION_ANSWER_ANGLES_SYSTEM
+                + _injection_block(
+                    "answer-angle voice",
+                    "Voice / phrasing style — {voice}.\n"
+                    "Mix of angle shapes — {mix}.\n"
+                    "Number of angles to generate — {count}.\n"
+                    "Angles must still be grounded in visible context "
+                    "— no invented facts about the streamer.",
+                )
+            ),
+            guided_slots=(
+                GuidedSlot(
+                    name="voice",
+                    question="How should the suggested angles sound?",
+                    default=(
+                        "first-person directions the streamer would "
+                        "naturally take — short, casual"
+                    ),
+                    placeholder=(
+                        "e.g. dry / curious / opinionated / playful"
+                    ),
+                ),
+                GuidedSlot(
+                    name="mix",
+                    question="What mix of angle shapes do you want?",
+                    default=(
+                        "balanced — some direct answer, some turn-it-"
+                        "back-to-chat, some tangent"
+                    ),
+                    options=(
+                        "always direct — the streamer just wants the answer",
+                        "balanced — some direct answer, some turn-it-back-to-chat, some tangent",
+                        "lean conversational — prefer turn-back-to-chat over direct",
+                    ),
+                ),
+                GuidedSlot(
+                    name="count",
+                    question="How many angles to generate?",
+                    default="3-5 (mix of options)",
+                    options=(
+                        "3 (focused — best angles only)",
+                        "3-5 (mix of options)",
+                        "5 (give me variety)",
+                    ),
+                    advanced=True,
+                ),
+            ),
+        ),
+
         "insights.thread_recaps": PromptDef(
             call_site="insights.thread_recaps",
             section="insights",
