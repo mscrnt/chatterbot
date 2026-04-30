@@ -232,7 +232,7 @@ FIELDS: dict[str, dict[str, Any]] = {
     "whisper_enabled": {
         "label": "Transcribe my voice",
         "tooltip": "Turns on real-time stream transcription via OBS audio.",
-        "help": "When on, the OBS audio relay script feeds your mic into a local Whisper model that turns it into text. Powers the live transcript on /insights and lets the dashboard auto-check off chat cards when you address them out loud. Off by default — needs the OBS script set up.",
+        "help": "When on, the OBS audio relay script feeds your mic into a local Whisper model that turns it into text. Powers the Stream timeline on /insights and lets the dashboard auto-check off chat cards when you address them out loud. Off by default — needs the OBS script set up.",
         "type": "bool",
     },
     "whisper_model": {
@@ -387,8 +387,8 @@ FIELDS: dict[str, dict[str, Any]] = {
     # ============================================================
     "whisper_group_interval_seconds": {
         "label": "Summary interval",
-        "tooltip": "How often the live transcript rolls up new utterances into one summarised line.",
-        "help": "How often (in seconds) the dashboard summarises the latest transcript chunks into a single observational line on the live transcript strip. Default 60s. Lower = more granular but more AI calls; higher = fewer rolled-up lines.",
+        "tooltip": "How often the Stream timeline rolls up new utterances into one summarised moment.",
+        "help": "How often (in seconds) the dashboard summarises the latest transcript chunks into a single observational moment on the Stream timeline. Default 60s. Lower = more granular but more AI calls; higher = fewer rolled-up moments.",
         "type": "number",
         "min": 15, "max": 600, "step": 5,
         "suffix": "seconds",
@@ -849,7 +849,7 @@ SECTIONS: list[dict[str, Any]] = [
         "icon": "fa-solid fa-microphone",
         "blurb": (
             "Live transcription via Whisper + OBS screenshot capture. "
-            "Powers the live transcript on /insights and auto-checks "
+            "Powers the Stream timeline on /insights and auto-checks "
             "off chat cards when you address them out loud."
         ),
         "subcards": [
@@ -912,8 +912,8 @@ SECTIONS: list[dict[str, Any]] = [
                 "title": "Live summary cadence",
                 "icon": "fa-solid fa-list",
                 "blurb": (
-                    "How often your audio gets rolled up into a summary "
-                    "line on the live transcript strip."
+                    "How often your audio gets rolled up into a summarised "
+                    "moment on the Stream timeline."
                 ),
                 "fields": [
                     "whisper_group_interval_seconds",

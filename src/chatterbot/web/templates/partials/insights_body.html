@@ -30,8 +30,8 @@
 
   {# Default top-to-bottom order (per streamer + client feedback):
      focus on GROUP engagement, demote individual-focused panels.
-       1. Live transcript (with recent matches folded in) — what
-          whisper just heard
+       1. Stream timeline (with recent matches folded in) — voice +
+          chat, summarized
        2. Engaging subjects — what the room is talking about NOW
        3. High-impact subjects — what to say to re-engage clusters
        4. Live conversations — clustered topic threads + drivers
@@ -44,16 +44,16 @@
      Each section keeps a stable `data-panel-id` so the streamer
      can drag any of them anywhere; this is just the default. #}
 
-  {# ---------------- Live transcript strip ----------------
+  {# ---------------- Stream timeline strip ----------------
      `preserve=True` so the body's outer HTMX swap doesn't clobber
      the strip's own refresh cadence (it has its own SSE-driven
      hx-trigger inside). Recent transcript matches now ride INSIDE
      this panel as a collapsible footer — they're transcript-derived
-     so they belong adjacent to the transcript that produced them,
+     so they belong adjacent to the timeline that produced them,
      not in their own floating card. #}
   {% if transcript_status and (transcript_status.enabled or transcript_chunks or transcript_groups) %}
-    {% call panel('transcript', 'Live transcript', icon='fa-microphone',
-                  subtitle='whisper', preserve=True) %}
+    {% call panel('transcript', 'Stream timeline', icon='fa-clock-rotate-left',
+                  preserve=True) %}
       {% with chunks=transcript_chunks, groups=transcript_groups,
               service_status=transcript_status, view='summary',
               embedded=True %}

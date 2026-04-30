@@ -21,7 +21,7 @@
                icon_tone='accent', subtitle=None, preserve=False) %}
 {# `preserve=True` adds an id + hx-preserve so this panel survives
    the body's HTMX outerHTML swap. Useful for panels whose interior
-   maintains its own refresh cadence (the live transcript strip is
+   maintains its own refresh cadence (the Stream timeline strip is
    the canonical case — it has its own hx-trigger and shouldn't get
    nuked when /insights body refreshes on a new chat message). #}
 <section data-panel-id="{{ panel_id }}"

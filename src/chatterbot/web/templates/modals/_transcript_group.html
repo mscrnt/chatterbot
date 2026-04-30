@@ -1,12 +1,42 @@
-{% set modal_title = 'Transcript group' %}
-{% set modal_icon = 'fa-microphone-lines' %}
+{% set modal_title = 'Timeline moment' %}
+{% set modal_icon = 'fa-clock-rotate-left' %}
 {% set modal_tone = 'accent' %}
 {% set modal_size = 'lg' %}
 {% extends "components/_modal.html" %}
 {% block modal_body %}
 <div class="space-y-4 text-sm">
-  {# Screenshots first — visual context for the audio. Up to 4 evenly
-     spaced from the group's window. Click to open at full size. #}
+  {# Header — timerange + size of the window. The modal title says
+     WHAT this is; the header says WHEN, so the streamer can place it
+     in the stream's flow without scrolling. #}
+  <header class="flex items-baseline gap-2 flex-wrap text-[11px] text-muted">
+    <i class="fa-solid fa-clock text-[10px]"></i>
+    <span class="text-primary tabular-nums">{{ group.start_ts | short_ts }}</span>
+    <span>—</span>
+    <span class="text-primary tabular-nums">{{ group.end_ts | short_ts }}</span>
+    {% if duration_s %}
+      <span>·</span>
+      <span>{{ duration_s }}s window</span>
+    {% endif %}
+    <span>·</span>
+    <span>{{ chunks | length }} utterance{{ '' if chunks|length == 1 else 's' }}</span>
+    {% if chat_messages %}
+      <span>·</span>
+      <span>{{ chat_messages | length }} chat line{{ '' if chat_messages|length == 1 else 's' }}</span>
+    {% endif %}
+  </header>
+
+  {# Summary — the headline. Lead with this; everything else is
+     evidence the LLM used to write it. #}
+  <section class="rounded-lg border border-accent/30 bg-accent/5 p-3">
+    <div class="flex items-baseline gap-2 mb-1">
+      <i class="fa-solid fa-microphone-lines text-accent text-[10px]"></i>
+      <span class="text-[11px] uppercase tracking-wider text-muted">summary</span>
+    </div>
+    <p class="text-primary leading-snug">{{ group.summary }}</p>
+  </section>
+
+  {# Scene snapshots — visual evidence. Up to 4 evenly spaced from
+     the window. Click to open at full size. #}
   {% if screenshots %}
   <section>
     <p class="text-[11px] uppercase tracking-wider text-muted mb-1">
@@ -32,20 +62,6 @@
     </div>
   </section>
   {% endif %}
-
-  {# LLM-generated observational summary — same line the strip shows,
-     here as the primary anchor below the visual context. #}
-  <section class="rounded-lg border border-accent/30 bg-accent/5 p-3">
-    <div class="flex items-baseline gap-2 mb-1">
-      <i class="fa-solid fa-microphone-lines text-accent text-[10px]"></i>
-      <span class="text-[11px] uppercase tracking-wider text-muted">summary</span>
-      <span class="text-[10px] text-muted ml-auto">
-        {{ group.start_ts | short_ts }} — {{ group.end_ts | short_ts }}
-        · {{ chunks | length }} utterance{{ '' if chunks|length == 1 else 's' }}
-      </span>
-    </div>
-    <p class="text-primary leading-snug">{{ group.summary }}</p>
-  </section>
 
   {# Underlying utterances. Click any single one to open its own
      context modal (re-anchors on that utterance with neighbours). #}

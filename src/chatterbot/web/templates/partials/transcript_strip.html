@@ -1,4 +1,4 @@
-{# Live transcript strip — two view modes, toggled client-side and
+{# Stream timeline strip — two view modes, toggled client-side and
    persisted in localStorage so it sticks across reloads:
 
      - summary — one LLM-summarised line per ~60 s window (default)
@@ -102,7 +102,7 @@
   {% elif _is_summary %}
     {% if not groups %}
       <div class="text-xs text-muted italic px-1 py-2">
-        Summaries roll up every ~60 s of audio into one line. None
+        Every ~60 s of audio rolls up into one timeline moment. None
         yet for this stream — switch to <strong class="text-primary">full log</strong>
         if you want raw utterances right now.
       </div>

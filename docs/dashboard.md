@@ -161,8 +161,10 @@ Several pages open modals via HTMX into `#modal-root`:
   thread members + drivers + verbatim messages, with a "Pull this
   thread back up" button that streams a contextual recap.
 - **Note modals** — edit / delete / merge.
-- **Transcript group modal** — what the streamer just said (60s window)
-  with the chat context the LLM saw at summary time.
+- **Timeline moment modal** — opened from any row in the Stream
+  timeline. Header shows the time range + duration; body leads with
+  the LLM summary, then the OBS scene snapshots, raw utterances, and
+  the chat context the LLM saw at summary time.
 - **User merge modal** — manually merge two chatter profiles (alias
   reconciliation).
 

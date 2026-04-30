@@ -2966,6 +2966,16 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             chat_messages = await asyncio.to_thread(
                 repo.get_messages_by_ids, list(group.context_message_ids),
             )
+        # Window duration for the modal header. start_ts/end_ts are
+        # ISO strings on the dataclass; parse defensively so a
+        # malformed row doesn't crash the modal.
+        duration_s = 0
+        try:
+            _start = datetime.fromisoformat(group.start_ts)
+            _end = datetime.fromisoformat(group.end_ts)
+            duration_s = max(0, int((_end - _start).total_seconds()))
+        except (TypeError, ValueError):
+            pass
         return TEMPLATES.TemplateResponse(
             request, "modals/_transcript_group.html",
             {
@@ -2973,6 +2983,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 "chunks": chunks,
                 "screenshots": screenshots,
                 "chat_messages": chat_messages,
+                "duration_s": duration_s,
             },
         )
 
