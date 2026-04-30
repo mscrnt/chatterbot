@@ -167,11 +167,33 @@
       color: rgb(var(--c-muted));
       border-radius: 0.25rem;
     }
+
+    /* Live-chat dock layout.
+       --live-body-h        body section of the chat panel (0 when collapsed)
+       --live-footer-h      site-footer height beneath the chat (~30px)
+       --live-header-h      chat panel's header bar (always visible)
+       --live-total-h       what content has to clear at the bottom
+                            so nothing hides behind the docked area
+       Set on <body> by Alpine `appShell()` so any descendant can
+       offset against it via `var(...)`. Falls back to 0/footer-only
+       when the live widget is disabled. */
+    :root {
+      --live-header-h: 32px;
+      --live-footer-h: 38px;
+      --live-body-h: 0px;
+      --live-total-h: 0px;
+    }
+    /* No-cap visual cue while the user drags the resize handle. */
+    body.live-resizing { user-select: none; cursor: row-resize; }
+    body.live-resizing * { pointer-events: none; }
+    body.live-resizing #live-widget,
+    body.live-resizing #live-widget * { pointer-events: auto; }
   </style>
 </head>
 <body class="min-h-screen flex flex-col bg-canvas text-primary antialiased
              transition-colors duration-150 ease-out"
       x-data="appShell()"
+      :style="liveCssVars()"
       @keydown.window="onGlobalKey($event)">
 
   {% set current_path = request.url.path %}
@@ -338,50 +360,136 @@
     </div>
   </header>
 
-  <main class="flex-1 max-w-6xl w-full mx-auto px-3 sm:px-4 py-4 sm:py-6">
+  {# `current_path` is referenced by nav, the live widget, and the
+     footer-mode guards below. #}
+  {% set _chat_dock = (current_path != '/live' and live_widget_enabled()) %}
+
+  <main class="flex-1 max-w-6xl w-full mx-auto px-3 sm:px-4 py-4 sm:py-6"
+        :style="'padding-bottom: calc(var(--live-total-h) + 1.5rem)'">
     {% block content %}{% endblock %}
   </main>
 
-  {# `current_path` is referenced by nav and the live widget guard above. #}
-
-  <footer class="border-t border-subtle text-xs text-muted py-3 text-center pb-24 sm:pb-3 flex items-center justify-center gap-3">
-    <span>streamer-only · this dashboard never writes to chat</span>
-    <span class="text-subtle">·</span>
-    <a href="https://buymeacoffee.com/mscrnt" target="_blank" rel="noopener"
-       class="inline-flex items-center gap-1 text-muted hover:text-accent transition-all duration-150 ease-out">
-      <i class="fa-solid fa-mug-hot"></i> buy me a coffee
-    </a>
-  </footer>
-
-  {# ---------------- live-chat widget ---------------- #}
-  {% if current_path != '/live' and live_widget_enabled() %}
-  <aside id="live-widget"
-         class="fixed bottom-2 right-2 z-30 flex flex-col w-[min(360px,calc(100vw-1rem))]
-                max-h-[55vh] sm:max-h-[60vh] bg-surface border border-subtle rounded-lg shadow-lg">
-    <header class="flex items-center justify-between px-3 py-2 border-b border-subtle">
-      <button type="button"
-              class="flex-1 text-left text-xs font-semibold uppercase tracking-wider tap inline-flex items-center gap-2 text-primary"
-              @click="liveCollapsed = !liveCollapsed; persistLive()">
-        <i class="fa-solid" :class="liveCollapsed ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
-        live chat
-      </button>
-      <a href="/live" class="text-xs text-accent hover:underline px-2 tap inline-flex items-center gap-1">
-        <i class="fa-solid fa-up-right-from-square text-[10px]"></i> see all
+  {% if not _chat_dock %}
+    {# When the chat dock is off (the /live page or `live_widget_enabled=false`),
+       the site footer falls back to its normal in-flow shape. No
+       fixed positioning, no chat panel above it. #}
+    <footer class="border-t border-subtle text-xs text-muted py-3 text-center flex items-center justify-center gap-3">
+      <span>streamer-only · this dashboard never writes to chat</span>
+      <span class="text-subtle">·</span>
+      <a href="https://buymeacoffee.com/mscrnt" target="_blank" rel="noopener"
+         class="inline-flex items-center gap-1 text-muted hover:text-accent transition-all duration-150 ease-out">
+        <i class="fa-solid fa-mug-hot"></i> buy me a coffee
       </a>
-    </header>
-    {# Initial render is one-shot via HTMX load; subsequent updates
-       come from the SSE stream below — no more 2s poll cycle. #}
-    <div class="overflow-y-auto px-2 py-1 text-sm"
-         x-show="!liveCollapsed"
-         data-live-feed
-         data-live-limit="30"
-         data-live-since="0"
-         hx-get="/live?partial=1&limit=30"
-         hx-trigger="load"
-         hx-swap="innerHTML">
-      <p class="text-muted italic px-1 py-2 text-xs">connecting…</p>
-    </div>
-  </aside>
+    </footer>
+  {% else %}
+  {# ---------------- live-chat dock ----------------
+     Replaces the old floating right-aligned widget. Spans the full
+     viewport width, anchored to the bottom edge, with the site footer
+     sitting directly under it as the bottom-most element.
+
+     Three "snap" states cycled by clicking the chevron:
+       - collapsed  → header bar only (~32px). Body height is 0.
+       - slim       → ~33vh body
+       - expanded   → ~50vh body
+     Plus drag-to-resize via the handle bar at the top of the chat
+     panel; drag overrides the snap height until the next chevron
+     click. State + drag-height persist in sessionStorage so the
+     dashboard remembers the streamer's preference within a session.
+
+     The site footer (`<footer>`) is part of this same fixed block so
+     it tracks the chat panel's position. Both render in document
+     order: chat-panel-then-footer, top-to-bottom. #}
+  <div id="chat-dock"
+       class="fixed left-0 right-0 bottom-0 z-30 flex flex-col bg-surface
+              border-t border-subtle shadow-lg"
+       :style="'height: var(--live-total-h)'">
+
+    {# Resize handle. Hidden when collapsed (no body to resize) so
+       the streamer doesn't get a phantom drag affordance on the
+       header bar. #}
+    <div id="live-resize-handle"
+         x-show="liveState !== 'collapsed'"
+         x-cloak
+         @pointerdown="startLiveDrag($event)"
+         class="h-1.5 w-full bg-subtle/40 hover:bg-accent/40 cursor-row-resize
+                shrink-0 transition-colors"
+         role="separator"
+         aria-label="Resize live chat panel"
+         title="Drag to resize"></div>
+
+    <aside id="live-widget"
+           class="flex flex-col flex-1 min-h-0">
+      {# Header's bottom border is meaningful when there's a body
+         below it (separates the title bar from chat messages). When
+         the chat is collapsed the body is `display:none` and the
+         footer sits flush against the header — the 1px border ends
+         up overlapping the footer's top edge. Suppress in that case
+         so the footer renders without a line cutting through it. #}
+      <header class="flex items-center justify-between gap-2 px-3 py-1.5 shrink-0"
+              :class="liveState !== 'collapsed' ? 'border-b border-subtle' : ''">
+        <button type="button"
+                @click="cycleLive()"
+                class="flex-1 text-left text-xs font-semibold uppercase tracking-wider tap inline-flex items-center gap-2 text-primary"
+                :title="liveState === 'collapsed' ? 'Expand to slim'
+                        : liveState === 'slim' ? 'Expand to large'
+                        : 'Collapse'">
+          <i class="fa-solid"
+             :class="liveState === 'expanded' ? 'fa-chevron-down' : 'fa-chevron-up'"></i>
+          live chat
+          <span class="hidden sm:inline text-[10px] font-normal normal-case text-muted ml-1"
+                x-text="liveState === 'collapsed' ? '' : (liveState === 'slim' ? '· slim' : '· large')"></span>
+        </button>
+        <a href="/live"
+           class="text-xs text-accent hover:underline px-2 tap inline-flex items-center gap-1">
+          <i class="fa-solid fa-up-right-from-square text-[10px]"></i> see all
+        </a>
+        {# Dedicated close button — gets the streamer back to
+           collapsed in one click from any open state, so they don't
+           have to cycle slim → large → collapsed via the chevron.
+           Hidden when already collapsed (no-op there). #}
+        <button type="button"
+                x-show="liveState !== 'collapsed'"
+                x-cloak
+                @click="closeLive()"
+                class="text-muted hover:text-primary tap inline-flex items-center justify-center h-6 w-6 rounded"
+                aria-label="Close live chat"
+                title="Close live chat">
+          <i class="fa-solid fa-xmark text-xs"></i>
+        </button>
+      </header>
+      {# Initial render is one-shot via HTMX load; subsequent updates
+         come from the SSE stream below — no more 2s poll cycle.
+         x-show on the body keeps the SSE subscription alive even
+         when collapsed (no flicker on re-expand). #}
+      <div class="overflow-y-auto flex-1 min-h-0 px-3 py-1 text-sm
+                  max-w-6xl w-full mx-auto"
+           x-show="liveState !== 'collapsed'"
+           x-cloak
+           data-live-feed
+           data-live-limit="60"
+           data-live-since="0"
+           hx-get="/live?partial=1&limit=60"
+           hx-trigger="load"
+           hx-swap="innerHTML">
+        <p class="text-muted italic px-1 py-2 text-xs">connecting…</p>
+      </div>
+    </aside>
+
+    {# Footer's top border separates it from the chat body above.
+       When the chat is collapsed there's no body in between — the
+       header's own border-b already sits directly above the footer
+       content, and a second border-t here would render as a visible
+       double-line through the footer. Suppress it in that state. #}
+    <footer class="text-[11px] text-muted py-1.5 text-center flex items-center justify-center gap-3 shrink-0"
+            :class="liveState === 'collapsed' ? '' : 'border-t border-subtle'">
+      <span>streamer-only · this dashboard never writes to chat</span>
+      <span class="text-subtle">·</span>
+      <a href="https://buymeacoffee.com/mscrnt" target="_blank" rel="noopener"
+         class="inline-flex items-center gap-1 text-muted hover:text-accent transition-all duration-150 ease-out">
+        <i class="fa-solid fa-mug-hot"></i> buy me a coffee
+      </a>
+    </footer>
+  </div>
   {% include "partials/_live_sse.html" %}
   {% endif %}
 
@@ -398,9 +506,11 @@
   {% include "partials/_events_sse.html" %}
 
   {# ---------------- back-to-top button ----------------
-     Appears once you've scrolled past 400px on any page. Tucked into
-     the bottom-left on sm+ where the live widget + toasts dominate the
-     bottom-right; on mobile, sits above the toast region. #}
+     Appears once you've scrolled past 400px on any page. Floats just
+     above the chat dock so the streamer can clear the page without
+     the button hiding behind a tall chat panel. The CSS variable
+     `--live-total-h` is set on <body> by appShell() and falls back
+     to 0 on pages without the dock. #}
   <button type="button"
           x-data="{ shown: false, onScroll() { this.shown = window.scrollY > 400 } }"
           x-init="onScroll(); window.addEventListener('scroll', onScroll, { passive: true })"
@@ -410,12 +520,14 @@
           @click="window.scrollTo({ top: 0, behavior: 'smooth' })"
           aria-label="back to top"
           title="Back to top"
-          class="fixed bottom-20 left-3 sm:bottom-3 z-40 w-11 h-11 rounded-full bg-accent hover:bg-accent-600 text-white shadow-lg flex items-center justify-center transition-all duration-150 ease-out">
+          style="bottom: calc(var(--live-total-h) + 0.75rem)"
+          class="fixed left-3 z-40 w-11 h-11 rounded-full bg-accent hover:bg-accent-600 text-white shadow-lg flex items-center justify-center transition-all duration-150 ease-out">
     <i class="fa-solid fa-arrow-up"></i>
   </button>
 
   {# ---------------- toast region (Alpine queue, HX-Trigger driven) ---------------- #}
-  <div class="fixed bottom-3 left-3 sm:bottom-3 sm:right-3 sm:left-auto z-50 flex flex-col gap-2 pointer-events-none w-[min(360px,calc(100vw-1.5rem))]"
+  <div class="fixed left-3 sm:right-3 sm:left-auto z-50 flex flex-col gap-2 pointer-events-none w-[min(360px,calc(100vw-1.5rem))]"
+       style="bottom: calc(var(--live-total-h) + 0.75rem)"
        x-data="toastQueue()"
        @show-toast.window="push($event.detail)">
     <template x-for="t in toasts" :key="t.id">
@@ -445,13 +557,48 @@
     function appShell() {
       return {
         isDark: document.documentElement.classList.contains('dark'),
-        liveCollapsed: false,
+        // ---- Live-chat dock state ----
+        // Three discrete snap points cycled by the chevron, plus a
+        // free-form drag override that supersedes the snap height
+        // until the next chevron click.
+        //   collapsed → header bar only (~32px), no body
+        //   slim      → ~33vh body
+        //   expanded  → ~50vh body
+        // `liveDragHeight` is null when the user is on a snap point;
+        // a number (px) when they've manually dragged the handle.
+        liveState: 'slim',
+        liveDragHeight: null,
+        // Re-render trigger for `liveCssVars()`. Bumps on any state
+        // change OR window resize so percentage-of-viewport heights
+        // stay accurate when the streamer drags the browser window.
+        liveTick: 0,
         gPrefix: false,
         gPrefixTimer: null,
         init() {
           try {
-            this.liveCollapsed = sessionStorage.getItem('chatterbot.liveCollapsed') === '1';
+            const s = sessionStorage.getItem('chatterbot.liveState');
+            if (s === 'collapsed' || s === 'slim' || s === 'expanded') {
+              this.liveState = s;
+            }
+            const d = sessionStorage.getItem('chatterbot.liveDragHeight');
+            if (d) {
+              const n = parseInt(d, 10);
+              if (Number.isFinite(n) && n > 0) this.liveDragHeight = n;
+            }
           } catch (_) {}
+          // Backward-compat with the old liveCollapsed flag — if the
+          // streamer's session has only the legacy key, mirror it
+          // onto liveState before it ages out.
+          try {
+            const legacy = sessionStorage.getItem('chatterbot.liveCollapsed');
+            if (legacy === '1' && !sessionStorage.getItem('chatterbot.liveState')) {
+              this.liveState = 'collapsed';
+            }
+          } catch (_) {}
+          // Re-evaluate the dock's height when the viewport changes
+          // size — the slim/expanded snap points are vh-relative so
+          // a window resize would otherwise leave them stale.
+          window.addEventListener('resize', () => { this.liveTick++; });
         },
         toggleTheme() {
           this.isDark = !this.isDark;
@@ -460,8 +607,123 @@
         },
         persistLive() {
           try {
-            sessionStorage.setItem('chatterbot.liveCollapsed', this.liveCollapsed ? '1' : '0');
+            sessionStorage.setItem('chatterbot.liveState', this.liveState);
+            sessionStorage.setItem(
+              'chatterbot.liveDragHeight',
+              this.liveDragHeight === null ? '' : String(Math.round(this.liveDragHeight)),
+            );
           } catch (_) {}
+        },
+        // Pure getter — height of the chat BODY (excluding the
+        // header bar) given the current state + drag override.
+        // Called from liveCssVars() whenever Alpine re-evaluates.
+        get liveBodyHeight() {
+          if (this.liveState === 'collapsed') return 0;
+          if (this.liveDragHeight !== null) {
+            // Drag override wins. The drag value is the body height
+            // (header is fixed) so apply directly.
+            return this.liveDragHeight;
+          }
+          const vh = window.innerHeight || 720;
+          return this.liveState === 'slim'
+            ? Math.round(vh * 0.33)
+            : Math.round(vh * 0.50);
+        },
+        // Builds the CSS vars consumed by every layout offset
+        // (main padding-bottom, back-to-top, toasts, chat dock
+        // height itself). One source of truth — flip this and
+        // every offset moves together.
+        liveCssVars() {
+          // Touch liveTick + liveDragHeight + liveState so Alpine
+          // tracks them as dependencies; without these reads the
+          // bound `:style` doesn't refresh when state mutates.
+          // eslint-disable-next-line no-unused-expressions
+          this.liveTick; this.liveState; this.liveDragHeight;
+          const bodyH = this.liveBodyHeight;
+          // Total = resize-handle (only when expanded) + header +
+          // body + footer. We collapse the resize handle visually
+          // when state==collapsed so it contributes 0 there.
+          const handleH = this.liveState === 'collapsed' ? 0 : 6;
+          const headerH = 32;
+          const footerH = 38;
+          const total = handleH + headerH + bodyH + footerH;
+          return (
+            `--live-body-h: ${bodyH}px;` +
+            `--live-header-h: ${headerH}px;` +
+            `--live-footer-h: ${footerH}px;` +
+            `--live-total-h: ${total}px;`
+          );
+        },
+        cycleLive() {
+          // collapsed → slim → expanded → collapsed.
+          const order = ['collapsed', 'slim', 'expanded'];
+          const idx = order.indexOf(this.liveState);
+          this.liveState = order[(idx + 1) % order.length];
+          // Chevron click resets any drag-override so the snap
+          // points behave predictably. If the streamer wants to
+          // keep their custom height, they shouldn't click the
+          // chevron.
+          this.liveDragHeight = null;
+          this.persistLive();
+        },
+        closeLive() {
+          // Direct close from any open state — bypasses the
+          // chevron's slim → large → collapsed cycle so the
+          // streamer doesn't have to step through expanded just
+          // to dismiss the panel.
+          this.liveState = 'collapsed';
+          this.liveDragHeight = null;
+          this.persistLive();
+        },
+        startLiveDrag(ev) {
+          // Drag is meaningless in the collapsed state — the body
+          // is hidden, the handle's hidden, there's nothing to grab.
+          // Streamer reopens via the chevron from collapsed.
+          if (this.liveState === 'collapsed') return;
+          ev.preventDefault();
+          const startY = ev.clientY;
+          const startBody = this.liveBodyHeight;
+          // Disable text-select + show row-resize cursor across the
+          // whole page while drag is active. Class removed on
+          // pointerup so subsequent UI interactions feel normal.
+          document.body.classList.add('live-resizing');
+          // Height the panel snaps closed at — pulling the handle
+          // below this point during drag fully collapses the dock.
+          // Picked to be smaller than the absolute slim minimum
+          // (120px) so the streamer commits to closing rather than
+          // accidentally collapsing on a small slip.
+          const COLLAPSE_THRESHOLD_PX = 60;
+          const onMove = (e) => {
+            // Dragging UP grows the panel (negative dy → positive
+            // delta). Clamp to a sensible range so the panel can't
+            // push past the viewport top.
+            const dy = startY - e.clientY;
+            const min = 120;
+            const max = Math.max(min, (window.innerHeight || 720) - 100);
+            const requested = startBody + dy;
+            if (requested < COLLAPSE_THRESHOLD_PX) {
+              // Snap closed mid-drag. The handle disappears (it's
+              // x-show'd against collapsed) but the drag listener
+              // stays attached to document, so pointerup still
+              // fires the cleanup below.
+              if (this.liveState !== 'collapsed') {
+                this.liveState = 'collapsed';
+                this.liveDragHeight = null;
+                this.liveTick++;
+              }
+              return;
+            }
+            this.liveDragHeight = Math.max(min, Math.min(max, requested));
+            this.liveTick++;
+          };
+          const onUp = () => {
+            document.removeEventListener('pointermove', onMove);
+            document.removeEventListener('pointerup', onUp);
+            document.body.classList.remove('live-resizing');
+            this.persistLive();
+          };
+          document.addEventListener('pointermove', onMove);
+          document.addEventListener('pointerup', onUp);
         },
         openShortcuts() {
           htmx.ajax('GET', '/modals/shortcuts', { target: '#modal-root', swap: 'innerHTML' });
