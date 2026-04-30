@@ -260,6 +260,11 @@ class InsightsService:
         # in _refresh_open_questions when a question drops off the
         # cache so memory doesn't accumulate forever.
         self._question_angles_cache: dict[int, list[str]] = {}
+        # Streamer-authored channel facts, cached with mtime so a hot
+        # call site (every ~3 min) doesn't re-read the file every
+        # pass. Edited file → next call picks up the change.
+        self._facts_text: str = ""
+        self._facts_mtime: float = 0.0
 
     @property
     def cache(self) -> InsightsCache:
@@ -461,8 +466,10 @@ class InsightsService:
                 from .llm.prompts import resolve_prompt
                 response = await self.llm.generate_structured(
                     prompt=prompt,
-                    system_prompt=resolve_prompt(
-                        "insights.talking_points", self.repo,
+                    system_prompt=await self._streamer_facts_prepended(
+                        resolve_prompt(
+                            "insights.talking_points", self.repo,
+                        ),
                     ),
                     response_model=TalkingPointsResponse,
                     num_ctx=INFORMED_NUM_CTX,
@@ -623,8 +630,10 @@ Empty / partial replies are fine. Skipping is the right call when in doubt.
             from .llm.prompts import resolve_prompt
             response = await self.llm.generate_structured(
                 prompt=prompt,
-                system_prompt=resolve_prompt(
-                    "insights.thread_recaps", self.repo,
+                system_prompt=await self._streamer_facts_prepended(
+                    resolve_prompt(
+                        "insights.thread_recaps", self.repo,
+                    ),
                 ),
                 response_model=ThreadRecapsResponse,
                 num_ctx=self.THREAD_RECAP_NUM_CTX,
@@ -1140,8 +1149,10 @@ When in doubt, fewer high-quality points beats more weak ones.
         try:
             response = await self.llm.generate_structured(
                 prompt=prompt,
-                system_prompt=resolve_prompt(
-                    "insights.subject_talking_points", self.repo,
+                system_prompt=await self._streamer_facts_prepended(
+                    resolve_prompt(
+                        "insights.subject_talking_points", self.repo,
+                    ),
                 ),
                 response_model=SubjectTalkingPointsResponse,
                 num_ctx=self.SUBJECT_TALKING_POINTS_NUM_CTX,
@@ -1179,16 +1190,21 @@ When in doubt, fewer high-quality points beats more weak ones.
 
 
     def _load_streamer_facts(self) -> str:
-        """Load streamer-authored channel facts from disk. Prepended to
-        the engaging-subjects system prompt so subject extraction has
-        channel-specific context (recurring bits, current arcs, inside
-        jokes) that the LLM can't infer from chat alone.
+        """Load streamer-authored channel facts from disk, cached with
+        mtime so hot LLM call sites don't re-read the file every pass.
+        Missing / empty / unreadable returns "" — caller falls back
+        to the default prompt without a facts block.
 
-        Missing or empty file returns "" — the prompt just falls back
-        to the default behavior in that case."""
+        Used by `_streamer_facts_prepended` to inject channel-specific
+        context (recurring bits, current arcs, inside jokes) into the
+        system prompt of every LLM call where streamer-grounding helps:
+        engaging-subjects, talking points, thread recaps, subject
+        talking-points, and question answer-angles."""
         from pathlib import Path
         path_str = getattr(self.settings, "streamer_facts_path", "") or ""
         if not path_str:
+            self._facts_text = ""
+            self._facts_mtime = 0.0
             return ""
         p = Path(path_str)
         if not p.is_absolute():
@@ -1196,13 +1212,45 @@ When in doubt, fewer high-quality points beats more weak ones.
             # working directory the dashboard runs from).
             p = Path.cwd() / p
         try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            self._facts_text = ""
+            self._facts_mtime = 0.0
+            return ""
+        if mtime == self._facts_mtime and self._facts_text:
+            return self._facts_text
+        try:
             text = p.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeDecodeError):
             return ""
         # Cap at 4k chars so a runaway file can't blow the context budget.
         if len(text) > 4000:
             text = text[:4000] + "\n\n[…truncated…]"
+        self._facts_text = text
+        self._facts_mtime = mtime
         return text
+
+    async def _streamer_facts_prepended(self, system_prompt: str) -> str:
+        """Prepend the STREAMER-AUTHORED CHANNEL FACTS block to a
+        system prompt when streamer_facts.md is configured and
+        non-empty. Returns the original prompt unchanged when no
+        facts are present, so empty / missing files silently no-op
+        without changing model behavior.
+
+        Reads happen via `asyncio.to_thread` because callers are
+        async and the cache-miss path hits disk; cache-hit is a
+        sync dict load (cheap)."""
+        facts = await asyncio.to_thread(self._load_streamer_facts)
+        if not facts:
+            return system_prompt
+        return (
+            "STREAMER-AUTHORED CHANNEL FACTS (treat as ground "
+            "truth about the streamer / channel — chat references "
+            "to these are real, not hallucinations to be flagged):\n\n"
+            + facts
+            + "\n\n==================================================================\n\n"
+            + system_prompt
+        )
 
     @staticmethod
     def _unit_vec(v: list[float]):
@@ -1500,22 +1548,10 @@ When in doubt, fewer high-quality points beats more weak ones.
                 "chat is too unfocused."
             )
 
-            facts = await asyncio.to_thread(self._load_streamer_facts)
             from .llm.prompts import resolve_prompt
-            base_prompt = resolve_prompt(
-                "insights.engaging_subjects", self.repo,
+            system_prompt = await self._streamer_facts_prepended(
+                resolve_prompt("insights.engaging_subjects", self.repo),
             )
-            system_prompt = base_prompt
-            if facts:
-                system_prompt = (
-                    "STREAMER-AUTHORED CHANNEL FACTS (treat as ground "
-                    "truth about the streamer / channel — chat "
-                    "references to these are real, not hallucinations "
-                    "to be flagged):\n\n"
-                    + facts
-                    + "\n\n==================================================================\n\n"
-                    + base_prompt
-                )
 
             grid_b64 = await self._latest_screenshot_grid(
                 window_minutes=window_min,
@@ -2111,8 +2147,10 @@ Return AT MOST 5 angles. 3 is a fine answer when the question is narrow.
         try:
             response = await self.llm.generate_structured(
                 prompt=prompt,
-                system_prompt=resolve_prompt(
-                    "insights.question_answer_angles", self.repo,
+                system_prompt=await self._streamer_facts_prepended(
+                    resolve_prompt(
+                        "insights.question_answer_angles", self.repo,
+                    ),
                 ),
                 response_model=QuestionAnswerAnglesResponse,
                 num_ctx=self.QUESTION_ANSWER_ANGLES_NUM_CTX,
