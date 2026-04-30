@@ -1,0 +1,146 @@
+{# Engaging-subject modal — opened from the engaging-subjects card.
+
+   Sections (top → bottom):
+     - Header: subject name + meta pills (chatter count, msg count)
+     - Brief: 1-2 sentence observational summary (already cached)
+     - Sub-aspects: extracted angles (already cached)
+     - AI talking points: async-loaded via HTMX (3-5 short lines
+       the streamer could offer back to chat). Generated on first
+       open, cached on the persistent subject until the next
+       engaging-subjects refresh surfaces this subject again with
+       new context.
+     - Drivers: clickable pills → /users
+     - Chat context: verbatim cited messages, scrollable
+
+   Footer: Dismiss action (rejects the subject + adds to blocklist),
+   matches the card-level dismiss but is more deliberate (modal
+   confirms intent better than a tiny x in a card corner). #}
+{% set modal_title = subject.name %}
+{% set modal_icon = 'fa-fire' %}
+{% set modal_tone = 'accent' %}
+{% set modal_size = 'lg' %}
+{% extends "components/_modal.html" %}
+{% block modal_body %}
+<div class="space-y-4 text-sm">
+
+  {# Meta strip — chatter count + message count + age #}
+  <div class="flex items-center gap-2 flex-wrap text-xs">
+    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-accent/30 bg-accent/15 text-accent">
+      <i class="fa-solid fa-users text-[10px]"></i>
+      {{ subject.drivers | length }} chatter{{ '' if subject.drivers|length == 1 else 's' }}
+    </span>
+    {% if subject.msg_count %}
+      <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-subtle bg-surface-raised text-muted">
+        <i class="fa-solid fa-comments text-[10px]"></i>
+        {{ subject.msg_count }} message{{ '' if subject.msg_count == 1 else 's' }}
+      </span>
+    {% endif %}
+  </div>
+
+  {# Brief — observational summary #}
+  {% if subject.brief %}
+  <div>
+    <p class="text-[11px] uppercase tracking-wider text-muted mb-1">brief</p>
+    <p class="text-primary leading-snug">{{ subject.brief }}</p>
+  </div>
+  {% endif %}
+
+  {# Sub-aspects — already extracted, cheap to render inline #}
+  {% if subject.angles %}
+  <div>
+    <p class="text-[11px] uppercase tracking-wider text-muted mb-1">sub-aspects</p>
+    <ul class="space-y-1">
+      {% for a in subject.angles %}
+        <li class="flex items-start gap-2 text-primary">
+          <i class="fa-solid fa-circle text-accent text-[5px] mt-2 shrink-0"></i>
+          <span>{{ a }}</span>
+        </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {# AI talking points — async-loaded via HTMX. The endpoint
+     returns a partial that replaces this whole div on success;
+     on failure it returns a small error block so the streamer
+     knows why the section is empty. Loads on `intersect once`
+     so it fires the moment the modal becomes visible. #}
+  <div hx-get="/insights/subject/{{ subject.slug }}/talking-points"
+       hx-trigger="intersect once"
+       hx-swap="outerHTML">
+    <p class="text-[11px] uppercase tracking-wider text-muted mb-1">talking points</p>
+    <div class="flex items-center gap-2 text-xs text-muted italic py-2">
+      <i class="fa-solid fa-spinner fa-spin text-accent"></i>
+      generating points the streamer could offer back to chat…
+    </div>
+  </div>
+
+  {# Drivers — clickable to jump to per-user page. Resolved
+     server-side because driver names are display strings; we
+     need the alias-aware lookup to map to twitch_id. #}
+  {% if driver_links %}
+  <div>
+    <p class="text-[11px] uppercase tracking-wider text-muted mb-1">drivers</p>
+    <div class="flex flex-wrap gap-1">
+      {% for d in driver_links %}
+        {% if d.user_id %}
+          <a href="/users/{{ d.user_id }}"
+             class="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full border border-accent/30 bg-accent/15 text-accent hover:bg-accent/25 transition-all duration-150 ease-out"
+             onclick="window.chatterbotCloseModal()">
+            <i class="fa-solid fa-user text-[10px]"></i> {{ d.name }}
+          </a>
+        {% else %}
+          <span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full border border-subtle bg-surface-raised text-muted">
+            <i class="fa-solid fa-user-slash text-[10px]"></i> {{ d.name }}
+          </span>
+        {% endif %}
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {# Chat context — verbatim cited messages, scrollable #}
+  <div>
+    <p class="text-[11px] uppercase tracking-wider text-muted mb-1">
+      chat context
+      <span class="text-[10px]">({{ messages | length }} message{{ '' if messages|length == 1 else 's' }})</span>
+    </p>
+    {% if not messages %}
+      <p class="text-muted italic text-xs">No messages currently grounded for this subject.</p>
+    {% else %}
+    <ul class="divide-y divide-subtle rounded-xl border border-subtle bg-surface max-h-72 overflow-y-auto">
+      {% for m in messages %}
+        <li class="px-3 py-2 text-sm flex items-baseline gap-2">
+          <span class="text-[11px] text-muted whitespace-nowrap">{{ m.ts | short_ts }}</span>
+          <a href="/users/{{ m.user_id }}"
+             class="text-accent hover:underline font-medium"
+             onclick="window.chatterbotCloseModal()">{{ m.name }}</a>
+          <span class="break-words text-primary">{{ m.content }}</span>
+        </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+
+  {# Footer actions — dismiss is here as a confirmed action so the
+     card's dismiss can be subtler (just an icon). The modal-side
+     dismiss does the same thing (POST /insights/subject/{slug}/reject)
+     and closes the modal on success. #}
+  <div class="pt-2 border-t border-subtle flex items-center justify-between gap-2">
+    <button type="button"
+            class="text-xs inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-danger/30 bg-danger/5 hover:bg-danger/15 text-danger transition-all duration-150 ease-out"
+            hx-post="/insights/subject/{{ subject.slug }}/reject"
+            hx-swap="outerHTML"
+            hx-target="#subject-row-{{ subject.slug }}"
+            hx-on::after-request="window.chatterbotCloseModal()"
+            title="The LLM got this subject wrong, or chat has moved on. Adds it to the blocklist so future passes skip it.">
+      <i class="fa-solid fa-circle-xmark text-[11px]"></i> Dismiss subject
+    </button>
+    <button type="button"
+            class="text-xs inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-subtle bg-surface-raised hover:bg-surface-raised/80 text-muted transition-all duration-150 ease-out"
+            onclick="window.chatterbotCloseModal()">
+      Close
+    </button>
+  </div>
+</div>
+{% endblock %}

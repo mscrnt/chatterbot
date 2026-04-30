@@ -1,0 +1,39 @@
+{# Talking-points partial — replaces the placeholder block in
+   modals/_engaging_subject.html via HTMX outerHTML swap.
+
+   Rendered three ways depending on the route's outcome:
+     - `points` non-empty       → ordered list, accent bullet
+     - `points` empty + `error` → small inline warning with the
+                                  reason, no fake content
+     - `points` empty + no err  → "no points to surface" empty
+                                  state (rare — usually the
+                                  subject has enough material) #}
+<div>
+  <div class="flex items-baseline justify-between mb-1">
+    <p class="text-[11px] uppercase tracking-wider text-muted">talking points</p>
+    {% if points %}
+      <span class="text-[10px] text-muted">
+        {{ points | length }} suggestion{{ '' if points|length == 1 else 's' }}
+      </span>
+    {% endif %}
+  </div>
+  {% if points %}
+    <ul class="space-y-1.5 rounded-xl border border-accent/20 bg-accent/5 p-3">
+      {% for p in points %}
+        <li class="flex items-start gap-2 text-sm text-primary leading-snug">
+          <i class="fa-solid fa-comment-dots text-accent text-[11px] mt-1 shrink-0"></i>
+          <span>{{ p }}</span>
+        </li>
+      {% endfor %}
+    </ul>
+  {% elif error %}
+    <p class="text-xs text-warning italic inline-flex items-center gap-1">
+      <i class="fa-solid fa-triangle-exclamation"></i> {{ error }}
+    </p>
+  {% else %}
+    <p class="text-xs text-muted italic">
+      No grounded talking points to surface — the subject's chat
+      context may be too thin to riff on.
+    </p>
+  {% endif %}
+</div>

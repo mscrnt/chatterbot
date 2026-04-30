@@ -395,6 +395,12 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         dependencies=deps,
         lifespan=_lifespan,
     )
+    # Expose key services on app.state so TestClient + diagnostic
+    # tooling can introspect cache state without monkeypatching
+    # the create_app closure's bindings. Production routes still
+    # access these via closure references — app.state is purely a
+    # secondary hook.
+    app.state.insights_service = insights
     app.mount(
         "/static",
         StaticFiles(directory=str(WEB_DIR / "static")),
@@ -2576,43 +2582,82 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         resp.headers["HX-Trigger"] = "insights-state-changed"
         return resp
 
-    @app.get("/insights/subject/{slug}/expand", response_class=HTMLResponse)
-    async def subject_expand(request: Request, slug: str):
-        """Render the expand-on-click body for an engaging subject:
-        the brief + angles (already in cache) + the verbatim messages
-        the LLM cited as supporting this subject. No LLM call — pure
-        SQL.
+    @app.get("/modals/subject/{slug}", response_class=HTMLResponse)
+    async def modal_subject(request: Request, slug: str):
+        """Render the engaging-subject modal body. Replaces the
+        slice-7 `/insights/subject/{slug}/expand` inline-expand
+        route — the streamer now opens a focused modal instead of
+        unfolding card content in place.
 
-        Pulls by `msg_ids` directly when the cache has them
-        (slice-7 pipeline cites supporting message ids per subject).
-        Falls back to the older driver-based name lookup for any
-        cache entry that pre-dates the new field."""
+        The modal is built from cached state (subject metadata +
+        cited messages); the AI talking-points section is loaded
+        async on first paint via /insights/subject/{slug}/talking-points
+        so the modal opens instantly even when the LLM call is
+        slow."""
         subject = next(
             (s for s in insights.subjects_cache.subjects if s.slug == slug),
             None,
         )
         if subject is None:
             raise HTTPException(404, "subject not found in cache")
-        within = int(getattr(
-            settings, "engaging_subjects_lookback_minutes", 20,
-        ))
+        # Cited messages = exactly what the LLM grounded the subject
+        # in. Falls back to a name-based lookup when msg_ids is
+        # empty (defensive — slice-7 always populates it).
         if getattr(subject, "msg_ids", None):
-            # Cited messages = exactly what the LLM grounded the
-            # subject in. Far more accurate than re-querying every
-            # message a driver sent in the lookback window.
-            msgs = await asyncio.to_thread(
+            messages = await asyncio.to_thread(
                 repo.get_messages_by_ids, list(subject.msg_ids),
             )
         elif subject.drivers:
-            msgs = repo.messages_for_names_within(
+            within = int(getattr(
+                settings, "engaging_subjects_lookback_minutes", 20,
+            ))
+            messages = repo.messages_for_names_within(
                 subject.drivers, within_minutes=within, limit=40,
             )
         else:
-            msgs = []
+            messages = []
+        # Resolve drivers to twitch_ids (alias-aware) so the modal's
+        # driver pills can link to /users/<twitch_id>. Mirrors the
+        # thread-modal route's pattern.
+        driver_links = []
+        for name in subject.drivers:
+            user = repo.find_user_by_alias_or_name(name)
+            driver_links.append({
+                "name": name,
+                "user_id": user.twitch_id if user else None,
+            })
         return TEMPLATES.TemplateResponse(
             request,
-            "partials/engaging_subject_expand.html",
-            {"subject": subject, "messages": msgs, "within_minutes": within},
+            "modals/_engaging_subject.html",
+            {
+                "subject": subject,
+                "messages": messages,
+                "driver_links": driver_links,
+            },
+        )
+
+    @app.get(
+        "/insights/subject/{slug}/talking-points",
+        response_class=HTMLResponse,
+    )
+    async def subject_talking_points(request: Request, slug: str):
+        """On-demand talking-points partial. Fired by the modal's
+        HTMX `intersect once` trigger so the modal opens instantly
+        and this lazy-loads in the background.
+
+        Cached on the persistent subject for as long as the subject
+        hasn't been resurfaced (= same chat context) — re-opening
+        the modal within the same engaging-subjects refresh cycle
+        is free, no LLM call."""
+        try:
+            points, error = await insights.generate_subject_talking_points(slug)
+        except Exception:
+            logger.exception("subject talking-points: unexpected error")
+            points, error = [], "internal error generating points"
+        return TEMPLATES.TemplateResponse(
+            request,
+            "partials/engaging_subject_talking_points.html",
+            {"points": points, "error": error, "slug": slug},
         )
 
     @app.post("/insights/subject/{slug}/reject", response_class=HTMLResponse)

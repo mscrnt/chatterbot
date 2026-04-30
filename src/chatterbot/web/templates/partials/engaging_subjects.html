@@ -1,19 +1,16 @@
 {# Engaging subjects panel — distinct conversation subjects extracted
-   from recent chat by the LLM. Each row expands on click to reveal:
-     - 1-2 sentence observational brief
-     - up to 3 sub-aspects ("angles") that have come up
-     - recent verbatim messages from the subject's drivers
+   from recent chat by the LLM. Each card opens a modal on click
+   (slice-8) showing brief + angles + AI talking points + chat
+   context.
 
-   Pure observation — no "you should…" prescription. Streamer scans
-   the panel and decides what to lean into.
+   Card layout: name (large), brief (one line, muted), meta strip
+   at the bottom (chatters · msgs). The dismiss action is a small
+   icon in the top-right corner that fades in on hover — keeps the
+   card visually clean while still giving the streamer a one-click
+   way to flag a hallucinated subject.
 
-   "drunk Qwen" / wrong button (top-right of each row) adds the subject
-   to a session blocklist; the next extraction pass skips it. Used when
-   the LLM hallucinates a subject (e.g. "FF8 remake" from one passing
-   mention). Belt-and-suspenders: filter at cache-write time too.
-
-   Sensitive subjects (religion / politics / controversy) are stripped
-   at the prompt + cache layer; nothing here surfaces them. #}
+   Sensitive subjects (religion / politics / controversy) are
+   stripped at the prompt + cache layer; nothing here surfaces them. #}
 {% from "partials/_panel.html" import panel %}
 {% set _subjects_age = engaging_subjects_age_seconds %}
 {% set _has_subjects = engaging_subjects and engaging_subjects | length > 0 %}
@@ -32,60 +29,76 @@
       Chat is too quiet or unfocused to identify distinct subjects right now.
     </p>
   {% else %}
-    <ul class="divide-y divide-subtle rounded-xl border border-accent/30 bg-accent/5 overflow-hidden">
+    {# Grid of cards. One column on mobile, two on sm+ — keeps
+       each card wide enough for a single-line brief without
+       wrapping aggressively. #}
+    <ul class="grid grid-cols-1 sm:grid-cols-2 gap-2">
       {% for s in engaging_subjects %}
         <li id="subject-row-{{ s.slug }}"
-            class="insight-card-root"
-            x-data="{ open: false }">
-          {# Row header — clickable to toggle expand #}
-          <div class="px-3 py-2.5 flex items-baseline gap-2 flex-wrap cursor-pointer hover:bg-accent/10 transition-all duration-150 ease-out"
-               @click="open = !open">
-            <i class="fa-solid text-accent text-[10px] shrink-0"
-               :class="open ? 'fa-chevron-down' : 'fa-chevron-right'"></i>
-            <span class="font-medium text-primary text-sm sm:text-base">{{ s.name }}</span>
-            <span class="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] uppercase tracking-wide rounded-full bg-accent/15 text-accent border border-accent/30">
-              <i class="fa-solid fa-users text-[9px]"></i>
-              {{ s.drivers | length }} chatter{{ '' if s.drivers|length == 1 else 's' }}
-            </span>
-            {% if s.msg_count %}
-              <span class="text-[10px] text-muted">{{ s.msg_count }} msg{{ '' if s.msg_count == 1 else 's' }}</span>
-            {% endif %}
-            {# "wrong" / drunk-Qwen reject button. POSTs to the reject
-               route, removes the row on success, adds to the prompt
-               blocklist for future passes. #}
-            <button type="button"
-                    class="ml-auto tap inline-flex items-center justify-center px-2 py-0.5 rounded text-[10px] uppercase tracking-wider bg-danger/10 hover:bg-danger/25 text-danger border border-danger/30 transition-all duration-150 ease-out"
-                    title="Dismiss this subject — the LLM got it wrong, or chat has moved on. Adds it to the blocklist so future extraction passes skip it."
-                    hx-post="/insights/subject/{{ s.slug }}/reject"
-                    hx-swap="outerHTML"
-                    hx-target="#subject-row-{{ s.slug }}"
-                    @click.stop>
-              <i class="fa-solid fa-xmark text-[9px]"></i> dismiss
-            </button>
-          </div>
-
-          {# Inline brief + angles — always visible since they're cheap.
-             Driver chips are inside the expand body since they get
-             repeated context in the messages list there. #}
-          {% if s.brief %}
-            <p class="px-3 pb-2 -mt-1 text-[12px] text-primary leading-snug">{{ s.brief }}</p>
-          {% endif %}
-
-          {# Expanded body — htmx-loaded on first open so we don't
-             pre-fetch every subject's messages. Cached for the row's
-             lifetime; closing/reopening doesn't re-fetch. #}
-          <div x-show="open"
-               x-cloak
-               x-transition:enter="transition duration-150 ease-out"
-               x-transition:enter-start="opacity-0 -translate-y-1"
-               x-transition:enter-end="opacity-100 translate-y-0"
-               class="px-3 pb-3 pt-1 border-t border-accent/20 bg-canvas/30">
-            <div hx-get="/insights/subject/{{ s.slug }}/expand"
-                 hx-trigger="intersect once"
-                 hx-swap="innerHTML">
-              <p class="text-xs text-muted italic py-2">loading context…</p>
+            class="insight-card-root group relative">
+          {# Whole-card click target. Loads the modal via HTMX
+             into #modal-root (defined in base.html). Cursor +
+             hover state make the affordance obvious. #}
+          <button type="button"
+                  class="w-full text-left rounded-xl border border-accent/25 bg-accent/5
+                         hover:border-accent/50 hover:bg-accent/10
+                         focus:outline-none focus:ring-2 focus:ring-accent/40
+                         transition-all duration-150 ease-out
+                         px-3 py-3"
+                  hx-get="/modals/subject/{{ s.slug }}"
+                  hx-target="#modal-root"
+                  hx-swap="innerHTML"
+                  title="Open subject details">
+            <div class="flex items-baseline gap-2">
+              <i class="fa-solid fa-fire text-accent text-[11px] mt-0.5 shrink-0"></i>
+              <span class="flex-1 font-medium text-primary text-sm sm:text-base leading-snug">
+                {{ s.name }}
+              </span>
             </div>
-          </div>
+            {% if s.brief %}
+              <p class="text-[12px] text-muted leading-snug mt-1.5 line-clamp-2">
+                {{ s.brief }}
+              </p>
+            {% endif %}
+            <div class="flex items-center gap-2 flex-wrap mt-2 text-[10px]">
+              <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-accent/15 text-accent border border-accent/25">
+                <i class="fa-solid fa-users text-[9px]"></i>
+                {{ s.drivers | length }} chatter{{ '' if s.drivers|length == 1 else 's' }}
+              </span>
+              {% if s.msg_count %}
+                <span class="inline-flex items-center gap-1 text-muted">
+                  <i class="fa-solid fa-comments text-[9px]"></i>
+                  {{ s.msg_count }} msg{{ '' if s.msg_count == 1 else 's' }}
+                </span>
+              {% endif %}
+              {% if s.angles %}
+                <span class="inline-flex items-center gap-1 text-muted"
+                      title="{{ s.angles | join(' · ') }}">
+                  <i class="fa-solid fa-tags text-[9px]"></i>
+                  {{ s.angles | length }} angle{{ '' if s.angles|length == 1 else 's' }}
+                </span>
+              {% endif %}
+            </div>
+          </button>
+
+          {# Hover-revealed dismiss icon. Lives outside the
+             button (which would be illegal nesting) but absolutely
+             positioned over its top-right corner. Opacity 0 by
+             default, full on group-hover or focus-within. The
+             title attribute carries the explanation since there's
+             no inline label anymore. #}
+          <button type="button"
+                  class="absolute top-1.5 right-1.5 p-1 rounded
+                         text-muted hover:text-danger
+                         opacity-0 group-hover:opacity-100 focus:opacity-100
+                         transition-opacity duration-150 ease-out"
+                  title="Dismiss this subject — the LLM got it wrong, or chat has moved on. Adds it to the blocklist so future extraction passes skip it."
+                  aria-label="Dismiss subject"
+                  hx-post="/insights/subject/{{ s.slug }}/reject"
+                  hx-swap="outerHTML"
+                  hx-target="#subject-row-{{ s.slug }}">
+            <i class="fa-solid fa-xmark text-xs"></i>
+          </button>
         </li>
       {% endfor %}
     </ul>

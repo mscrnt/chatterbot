@@ -329,6 +329,36 @@ class EngagingSubjectsResponse(BaseModel):
     subjects: list[EngagingSubject] = Field(default_factory=list, max_length=12)
 
 
+# ---- per-subject talking points (modal on-demand) ----
+
+SubjectTalkingPointText = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=240, strip_whitespace=True),
+]
+
+
+class SubjectTalkingPointsResponse(BaseModel):
+    """Reply for the on-demand "what could I say about this subject"
+    LLM call fired when the streamer opens the engaging-subject
+    modal. Distinct from the per-chatter `TalkingPointsResponse` —
+    those are conversation hooks for individual chatters; these are
+    things the streamer could SAY about a subject the room is
+    actively discussing.
+
+    The LLM gets the subject name + brief + cited messages + recent
+    streamer transcripts and returns 3-5 short grounded points the
+    streamer could offer back to chat. Empty list is allowed when
+    the subject is too thin to riff on (rare — by the time it's a
+    cached engaging-subject, there's usually 5+ messages of context).
+
+    `points` are ordered most-engaging first; the modal renders
+    them in that order. Each must paraphrase content actually
+    visible in the input — never invent products / events / people
+    not attested in the messages."""
+
+    points: list[SubjectTalkingPointText] = Field(default_factory=list, max_length=5)
+
+
 # ---- open chat questions (LLM filter over heuristic candidates) ----
 
 OpenQuestionText = Annotated[

@@ -79,6 +79,14 @@ class _PersistentSubject:
     # refreshes. Used to power the "see source messages" expansion
     # when the streamer clicks a subject row.
     msg_ids: list[int] = field(default_factory=list)
+    # Per-subject talking points cache. Generated on demand when the
+    # streamer opens the modal. Invalidated when the subject's
+    # `last_seen_ts` advances (= the engaging-subjects refresh
+    # surfaced this subject again with new context). Avoids paying
+    # for an LLM call on every modal open while keeping the points
+    # fresh as the conversation evolves.
+    talking_points: list[str] = field(default_factory=list)
+    talking_points_at: float = 0.0   # last_seen_ts at generation
 
 
 TALKING_POINTS_SYSTEM = """You help a Twitch streamer remember conversation hooks for chatters who are active in their chat right now. The streamer reads your output on a second monitor while streaming and uses it to engage with chat — your output never returns to chat itself.
@@ -975,6 +983,168 @@ Good output:
             note=None,
         )
         return n
+
+    # =========================================================
+    # Per-subject talking points — on-demand modal LLM call.
+    # Distinct from the per-chatter `TalkingPointsResponse` (which
+    # produces hooks for individual chatters). This call asks the
+    # model "what could the streamer say ABOUT this subject, given
+    # the room's actual messages?" — output is 3-5 short
+    # observational lines the streamer can offer back to chat.
+    # =========================================================
+
+    SUBJECT_TALKING_POINTS_NUM_CTX = INFORMED_NUM_CTX
+
+    SUBJECT_TALKING_POINTS_SYSTEM = """You help a Twitch streamer think of things to say about a conversation chat is having right now. The streamer reads your output on a second monitor and uses it to engage with chat — your output never returns to chat itself.
+
+You'll receive:
+  - SUBJECT — the conversation chat is having (a short subject line)
+  - BRIEF — a 1-2 sentence observational summary of what's been said
+  - SUB-ASPECTS — up to 4 specific angles that have come up in the messages
+  - MESSAGES — the verbatim chat messages that ground the subject (numbered)
+  - Optional context blocks (use as silent grounding, do not parrot back):
+    - CHANNEL CONTEXT — what the streamer is playing / streaming right now
+    - STREAMER VOICE — a recent transcript of what the streamer just said
+    - An attached screenshot — what's on screen right now
+
+Produce 3-5 short TALKING POINTS the streamer could offer back to chat. Each is one line, under 25 words, written as something the streamer might naturally say (NOT as advice TO the streamer).
+
+GOOD shape:
+  - "I've found the parry timing way easier with claymore than with kunai."
+  - "Ngl, I keep dying to that boss too — anyone running a different setup?"
+  - "Worth noting the patch nerfed izuna's hyper-armor; that's why it feels off."
+
+HARD RULES (violations make the dashboard worse, not better):
+- ONLY paraphrase content visible in MESSAGES, BRIEF, SUB-ASPECTS, or the streamer's own transcripts. Do not bridge, infer, or extrapolate beyond that.
+- NEVER invent products, releases, events, places, people, or facts that aren't directly attested. If chatters talk about an "FF8 remake," you do NOT know one exists — phrase as "they mentioned an FF8 remake" or "if there's an FF8 remake."
+- Stay observational + grounded. Each point should be something the streamer can say WITHOUT putting words in chatters' mouths.
+- Don't tell the streamer what to do ("you should ask…", "consider mentioning…"). Write the point AS the streamer would say it.
+- Don't repeat the same point with different wording.
+- Empty `points` list is acceptable when the subject is too thin to grounded-riff on (rare — usually the subject has enough material by the time it's surfaced).
+
+When in doubt, fewer high-quality points beats more weak ones.
+"""
+
+    async def generate_subject_talking_points(
+        self, slug: str, *, force: bool = False,
+    ) -> tuple[list[str], str | None]:
+        """Generate per-subject talking points for the modal.
+
+        Returns `(points, error)` — `error` is None on success, a
+        short string when the LLM call failed (caller surfaces it
+        on the modal so the streamer knows why the section is
+        empty rather than hallucinating placeholder content).
+
+        Caches on the persistent subject's `talking_points` field.
+        Cache invalidates when `last_seen_ts` has advanced past
+        `talking_points_at` — i.e., the engaging-subjects refresh
+        surfaced this subject with new chat context since we last
+        generated. `force=True` bypasses the cache (used by a
+        streamer-driven "regenerate" button if we add one later).
+
+        Lookups by slug because that's what the dashboard knows;
+        the slug is sha1(name.lower())[:12] which we hash on the
+        fly to avoid storing slugs on `_PersistentSubject` (the
+        name is the source of truth — slug is for transport)."""
+        import hashlib as _h
+
+        # Find the persistent subject whose name matches the slug.
+        # Walk the dict — typically <50 entries, so O(n) lookup is
+        # fine and avoids carrying a slug index that could go
+        # stale during identity matching renames.
+        match: _PersistentSubject | None = None
+        for s in self._subjects.values():
+            if _h.sha1(s.name.lower().encode("utf-8")).hexdigest()[:12] == slug:
+                match = s
+                break
+        if match is None:
+            return [], "subject not found"
+        if match.is_sensitive:
+            # Defense in depth — sensitive subjects shouldn't be
+            # queryable through the modal.
+            return [], "subject is filtered"
+
+        # Cache hit: same slug, no new chat context since the last
+        # generation. Re-opening the modal is free.
+        if (
+            not force
+            and match.talking_points
+            and match.talking_points_at >= match.last_seen_ts
+        ):
+            return list(match.talking_points), None
+
+        # Hydrate the cited messages (current persistent msg_ids
+        # cover historical refreshes too — gives the LLM more
+        # signal than just the most-recent window).
+        try:
+            msgs = await asyncio.to_thread(
+                self.repo.get_messages_by_ids, list(match.msg_ids[-50:]),
+            )
+        except Exception:
+            logger.exception("subject talking points: hydrate failed")
+            msgs = []
+
+        if not msgs:
+            return [], "no chat context to ground on"
+
+        # Build the prompt blocks. Reuses the same context shape
+        # the engaging-subjects pass uses — channel context +
+        # streamer voice + numbered messages — so output style
+        # stays consistent with the rest of the dashboard's LLM
+        # surfaces.
+        channel_context = self._build_channel_context(authoritative=False)
+        transcript_block = await self._latest_transcript_summary()
+        grid_b64 = await self._latest_screenshot_grid(window_minutes=20)
+
+        message_lines = "\n".join(
+            f"  [id {m.id}] [{m.name}] {m.content[:240]}"
+            for m in msgs[-30:]
+        )
+        angles_lines = (
+            "\n".join(f"  - {a}" for a in match.angles)
+            if match.angles else "  (none extracted)"
+        )
+
+        prompt = (
+            channel_context
+            + transcript_block
+            + f"SUBJECT: {match.name}\n\n"
+            + f"BRIEF: {match.brief or '(no brief)'}\n\n"
+            + f"SUB-ASPECTS:\n{angles_lines}\n\n"
+            + f"MESSAGES (numbered):\n{message_lines}\n\n"
+            + "Produce 3-5 short talking points the streamer could "
+            "say back to chat about this subject. Each one paraphrases "
+            "something visible in the input — no invented facts."
+        )
+        if grid_b64:
+            prompt += (
+                "\n\nAn image is attached showing what is currently "
+                "on screen. Use it ONLY as silent context. Do NOT "
+                "describe the image."
+            )
+
+        from .llm.schemas import SubjectTalkingPointsResponse
+        try:
+            response = await self.llm.generate_structured(
+                prompt=prompt,
+                system_prompt=self.SUBJECT_TALKING_POINTS_SYSTEM,
+                response_model=SubjectTalkingPointsResponse,
+                num_ctx=self.SUBJECT_TALKING_POINTS_NUM_CTX,
+                images=[grid_b64] if grid_b64 else None,
+                think=True,
+                call_site="insights.subject_talking_points",
+            )
+        except ValidationError as e:
+            logger.warning("subject-talking-points validation failed: %s", e)
+            return [], "the model's response didn't validate"
+        except Exception:
+            logger.exception("subject-talking-points LLM call failed")
+            return [], "LLM call failed (check server logs)"
+
+        points = [p.strip() for p in response.points if p.strip()]
+        match.talking_points = points
+        match.talking_points_at = match.last_seen_ts or time.time()
+        return list(points), None
 
     def _build_channel_context(self, *, authoritative: bool = False) -> str:
         """Delegate to the shared TwitchStatus.format_for_llm so every

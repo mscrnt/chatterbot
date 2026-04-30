@@ -430,3 +430,169 @@ async def test_cache_entry_carries_msg_ids_for_expand_route(svc, mock_llm, make_
     # Slug is still derived from the name, same shape as before.
     assert cached.slug
     assert len(cached.slug) == 12
+
+
+# ---- per-subject talking points (modal) ----
+
+
+from chatterbot.llm.schemas import SubjectTalkingPointsResponse  # noqa: E402
+
+
+async def _refresh_with_subject(svc, mock_llm, make_message,
+                                *, name: str = "A subject") -> str:
+    """Helper: drive one engaging-subjects refresh that surfaces a
+    single subject and return its slug. Used as setup for the
+    talking-points tests below."""
+    ids = _seed_chat(make_message, "m1", "m2", "m3", "m4", "m5")
+    mock_llm.queue_response(
+        call_site="insights.engaging_subjects",
+        response=EngagingSubjectsResponse(subjects=[EngagingSubject(
+            name=name, drivers=["alice"], msg_count=3,
+            brief="some brief", angles=["a1", "a2"],
+            message_ids=ids[:3],
+        )]),
+    )
+    await svc._refresh_engaging_subjects()
+    return svc.subjects_cache.subjects[0].slug
+
+
+async def test_talking_points_uses_correct_call_site(svc, mock_llm, make_message):
+    """The talking-points generator must fire the LLM with
+    `call_site="insights.subject_talking_points"` so the dataset
+    capture and the call-site registry stay aligned. Slice-2's
+    test_call_sites.py asserts the registry; this test asserts the
+    runtime call passes the right value."""
+    slug = await _refresh_with_subject(svc, mock_llm, make_message)
+    mock_llm.queue_response(
+        call_site="insights.subject_talking_points",
+        response=SubjectTalkingPointsResponse(points=[
+            "I've been thinking about that too.",
+            "Worth comparing notes on that boss.",
+        ]),
+    )
+    points, error = await svc.generate_subject_talking_points(slug)
+    assert error is None
+    assert len(points) == 2
+    # Most-recent recorded call carries the right call_site.
+    last = mock_llm.calls[-1]
+    assert last.call_site == "insights.subject_talking_points"
+    assert last.response_model_name == "SubjectTalkingPointsResponse"
+
+
+async def test_talking_points_returns_error_on_unknown_slug(svc, mock_llm, make_message):
+    """Unknown slug → `(empty, "subject not found")`. Modal's
+    fallback partial renders the error inline so the streamer
+    sees why the section is empty rather than a blank box."""
+    points, error = await svc.generate_subject_talking_points("no-such-slug")
+    assert points == []
+    assert "not found" in (error or "").lower()
+
+
+async def test_talking_points_cache_skips_second_llm_call(svc, mock_llm, make_message):
+    """Same slug + no new chat context = cache hit. Re-opening
+    the modal within the same engaging-subjects refresh cycle
+    must NOT fire a second LLM call."""
+    slug = await _refresh_with_subject(svc, mock_llm, make_message)
+    mock_llm.queue_response(
+        call_site="insights.subject_talking_points",
+        response=SubjectTalkingPointsResponse(points=["one", "two"]),
+    )
+    points1, _ = await svc.generate_subject_talking_points(slug)
+    n_after_first = len(mock_llm.calls)
+
+    # Second call — must hit the cache, no LLM call.
+    points2, _ = await svc.generate_subject_talking_points(slug)
+    assert points1 == points2
+    assert len(mock_llm.calls) == n_after_first
+
+
+async def test_talking_points_cache_invalidates_on_resurface(
+    svc, mock_llm, make_message,
+):
+    """When the engaging-subjects refresh surfaces the subject
+    again with new chat context (last_seen_ts advances), the
+    talking-points cache becomes stale and the next modal-open
+    fires the LLM again. This keeps points fresh as the
+    conversation evolves."""
+    slug = await _refresh_with_subject(svc, mock_llm, make_message)
+
+    # First generation populates the cache.
+    mock_llm.queue_response(
+        call_site="insights.subject_talking_points",
+        response=SubjectTalkingPointsResponse(points=["original 1", "original 2"]),
+    )
+    await svc.generate_subject_talking_points(slug)
+
+    # Drive another engaging-subjects refresh — same name, same
+    # subject_id → last_seen_ts advances. The talking-points cache
+    # must invalidate.
+    new_ids = _seed_chat(
+        make_message, "newm1", "newm2", "newm3", "newm4", "newm5",
+        name="bob",
+    )
+    mock_llm.queue_response(
+        call_site="insights.engaging_subjects",
+        response=EngagingSubjectsResponse(subjects=[EngagingSubject(
+            name="A subject",  # exact same name
+            drivers=["bob"], msg_count=2,
+            brief="updated brief", angles=["new angle"],
+            message_ids=new_ids[:2],
+        )]),
+    )
+    await svc._refresh_engaging_subjects()
+
+    # Force the identity-match path to find the existing subject.
+    svc.settings = SimpleNamespace(
+        engaging_subjects_identity_threshold=-1.1,
+        screenshot_interval_seconds=0, db_path="ignored",
+    )
+
+    # New talking-points response queued.
+    mock_llm.queue_response(
+        call_site="insights.subject_talking_points",
+        response=SubjectTalkingPointsResponse(points=["fresh 1", "fresh 2"]),
+    )
+    points, _ = await svc.generate_subject_talking_points(slug)
+    assert points == ["fresh 1", "fresh 2"]
+
+
+async def test_talking_points_force_bypasses_cache(svc, mock_llm, make_message):
+    """`force=True` always fires a fresh LLM call even when the
+    cache is valid. Pinning the contract so a future "regenerate"
+    button on the modal can rely on it."""
+    slug = await _refresh_with_subject(svc, mock_llm, make_message)
+    mock_llm.queue_response(
+        call_site="insights.subject_talking_points",
+        response=SubjectTalkingPointsResponse(points=["first"]),
+    )
+    await svc.generate_subject_talking_points(slug)
+    n_after_first = len(mock_llm.calls)
+
+    mock_llm.queue_response(
+        call_site="insights.subject_talking_points",
+        response=SubjectTalkingPointsResponse(points=["second"]),
+    )
+    points, _ = await svc.generate_subject_talking_points(slug, force=True)
+    assert points == ["second"]
+    assert len(mock_llm.calls) == n_after_first + 1
+
+
+async def test_talking_points_no_messages_returns_grounded_error(
+    svc, mock_llm, make_message,
+):
+    """If the subject's persistent msg_ids resolve to no actual
+    messages (DB churn), the generator returns a grounded-on-
+    nothing error rather than calling the LLM with empty context.
+    Defends against hallucinated points."""
+    slug = await _refresh_with_subject(svc, mock_llm, make_message)
+    # Wipe the persistent subject's msg_ids so hydration returns [].
+    persistent = next(iter(svc._subjects.values()))
+    persistent.msg_ids = []
+
+    points, error = await svc.generate_subject_talking_points(slug)
+    assert points == []
+    assert error and "no chat context" in error.lower()
+    # Most importantly: no LLM call fired against an empty prompt.
+    last_calls = [c for c in mock_llm.calls
+                  if c.call_site == "insights.subject_talking_points"]
+    assert last_calls == []
