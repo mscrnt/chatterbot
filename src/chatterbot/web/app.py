@@ -3103,6 +3103,9 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         "address_engaging_subjects",
         "address_high_impact",
         "clear_due_snoozes",
+        # Streamer-typed freeform topics — progress counted via
+        # cosine search of vec_transcripts since the goal was set.
+        "custom_topic",
     )
 
     # Map each goal kind → (insight kind to filter on, label, default
@@ -3123,12 +3126,62 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         request: Request,
         kind: Annotated[str, Form()],
         count: Annotated[int, Form()] = 1,
+        text: Annotated[str, Form()] = "",
     ):
         """Set/update the current stream's goal targets. Append-only — each
         new POST adds another goal to the list. POST kind='clear' to reset
-        all; POST kind='<known>' with count<=0 to remove just that one."""
+        all; POST kind='<known>' with count<=0 to remove just that one.
+
+        For kind='custom_topic', also accepts a `text` form field — the
+        freeform topic the streamer wants to track. Embedded at add-time
+        and stored alongside the count so progress lookups don't have to
+        re-embed on every render."""
         if kind == "clear":
             repo.clear_stream_goals()
+        elif kind == "custom_topic":
+            phrase = (text or "").strip()
+            if int(count) > 0 and phrase:
+                # One embed call at add-time. Stored on the row so
+                # progress can run a vec0 cosine search per render
+                # without paying the embed cost each time.
+                try:
+                    embedding = await llm.embed(phrase[:300])
+                except Exception:
+                    logger.exception("custom_topic goal: embed failed")
+                    embedding = []
+                cur = repo.get_stream_goals()
+                targets = list(cur.get("targets") or [])
+                # Replace any existing custom_topic with the same
+                # text so re-submitting the same phrase updates the
+                # count instead of stacking duplicates.
+                phrase_key = phrase.lower()
+                targets = [
+                    t for t in targets
+                    if not (
+                        t.get("kind") == "custom_topic"
+                        and (t.get("text") or "").lower() == phrase_key
+                    )
+                ]
+                targets.append({
+                    "kind": "custom_topic",
+                    "count": int(count),
+                    "text": phrase,
+                    "embedding": embedding,
+                })
+                repo.set_stream_goals(targets)
+            elif int(count) <= 0 and phrase:
+                # Remove a specific custom_topic by text match.
+                cur = repo.get_stream_goals()
+                targets = list(cur.get("targets") or [])
+                phrase_key = phrase.lower()
+                targets = [
+                    t for t in targets
+                    if not (
+                        t.get("kind") == "custom_topic"
+                        and (t.get("text") or "").lower() == phrase_key
+                    )
+                ]
+                repo.set_stream_goals(targets)
         elif kind in _GOAL_KINDS:
             cur = repo.get_stream_goals()
             targets = list(cur.get("targets") or [])
@@ -3165,9 +3218,26 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             kind = t.get("kind")
             target = max(1, int(t.get("count") or 1))
             done = 0
+            label = (_GOAL_META.get(kind) or {}).get("label", kind)
             if kind == "clear_due_snoozes":
                 # Inverse: 0 due = goal met. target = count to clear.
                 done = max(0, target - repo.count_due_snoozes())
+            elif kind == "custom_topic":
+                # Vec-search count: how many transcript chunks since
+                # the goal was set semantically match the goal text.
+                # Embedding was computed once at add-time and lives
+                # on the target row so this stays cheap per render.
+                phrase = (t.get("text") or "").strip()
+                embedding = t.get("embedding") or []
+                label = phrase or "custom topic"
+                if embedding and phrase:
+                    try:
+                        done = repo.count_transcripts_matching_embedding(
+                            embedding, since_iso=since,
+                        )
+                    except Exception:
+                        logger.exception("custom_topic goal: count failed")
+                        done = 0
             else:
                 meta = _GOAL_META.get(kind)
                 if meta and meta["insight_kinds"]:
@@ -3178,10 +3248,10 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                         kind=insight_kinds[0] if len(insight_kinds) == 1 else None,
                         kinds=insight_kinds if len(insight_kinds) > 1 else None,
                     )
-            label = (_GOAL_META.get(kind) or {}).get("label", kind)
             out.append({
                 "kind": kind,
                 "label": label,
+                "text": t.get("text"),
                 "target": target,
                 "done": min(done, target),
                 "pct": min(100, int(100 * done / target)) if target else 0,

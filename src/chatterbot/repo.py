@@ -2610,6 +2610,48 @@ class ChatterRepo:
             for r in rows
         ]
 
+    def count_transcripts_matching_embedding(
+        self,
+        query_embedding: list[float],
+        *,
+        since_iso: str,
+        max_distance: float = 0.55,
+        max_scan: int = 500,
+    ) -> int:
+        """Count transcript chunks since `since_iso` whose embedding
+        distance to `query_embedding` is below `max_distance`. Powers
+        the custom-topic Stream goals tracker — each row's progress
+        comes from "how many things the streamer said this stream
+        semantically match the goal text."
+
+        Cosine distance, so 0.0 = identical, ~1.0 = unrelated.
+        The 0.55 default catches paraphrases of the goal phrase
+        without false-matching unrelated talk; tune the goal's
+        threshold per kind if needed.
+
+        Uses MATCH + k=max_scan to bound the work; a noisy stream
+        with thousands of chunks would otherwise pay an unbounded
+        scan on each /insights render."""
+        if not query_embedding:
+            return 0
+        blob = _vec_to_blob(query_embedding)
+        with self._cursor() as cur:
+            try:
+                cur.execute(
+                    """
+                    SELECT v.distance, t.ts
+                    FROM vec_transcripts v
+                    JOIN transcript_chunks t ON t.id = v.chunk_id
+                    WHERE v.embedding MATCH ? AND k = ?
+                      AND datetime(t.ts) >= datetime(?)
+                    """,
+                    (blob, int(max_scan), since_iso),
+                )
+                rows = cur.fetchall()
+            except sqlite3.OperationalError:
+                return 0
+        return sum(1 for r in rows if float(r["distance"]) < float(max_distance))
+
     def transcripts_missing_embedding(
         self, limit: int = 200,
     ) -> list[TranscriptChunk]:
