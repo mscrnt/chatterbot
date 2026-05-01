@@ -1,63 +1,72 @@
-{# High-impact subjects panel — cross-references currently-active
-   chatters against historical topic_thread drivers. Answers the
-   question: "of the people in chat right now, which subject would
-   engage the most of them?"
+{# "What to say next" panel — cross-references currently-active
+   chatters against historical topic_thread drivers. Answers:
+   "of the people in chat right now, which subject would
+   re-engage the most of them?"
 
-   Different from:
+   Distinct from:
      - Engaging subjects: what chat is talking about NOW
-     - Live conversations:  active threads NOW
-     - Quiet cohorts:       cohorts that JUST went silent
-     - This panel:          what to PIVOT to for max live audience reach
+     - Live conversations: active threads NOW
+     - Quiet cohorts:      cohorts that JUST went silent
 
-   Each row shows the thread + its recap + the count of currently-
-   active chatters who've historically driven it + the names of those
-   chatters (clickable). Click the row to open the thread modal. #}
+   Card layout (this file):
+     Each row leads with the LIVE CHATTER pills (the action target)
+     because "alice + bob would jump in if I bring this up" is the
+     most useful signal — title + recap are secondary context.
+     Click anywhere on the row to open the dedicated high-impact
+     modal, which goes deeper on what each live chatter said
+     about this topic before. #}
 {% from "partials/_panel.html" import panel %}
+{% from "components/_chatter_pill.html" import chatter_pill %}
 {% if high_impact_subjects %}
 {% call panel('high-impact', 'What to say next', icon='fa-bullseye',
               count=high_impact_subjects|length,
-              subtitle='subjects that engage the most chatters in the room') %}
+              subtitle='topics that engage chatters in the room right now') %}
   <ul class="divide-y divide-subtle rounded-xl border border-accent/30 bg-accent/5 overflow-hidden">
     {% for h in high_impact_subjects %}
       {% set t = h.thread %}
+      {% set _ikey = t.id | string %}
       {% set _stat_tone = {'active': 'success', 'dormant': 'warning', 'archived': 'neutral'}[t.status] %}
-      <li class="insight-card-root px-3 py-3 flex flex-col gap-1.5 hover:bg-accent/10 transition-all duration-150 ease-out">
-        <button type="button"
-                class="w-full text-left"
-                hx-get="/modals/thread/{{ t.id }}"
-                hx-target="#modal-root"
-                hx-swap="innerHTML"
-                title="Open the thread with snapshots + drivers">
-          <div class="flex items-baseline gap-2 flex-wrap">
-            <span class="font-medium text-primary text-sm sm:text-base">{{ t.title }}</span>
-            <span class="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] uppercase tracking-wide rounded-full bg-accent/15 text-accent border border-accent/30">
-              <i class="fa-solid fa-bullseye text-[9px]"></i>
-              {{ h.overlap_count }} live overlap
-            </span>
-            {% with label=t.status, tone=_stat_tone %}
-              {% include "components/_pill.html" %}
-            {% endwith %}
-            {% if t.category and t.category != 'other' %}
-              <span class="text-[10px] uppercase tracking-wide text-muted">{{ t.category }}</span>
-            {% endif %}
-            <span class="text-[10px] text-muted ml-auto">
-              {{ h.unique_drivers }} historical driver{{ '' if h.unique_drivers == 1 else 's' }}
-            </span>
-          </div>
-          {% if t.recap %}
-            <p class="text-[12px] text-primary mt-1 leading-snug">{{ t.recap }}</p>
-          {% endif %}
-        </button>
+      <li class="insight-card-root px-3 py-3 hover:bg-accent/10 transition-all duration-150 ease-out cursor-pointer"
+          hx-get="/modals/high-impact/{{ t.id }}"
+          hx-target="#modal-root"
+          hx-swap="innerHTML"
+          title="Open with live-chatter quotes + opener suggestions">
+
+        {# Lead row — live chatters who would re-engage. The action
+           target. Pills get hover preview via the chatter_pill macro
+           so the streamer can scan without leaving the panel. #}
         {% if h.overlap_drivers %}
-          <p class="text-[11px] text-muted inline-flex items-center gap-1 flex-wrap">
-            <i class="fa-solid fa-users text-[9px]"></i>
-            in chat now:
+          <div class="flex items-baseline gap-1.5 flex-wrap mb-2">
+            <i class="fa-solid fa-users text-accent text-[11px] shrink-0"></i>
+            <span class="text-[10px] uppercase tracking-wider text-accent">
+              in chat now
+            </span>
             {% for d in h.overlap_drivers %}
-              <a href="/users/{{ d.twitch_id }}"
-                 class="hover:text-accent hover:underline px-1 py-0.5 rounded text-[11px]"
-                 onclick="event.stopPropagation()">{{ d.name }}</a>{% if not loop.last %}<span>·</span>{% endif %}
+              {{ chatter_pill(d.twitch_id, d.name, variant='subtle') }}
             {% endfor %}
-          </p>
+          </div>
+        {% endif %}
+
+        {# Title + meta — secondary now. Status / category / counts
+           ride here so the streamer can scan eligibility without
+           having to read the recap. #}
+        <div class="flex items-baseline gap-2 flex-wrap">
+          <span class="font-medium text-primary text-sm">{{ t.title }}</span>
+          {% with label=t.status, tone=_stat_tone %}
+            {% include "components/_pill.html" %}
+          {% endwith %}
+          {% if t.category and t.category != 'other' %}
+            <span class="text-[10px] uppercase tracking-wide text-muted">{{ t.category }}</span>
+          {% endif %}
+          <span class="text-[10px] text-muted ml-auto tabular-nums">
+            {{ h.overlap_count }} live · {{ h.unique_drivers }} all-time
+          </span>
+        </div>
+
+        {# Recap — compact, dimmed. Kept as 2-line clamp so the card
+           stays scannable on busy panels. #}
+        {% if t.recap %}
+          <p class="text-[11px] text-muted mt-1 leading-snug line-clamp-2">{{ t.recap }}</p>
         {% endif %}
       </li>
     {% endfor %}

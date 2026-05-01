@@ -3840,6 +3840,74 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             },
         )
 
+    @app.get("/modals/high-impact/{thread_id}", response_class=HTMLResponse)
+    async def modal_high_impact(request: Request, thread_id: int):
+        """Dedicated modal for the "What to say next" card.
+
+        Differs from the generic thread modal in framing: organized
+        around the chatters who are LIVE RIGHT NOW and would re-engage
+        with this topic. Each live chatter gets a section showing
+        their own past messages on the topic so the streamer can
+        address them by name with what they actually argued.
+
+        Past discussions / historical drivers ride at the bottom as
+        secondary context.
+        """
+        thread = repo.get_thread(thread_id)
+        if not thread:
+            raise HTTPException(404, "thread not found")
+        members = repo.get_thread_members(thread_id)
+
+        # Cross-reference active set against this thread's drivers
+        # — the same logic used by list_high_impact_subjects when
+        # ranking, but for ONE thread.
+        active_window = int(getattr(
+            settings, "high_impact_active_within_minutes", 30,
+        ))
+        active_ids = await asyncio.to_thread(
+            repo.active_chatter_ids, within_minutes=active_window,
+        )
+        live_drivers: list[dict] = []
+        other_drivers: list[dict] = []
+        seen_ids: set[str] = set()
+        for name in thread.drivers:
+            user = repo.find_user_by_alias_or_name(name)
+            if user is None:
+                other_drivers.append({"name": name, "user_id": None})
+                continue
+            if user.twitch_id in seen_ids:
+                continue
+            seen_ids.add(user.twitch_id)
+            entry = {"name": user.name, "user_id": user.twitch_id}
+            if user.twitch_id in active_ids:
+                live_drivers.append(entry)
+            else:
+                other_drivers.append(entry)
+
+        # Per-live-driver quotes from inside this thread's snapshot
+        # windows. Cap at 3 quotes per chatter so the modal stays
+        # scannable; ordered newest-first so the most recent take
+        # is the first thing the streamer sees.
+        live_driver_quotes: dict[str, list] = {}
+        for d in live_drivers:
+            live_driver_quotes[d["user_id"]] = await asyncio.to_thread(
+                repo.thread_messages_for_user,
+                thread_id, d["user_id"], limit=3,
+            )
+
+        return TEMPLATES.TemplateResponse(
+            request,
+            "modals/_high_impact.html",
+            {
+                "thread": thread,
+                "members": members,
+                "live_drivers": live_drivers,
+                "other_drivers": other_drivers,
+                "live_driver_quotes": live_driver_quotes,
+                "active_window": active_window,
+            },
+        )
+
     @app.get("/threads/{thread_id}/explain")
     async def thread_explain(thread_id: int):
         from .thread_rag import explain_thread

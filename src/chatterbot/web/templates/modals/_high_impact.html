@@ -1,0 +1,188 @@
+{# "What to say next" modal — opened from a row in the high-impact
+   subjects panel. Reframes the generic thread modal around the
+   chatters who are LIVE RIGHT NOW so the streamer reads:
+
+     - Who in chat would jump in if this topic came up
+     - What each of those people said about it before (so the
+       streamer can address them by their actual take, not just
+       by name)
+     - LLM-generated openers (slice B — async-loaded)
+     - Historical context (other drivers + timeline) as secondary
+
+   The card on the panel is also reorged to lead with the live
+   chatters; this modal just goes deeper on what each of them
+   personally cares about.
+
+   Footer mirrors the card's inline actions ("Brought it up" /
+   "Skip" / "Snooze") so the streamer can act on the suggestion
+   without leaving the modal. #}
+{% set modal_title = thread.title %}
+{% set modal_icon = 'fa-bullseye' %}
+{% set modal_tone = 'accent' %}
+{% set modal_size = 'lg' %}
+{% from "components/_chatter_pill.html" import chatter_pill %}
+{% extends "components/_modal.html" %}
+{% block modal_body %}
+{% set _ikey = thread.id | string %}
+<div class="space-y-4 text-sm">
+
+  {# Hero — live chatters who'd re-engage. The PRIMARY value of
+     this modal. Pills are clickable + hover-previewable so the
+     streamer can scan who's around without leaving. #}
+  <section>
+    <div class="flex items-baseline gap-2 flex-wrap mb-1.5">
+      <i class="fa-solid fa-users text-accent text-[11px]"></i>
+      <p class="text-[11px] uppercase tracking-wider text-muted">
+        in chat now ({{ live_drivers | length }})
+      </p>
+      <span class="text-[10px] text-muted ml-auto">
+        active in last {{ active_window }} min
+      </span>
+    </div>
+    {% if live_drivers %}
+      <div class="flex flex-wrap gap-1">
+        {% for d in live_drivers %}
+          {{ chatter_pill(d.user_id, d.name) }}
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="text-xs text-muted italic">
+        Nobody from this thread's history is currently in chat —
+        the topic might still be worth bringing up if it's recent
+        ({{ thread.last_ts | short_ts }}), but there's no
+        guaranteed re-engagement.
+      </p>
+    {% endif %}
+  </section>
+
+  {# Per-live-chatter quotes — what each of them said about this
+     topic before. Lets the streamer open with "alice, you were
+     saying X about this last week..." instead of just shouting
+     into the void.
+
+     Sorted by quote count descending so the chatter with the
+     strongest stake on the topic surfaces first. #}
+  {% if live_drivers %}
+    {% set _has_any_quotes = namespace(v=False) %}
+    {% for d in live_drivers %}
+      {% if live_driver_quotes.get(d.user_id) %}{% set _has_any_quotes.v = true %}{% endif %}
+    {% endfor %}
+    {% if _has_any_quotes.v %}
+      <section>
+        <p class="text-[11px] uppercase tracking-wider text-muted mb-1">
+          what they said about this before
+        </p>
+        <div class="space-y-2">
+          {% for d in live_drivers %}
+            {% set _quotes = live_driver_quotes.get(d.user_id) or [] %}
+            {% if _quotes %}
+              <div class="rounded-xl border border-subtle bg-surface overflow-hidden">
+                <div class="px-3 py-2 border-b border-subtle bg-surface-raised/50 flex items-baseline gap-2">
+                  {{ chatter_pill(d.user_id, d.name) }}
+                  <span class="text-[10px] text-muted">
+                    {{ _quotes | length }} message{{ '' if _quotes|length == 1 else 's' }}
+                  </span>
+                </div>
+                <ul class="divide-y divide-subtle">
+                  {% for m in _quotes %}
+                    <li class="px-3 py-2 flex items-baseline gap-2">
+                      <span class="text-[10px] text-muted whitespace-nowrap shrink-0">{{ m.ts | short_ts }}</span>
+                      <span class="text-primary break-words text-xs">{{ m.content }}</span>
+                    </li>
+                  {% endfor %}
+                </ul>
+              </div>
+            {% endif %}
+          {% endfor %}
+        </div>
+      </section>
+    {% endif %}
+  {% endif %}
+
+  {# Recap (LLM-summarized, possibly stale) — tucked under the
+     live-chatter context as secondary signal. #}
+  {% if thread.recap %}
+    <section>
+      <p class="text-[11px] uppercase tracking-wider text-muted mb-1">recap</p>
+      <p class="text-primary leading-snug text-xs">{{ thread.recap }}</p>
+    </section>
+  {% endif %}
+
+  {# Historical drivers (not in chat right now) — secondary
+     context so the streamer knows the topic's broader reach.
+     Folded inside a <details> to keep the modal compact. #}
+  {% if other_drivers %}
+    <details class="group">
+      <summary class="text-[11px] uppercase tracking-wider text-muted cursor-pointer inline-flex items-center gap-1 hover:text-primary">
+        <i class="fa-solid fa-chevron-right text-[9px] group-open:rotate-90 transition-transform"></i>
+        also driven by ({{ other_drivers | length }} not in chat now)
+      </summary>
+      <div class="flex flex-wrap gap-1 mt-2">
+        {% for d in other_drivers %}
+          {% if d.user_id %}
+            {{ chatter_pill(d.user_id, d.name, variant='subtle') }}
+          {% else %}
+            <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-subtle bg-canvas text-[11px] text-muted">
+              <i class="fa-solid fa-user-slash text-[9px]"></i> {{ d.name }}
+            </span>
+          {% endif %}
+        {% endfor %}
+      </div>
+    </details>
+  {% endif %}
+
+  {# Timeline of past discussions — abbreviated row of short_ts
+     pills, click to inspect the snapshot's surrounding chat. #}
+  {% if members and members | length > 1 %}
+    <details class="group">
+      <summary class="text-[11px] uppercase tracking-wider text-muted cursor-pointer inline-flex items-center gap-1 hover:text-primary">
+        <i class="fa-solid fa-chevron-right text-[9px] group-open:rotate-90 transition-transform"></i>
+        seen {{ members | length }} times
+      </summary>
+      <div class="flex items-center gap-1 flex-wrap mt-2">
+        {% for m in members %}
+          <span class="inline-flex items-center gap-1 text-[10px] text-muted bg-surface-raised border border-subtle rounded-full px-2 py-0.5">
+            <span class="block w-1.5 h-1.5 rounded-full bg-accent/70"></span>
+            {{ m.ts | short_ts }}
+          </span>
+        {% endfor %}
+      </div>
+    </details>
+  {% endif %}
+
+  {# Footer — mirror the card's inline actions as deliberate
+     buttons. Same kind/item_key the card uses, so a modal-side
+     state change flips the card's state too on next refresh. #}
+  <div class="pt-2 border-t border-subtle flex items-center justify-between gap-2">
+    <div class="flex items-center gap-2">
+      <form hx-post="/insights/state" hx-swap="none" class="inline-flex"
+            hx-on::after-request="if(event.detail.successful) window.chatterbotCloseModal()">
+        <input type="hidden" name="kind" value="high_impact">
+        <input type="hidden" name="item_key" value="{{ _ikey }}">
+        <input type="hidden" name="action" value="addressed">
+        <button type="submit"
+                class="text-xs inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-success/30 bg-success/5 hover:bg-success/15 text-success transition-all duration-150 ease-out"
+                title="I brought this up on stream">
+          <i class="fa-solid fa-check text-[11px]"></i> Brought it up
+        </button>
+      </form>
+      <form hx-post="/insights/state" hx-swap="none" class="inline-flex"
+            hx-on::after-request="if(event.detail.successful) window.chatterbotCloseModal()">
+        <input type="hidden" name="kind" value="high_impact">
+        <input type="hidden" name="item_key" value="{{ _ikey }}">
+        <input type="hidden" name="action" value="skip">
+        <button type="submit"
+                class="text-xs inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-danger/30 bg-danger/5 hover:bg-danger/15 text-danger transition-all duration-150 ease-out"
+                title="Skip — won't show again for this topic">
+          <i class="fa-solid fa-eye-slash text-[11px]"></i> Skip
+        </button>
+      </form>
+    </div>
+    <button type="button"
+            class="text-xs inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-subtle bg-surface-raised hover:bg-surface-raised/80 text-muted transition-all duration-150 ease-out"
+            onclick="window.chatterbotCloseModal()">
+      Close
+    </button>
+  </div>
+</div>
+{% endblock %}

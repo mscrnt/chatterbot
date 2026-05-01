@@ -6477,6 +6477,81 @@ class ChatterRepo:
                 for r in cur.fetchall()
             ]
 
+    def active_chatter_ids(self, *, within_minutes: int = 30) -> set[str]:
+        """Set of twitch_ids who've sent at least one non-opted-out
+        message in the recent window. Used by the high-impact subjects
+        cross-reference + modal so the dashboard knows who's actually
+        in chat right now (vs anyone who's ever driven a topic)."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT u.twitch_id
+                FROM users u
+                JOIN messages m ON m.user_id = u.twitch_id
+                WHERE u.opt_out = 0
+                  AND datetime(m.ts) >= datetime('now', ?)
+                """,
+                (f"-{int(within_minutes)} minutes",),
+            )
+            return {r["twitch_id"] for r in cur.fetchall()}
+
+    def thread_messages_for_user(
+        self, thread_id: int, user_id: str, *, limit: int = 8,
+    ) -> list[Message]:
+        """One specific chatter's messages from inside this thread's
+        snapshot windows — what THEY said about this topic across
+        every time it came up. Powers the per-live-driver quote
+        sections in the high-impact modal so the streamer can
+        address each chatter by what they personally argued.
+
+        Mirrors `get_thread_messages` but filtered to a single
+        twitch_id, so the SQL stays simple."""
+        members = self.get_thread_members(thread_id)
+        if not members:
+            return []
+        ranges: list[tuple[int, int]] = []
+        for m in members:
+            snap = self.get_topic_snapshot(m.snapshot_id)
+            if not snap or not snap.message_id_range:
+                continue
+            try:
+                a, b = snap.message_id_range.split("-", 1)
+                ranges.append((int(a), int(b)))
+            except (ValueError, AttributeError):
+                continue
+        if not ranges:
+            return []
+        # Build one disjunctive WHERE so we can fetch all ranges in
+        # one round trip + dedup by id at the SQL layer via DISTINCT.
+        clauses = " OR ".join("(m.id BETWEEN ? AND ?)" for _ in ranges)
+        params: list = [user_id]
+        for a, b in ranges:
+            params.extend([a, b])
+        params.append(int(limit))
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT m.id, m.user_id, u.name, m.ts, m.content,
+                       m.reply_parent_login, m.reply_parent_body
+                FROM messages m
+                JOIN users u ON u.twitch_id = m.user_id
+                WHERE m.user_id = ?
+                  AND ({clauses})
+                ORDER BY m.id DESC
+                LIMIT ?
+                """,
+                params,
+            )
+            return [
+                Message(
+                    id=int(r["id"]), user_id=r["user_id"], name=r["name"],
+                    ts=r["ts"], content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
+                )
+                for r in cur.fetchall()
+            ]
+
     def find_user_by_alias_or_name(self, name: str) -> User | None:
         """Resolve a username to a user, transparently following renames."""
         with self._cursor() as cur:
