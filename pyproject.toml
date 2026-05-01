@@ -32,6 +32,14 @@ dev = [
     # `async def` and pytest needs the asyncio plugin to run them.
     "pytest-asyncio>=0.23.0",
     "ruff>=0.1.0",
+    # Pillow is needed by tests/transcript/test_stitch_grid.py to
+    # exercise the screenshot stitcher + perceptual-hash dedup. At
+    # runtime Pillow is only required when whisper + screenshots are
+    # enabled (the whisper extra brings it in for that path), but
+    # CI runs --extra dev only and the stitcher tests would silently
+    # skip without it. Adding to dev is ~30MB vs the whisper extra's
+    # ~500MB (faster-whisper + transformers + sounddevice).
+    "Pillow>=10.0.0",
 ]
 # Real-time stream transcription via the OBS audio relay. Pulls in
 # faster-whisper + ctranslate2 (~300 MB on first install). Streamers

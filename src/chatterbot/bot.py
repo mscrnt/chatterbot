@@ -107,6 +107,26 @@ class ChatterListener(commands.Bot):
         self._notify_client: httpx.AsyncClient | None = None
         self._last_notify_error: str | None = None
 
+    def reconfigure(self, settings: Settings) -> None:
+        """Pick up a fresh Settings snapshot from the lifecycle
+        poller's reload pass. The IRC connection itself (token /
+        channel) is not reconfigurable in place — those settings are
+        classified 'restart' in settings_meta and the dashboard's
+        restart-impact badge says so. What this DOES update:
+
+          - notify_url / notify_secret (cross-process bus). Picked up
+            on the next message ingest because `_notify` reads
+            `self._notify_url` directly; we just refresh the cached
+            value here.
+          - downstream summarizer / repo references (unchanged — they
+            still point at the same instances; the lifecycle poller
+            reconfigures Summarizer separately).
+          - any settings the message-ingest path reads via
+            `getattr(self.settings, ...)` at use time."""
+        self.settings = settings
+        self._notify_url = (settings.dashboard_internal_url or "").rstrip("/")
+        self._notify_secret = settings.internal_notify_secret or ""
+
     async def _notify(self, channel: str, version: str = "") -> None:
         """POST a notification to the dashboard's /internal/notify
         endpoint. No-op if `dashboard_internal_url` isn't set; the

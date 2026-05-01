@@ -60,27 +60,65 @@ def _clear_pid_file() -> None:
 _LIFECYCLE_POLL_SECONDS = 3
 
 
+def _apply_reload(reconfigurables: list, new_settings: Settings) -> None:
+    """Fan out a fresh Settings snapshot to every long-lived service
+    that holds its own reference. Two paths per service:
+
+      - If the service exposes `reconfigure(settings)`, call it. Use
+        this when a service has nested children with their own
+        settings (Summarizer holds a Threader; ChatterListener holds
+        the same Summarizer) so the call can propagate.
+
+      - Otherwise duck-type-swap `s.settings = new_settings`. Most
+        reload-class settings are read live via
+        `getattr(self.settings, key, default)` at use time, so simply
+        swapping the reference makes the next loop iteration pick up
+        the new value — no explicit method needed.
+
+    Failures are logged but don't propagate; one broken service's
+    reconfigure shouldn't block the rest from picking up settings."""
+    for s in reconfigurables:
+        try:
+            if hasattr(s, "reconfigure"):
+                s.reconfigure(new_settings)
+            else:
+                s.settings = new_settings
+        except Exception:
+            logger.exception(
+                "lifecycle reload: %s.reconfigure failed; continuing",
+                type(s).__name__,
+            )
+
+
 async def _lifecycle_poller(
     repo: ChatterRepo,
     shutdown_event: asyncio.Event,
+    reconfigurables: list,
 ) -> None:
-    """Watch the dashboard-driven lifecycle flags and signal a clean
-    shutdown when the streamer requests a restart. The dashboard
-    writes `bot_restart_at` / `bot_reload_at` to app_settings as ISO
-    timestamps; we remember the values we saw at boot and trigger
-    the corresponding action whenever the persisted value moves past
-    the one in memory.
+    """Watch the dashboard-driven lifecycle flags and act when they
+    advance. The dashboard writes `bot_restart_at` / `bot_reload_at`
+    to app_settings as ISO timestamps; we remember the values we saw
+    at boot and trigger the corresponding action whenever the
+    persisted value moves past the one in memory.
 
-    Setting `shutdown_event` lets run_bot's outer await break out of
-    `asyncio.wait(...)` so all tasks get cancelled cleanly through
-    the regular finally-block; the repo closes, the pid file gets
-    cleared, and the process returns. The supervisor (`make all`,
-    docker compose restart-policy, systemd) takes it from there.
+      - Restart: set `shutdown_event` so run_bot's outer asyncio.wait
+        breaks out and the existing finally-block cancels every task
+        cleanly. The supervisor (`make all`, docker compose restart-
+        policy, systemd) brings it back with the new settings.
 
-    This indirection (vs os.kill) is what makes the restart / reload
-    buttons work uniformly across topologies — same-process, separate
-    containers, and separate hosts. Both sides only need to share the
-    SQLite file."""
+      - Reload: pull a fresh Settings (env + DB overrides) and fan
+        out to every service via `_apply_reload`. No process bounce,
+        no in-flight LLM calls dropped. Settings classified as
+        'restart' in settings_meta won't actually take effect via
+        reload (the Twitch IRC client / LLM client are still using
+        old creds); the restart-impact badge in the UI tells the
+        streamer that.
+
+    This indirection (vs os.kill) is what makes both buttons work
+    uniformly across topologies — same-process, separate containers,
+    and separate hosts. Both sides only need to share the SQLite
+    file."""
+    from .config import get_settings as _get_settings
     last_restart = (await asyncio.to_thread(
         repo.get_app_setting, "bot_restart_at",
     )) or ""
@@ -106,19 +144,23 @@ async def _lifecycle_poller(
                 repo.get_app_setting, "bot_reload_at",
             )) or ""
             if cur_reload and cur_reload != last_reload:
-                # Slice 10B replaces this with reconfigure() fan-out.
-                # For now, fall back to a restart so the streamer's
-                # change actually takes effect — better than silent
-                # no-op while the wiring lands.
                 logger.info(
-                    "lifecycle: reload requested at %s — reconfigure "
-                    "wiring lands in slice 10B; falling back to "
-                    "restart for safety", cur_reload,
+                    "lifecycle: reload requested at %s — fanning out "
+                    "to %d service(s)", cur_reload, len(reconfigurables),
                 )
-                shutdown_event.set()
-                return
+                try:
+                    new_settings = await asyncio.to_thread(_get_settings)
+                except Exception:
+                    logger.exception(
+                        "lifecycle reload: failed to load fresh "
+                        "Settings; skipping this reload tick",
+                    )
+                else:
+                    await asyncio.to_thread(
+                        _apply_reload, reconfigurables, new_settings,
+                    )
+                last_reload = cur_reload
             last_restart = cur_restart
-            last_reload = cur_reload
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -248,27 +290,51 @@ async def run_bot(settings: Settings) -> None:
     # Cross-platform listeners. Both no-op when disabled or unconfigured.
     # YouTube takes the OBS poller so it can skip its 100-unit search.list
     # while we're not actually streaming (OBS-confirmed offline).
+    yt = None
     if settings.youtube_enabled:
         yt = YouTubeListener(settings, repo, summarizer, obs=obs)
         tasks.append(asyncio.create_task(yt.start(), name="youtube_listener"))
+    dc = None
     if settings.discord_enabled:
         dc = DiscordListener(settings, repo, summarizer)
         tasks.append(asyncio.create_task(dc.start(), name="discord_listener"))
 
+    # Reconfigurables — every long-lived service that holds a
+    # Settings reference. The lifecycle_poller's reload path fans a
+    # fresh Settings to each on `bot_reload_at` advance. Order
+    # matters mildly: parents before children, since a parent's
+    # reconfigure() may propagate to its children (Summarizer →
+    # Threader, etc.). Top-level only — nested services that don't
+    # need explicit reconfigure() get reached via attribute hop.
+    reconfigurables: list = [obs, twitch_status, summarizer, listener, se]
+    if settings.mod_mode_enabled:
+        # `moderator` is only defined inside the if branch above; pull
+        # it from the local scope when present.
+        try:
+            reconfigurables.append(moderator)  # type: ignore[name-defined]
+        except NameError:
+            pass
+    if helix_sync.configured:
+        reconfigurables.append(helix_sync)
+    if yt is not None:
+        reconfigurables.append(yt)
+    if dc is not None:
+        reconfigurables.append(dc)
+
     # Lifecycle poller — watches the dashboard's `bot_restart_at`
-    # flag in app_settings. When it advances past the value we saw
-    # at boot, the poller sets `shutdown_event`; the outer await
-    # below breaks out, the finally-block cancels every task
-    # cleanly, and run_bot returns. The supervisor (`make all`,
-    # docker compose restart-policy, systemd) brings the process
-    # back with the new settings.
+    # and `bot_reload_at` flags in app_settings. Restart sets
+    # `shutdown_event` so the outer await below breaks out, the
+    # finally-block cancels every task cleanly, and run_bot returns
+    # for the supervisor to respawn. Reload fans a fresh Settings
+    # snapshot to every service in `reconfigurables` in place — no
+    # process bounce, no in-flight LLM calls dropped.
     #
     # Why DB-flag instead of SIGTERM: works the same in-container
     # and bare-metal because there's no cross-PID-namespace
     # signaling. Both sides only need to share the SQLite file.
     shutdown_event = asyncio.Event()
     lifecycle_task = asyncio.create_task(
-        _lifecycle_poller(repo, shutdown_event),
+        _lifecycle_poller(repo, shutdown_event, reconfigurables),
         name="lifecycle_poller",
     )
     tasks.append(lifecycle_task)

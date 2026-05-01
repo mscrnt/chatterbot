@@ -401,6 +401,18 @@ class Summarizer:
         # single shared instance so backfill state could live here later.
         self._threader = Threader(repo, llm, settings)
 
+    def reconfigure(self, settings) -> None:
+        """Pick up a fresh Settings snapshot from the lifecycle
+        poller's reload pass. Propagates to the nested Threader so
+        threading-related settings (centroid threshold, recap cadence,
+        etc.) update too — without this propagation the child would
+        keep using the boot-time Settings reference even after the
+        parent swapped."""
+        self.settings = settings
+        # Threader reads tuning via `getattr(self.settings, ...)` at
+        # use time, so a reference swap is enough.
+        self._threader.settings = settings
+
     def _channel_context_block(self, *, authoritative: bool = False) -> str:
         """Render the live Helix snapshot as a CHANNEL CONTEXT
         preamble. Returns "" when twitch_status isn't wired or the

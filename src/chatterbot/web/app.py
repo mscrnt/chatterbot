@@ -2027,40 +2027,46 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
 
     @app.post("/reload-bot", response_class=HTMLResponse)
     async def reload_bot(request: Request):
-        """Hot config reload. Slice 10B replaces this with an in-place
-        reconfigure() fan-out across services; for now, this falls
-        back to the same DB-flag + SIGTERM dual-path the restart
-        button uses, with copy that's honest about that. The
-        streamer still gets their settings applied; the only thing
-        missing is the "no in-flight LLM calls dropped" optimization."""
+        """Hot config reload — bot stays up, services reconfigure() in
+        place. Cheaper than a restart for settings classified as 'live'
+        or 'reload' in settings_meta:
+
+          - 'live' settings (intervals, thresholds, prompts) are
+            already read on every access; the reload just refreshes
+            the cached Settings reference so things read via
+            `getattr(self.settings, key)` pick up the change on the
+            next loop iteration.
+          - 'reload' settings (integration toggles, channel ids, some
+            whisper tuning) get applied via the bot's reconfigure
+            fan-out without dropping the IRC connection or in-flight
+            LLM calls.
+          - 'restart' settings (Twitch creds, LLM provider switch,
+            whisper model file) need the Restart button — the
+            restart-impact badge in /settings tells the streamer
+            which is which.
+
+        Works the same in containers and bare-metal because there's
+        no cross-PID-namespace signaling — the bot's lifecycle poller
+        watches this flag in shared SQLite."""
         ctx: dict[str, Any] = {"ok": False, "message": ""}
         try:
             await asyncio.to_thread(
                 repo.set_app_setting,
                 _BOT_RELOAD_FLAG_KEY, _stamp_now(),
             )
-            # Also stamp the restart flag so older bots without the
-            # reload-aware poller still cycle. New bots will see the
-            # reload flag first and (slice 10B) reconfigure in place
-            # without hitting the restart path.
-            await asyncio.to_thread(
-                repo.set_app_setting,
-                _BOT_RESTART_FLAG_KEY, _stamp_now(),
-            )
         except Exception as e:
             ctx["message"] = f"could not write reload flag: {e}"
             return TEMPLATES.TemplateResponse(
                 request, "partials/restart_bot_result.html", ctx,
             )
-        signalled, sig_skip_reason = _try_sigterm_bot()
         ctx["ok"] = True
         ctx["message"] = (
-            "Reload requested. " + (
-                "Bot will cycle in a few seconds via SIGTERM."
-                if signalled else
-                f"DB flag stamped (SIGTERM skipped: {sig_skip_reason})."
-            ) + " In-place reconfigure (no process bounce) lands in "
-            "a follow-up slice; until then this acts like a fast restart."
+            "Reload requested. The bot's lifecycle poller picks up "
+            "the new settings within a few seconds — no process "
+            "bounce, no in-flight LLM calls dropped. If you changed "
+            "a setting marked 'restart' in /settings (Twitch creds, "
+            "LLM provider, whisper model), use Restart instead — the "
+            "underlying client / model can't hot-swap."
         )
         return TEMPLATES.TemplateResponse(
             request, "partials/restart_bot_result.html", ctx,
