@@ -2667,6 +2667,12 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                     settings, "high_impact_limit", 6,
                 )),
             ),
+            # Per-thread state for the high-impact panel — kind=
+            # 'high_impact', item_key=str(thread_id). Lets the streamer
+            # mark a suggestion as "brought it up" / "skip" / "snooze"
+            # so it stops showing without changing the underlying
+            # threading data.
+            "hi_states": repo.get_insight_states("high_impact"),
             "quiet_cohorts": repo.list_quiet_thread_cohorts(
                 silence_minutes=int(getattr(settings, "quiet_cohort_silence_minutes", 15)),
                 lookback_hours=int(getattr(settings, "quiet_cohort_lookback_hours", 24)),

@@ -14,15 +14,40 @@
      most useful signal — title + recap are secondary context.
      Click anywhere on the row to open the dedicated high-impact
      modal, which goes deeper on what each live chatter said
-     about this topic before. #}
+     about this topic before.
+
+   State integration:
+     Per-thread state (kind='high_impact', item_key=str(thread.id))
+     drives skip / addressed / snooze hiding so a suggestion the
+     streamer has already acted on stops showing. `hi_states` is
+     supplied by the route. #}
 {% from "partials/_panel.html" import panel %}
 {% from "components/_chatter_pill.html" import chatter_pill %}
-{% if high_impact_subjects %}
+
+{# Pre-filter: hide rows the streamer has skipped, marked addressed,
+   or snoozed (until due). Mirrors the chat_questions pattern. #}
+{% set _visible_hi = [] %}
+{% for h in (high_impact_subjects or []) %}
+  {% set _t = h.thread %}
+  {% set _ikey = _t.id | string %}
+  {% set _s = (hi_states.get(_ikey) if hi_states else None) %}
+  {% set _hide = false %}
+  {% if _s %}
+    {% if _s.state in ('skipped', 'addressed') %}{% set _hide = true %}
+    {% elif _s.state == 'snoozed' and _s.due_ts and _s.due_ts > now_iso() %}{% set _hide = true %}
+    {% endif %}
+  {% endif %}
+  {% if not _hide %}
+    {% set _ = _visible_hi.append((h, _s)) %}
+  {% endif %}
+{% endfor %}
+
+{% if _visible_hi %}
 {% call panel('high-impact', 'What to say next', icon='fa-bullseye',
-              count=high_impact_subjects|length,
+              count=_visible_hi|length,
               subtitle='topics that engage chatters in the room right now') %}
   <ul class="divide-y divide-subtle rounded-xl border border-accent/30 bg-accent/5 overflow-hidden">
-    {% for h in high_impact_subjects %}
+    {% for h, _s in _visible_hi %}
       {% set t = h.thread %}
       {% set _ikey = t.id | string %}
       {% set _stat_tone = {'active': 'success', 'dormant': 'warning', 'archived': 'neutral'}[t.status] %}
@@ -68,6 +93,17 @@
         {% if t.recap %}
           <p class="text-[11px] text-muted mt-1 leading-snug line-clamp-2">{{ t.recap }}</p>
         {% endif %}
+
+        {# Action row — same kind/item_key the modal footer uses,
+           so a state change from either surface flips the card on
+           next refresh. Wrapper stops propagation so action clicks
+           don't also trigger the row's modal-open. #}
+        <div class="mt-2">
+          {% with kind='high_impact', item_key=_ikey,
+                  state=(_s.state if _s else None) %}
+            {% include "components/_insight_actions.html" %}
+          {% endwith %}
+        </div>
       </li>
     {% endfor %}
   </ul>
