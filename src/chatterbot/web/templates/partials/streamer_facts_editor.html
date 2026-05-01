@@ -7,6 +7,11 @@
    This editor is the dashboard-side surface for keeping it fresh
    without leaving the streamer's browser.
 
+   Three actions besides the textarea Save:
+     - Download default  → GET /settings/streamer-facts/default
+     - Upload .md file   → POST /settings/streamer-facts (multipart)
+     - Revert to default → POST /settings/streamer-facts/revert
+
    Context (provided by /settings + /settings/streamer-facts):
      - facts_path: str (resolved absolute path; empty when unset)
      - facts_path_display: str (path as configured — relative or
@@ -46,54 +51,136 @@
     </div>
   {% endif %}
 
-  <form method="post"
-        action="/settings/streamer-facts"
-        hx-post="/settings/streamer-facts"
-        hx-target="#{{ _id }}"
-        hx-swap="outerHTML"
-        class="p-4 space-y-3"
-        x-data="{ text: {{ facts_text | tojson }}, max: {{ facts_max }} }">
-
+  <div class="p-4 space-y-3">
     <div class="flex items-baseline justify-between gap-2 flex-wrap text-[11px] text-muted">
       <span class="inline-flex items-center gap-1">
         <i class="fa-solid fa-folder-open text-[10px]"></i>
         <code class="text-accent">{{ facts_path_display or '(path not set — configure in Settings → Insights)' }}</code>
       </span>
-      <span x-text="`${text.length} / ${max} chars`"
-            :class="text.length > max ? 'text-danger font-semibold' : 'text-muted'"
-            class="tabular-nums"></span>
     </div>
 
-    {% if facts_writable %}
-      <textarea name="content"
-                rows="12"
-                spellcheck="false"
-                x-model="text"
-                placeholder="# About the streamer&#10;&#10;(name, pronouns, what you usually stream)&#10;&#10;# Recurring bits&#10;&#10;(inside jokes, pet names, lore from past streams)"
-                class="w-full font-mono text-xs leading-relaxed p-3 rounded-lg border border-subtle bg-canvas text-primary focus:border-accent focus:outline-none"></textarea>
+    {# Toolbar: download / upload-into-textarea / revert.
 
-      <div class="flex items-center justify-between gap-2 flex-wrap">
-        <p class="text-[11px] text-muted italic">
-          Saves to disk. Mtime-cached — the next AI refresh
-          (within ~3 min) picks up your change. Soft cap is
-          {{ facts_max }} chars; longer files get truncated when
-          loaded.
-        </p>
-        <button type="submit"
-                class="text-xs inline-flex items-center gap-1 px-3 py-1.5 rounded border border-accent/40 bg-accent/15 hover:bg-accent/25 text-accent transition-all duration-150 ease-out">
-          <i class="fa-solid fa-floppy-disk text-[11px]"></i> Save facts
-        </button>
+       Upload reads the chosen .md file client-side via FileReader and
+       drops the contents into the textarea — it does NOT submit on
+       its own. The streamer reviews the loaded content and clicks
+       Save (one form, one path) to commit. This avoids the
+       upload-form / textarea-form race that previously stole the
+       Save click. Revert is its own POST form.
+
+       The download is a plain GET link styled to match. #}
+    <div class="flex items-center gap-2 flex-wrap">
+      <a href="/settings/streamer-facts/default"
+         class="text-xs inline-flex items-center gap-1 px-3 py-1.5 rounded border border-subtle bg-surface-raised hover:bg-surface text-primary transition-all duration-150 ease-out"
+         download="streamer_facts.md">
+        <i class="fa-solid fa-download text-[11px]"></i> Download default
+      </a>
+
+      {% if facts_writable %}
+        <label class="text-xs inline-flex items-center gap-1 px-3 py-1.5 rounded border border-subtle bg-surface-raised hover:bg-surface text-primary cursor-pointer transition-all duration-150 ease-out"
+               x-data="{ name: '' }">
+          <i class="fa-solid fa-upload text-[11px]"></i>
+          <span x-text="name || 'Load .md file'"></span>
+          <input type="file"
+                 accept=".md,.markdown,.txt,text/markdown,text/plain"
+                 class="hidden"
+                 @change="
+                   const f = $event.target.files[0];
+                   if (!f) return;
+                   name = f.name;
+                   const reader = new FileReader();
+                   reader.onload = (e) => {
+                     const ta = document.querySelector('textarea[name=content]');
+                     if (!ta) return;
+                     ta.value = e.target.result;
+                     ta.dispatchEvent(new Event('input', { bubbles: true }));
+                   };
+                   reader.readAsText(f);
+                   $event.target.value = '';
+                 " />
+        </label>
+
+        <form method="post"
+              action="/settings/streamer-facts/revert"
+              hx-post="/settings/streamer-facts/revert"
+              hx-target="#{{ _id }}"
+              hx-swap="outerHTML"
+              hx-confirm="Overwrite the current channel facts with the generic default? Your existing notes will be lost."
+              class="inline-flex">
+          <button type="submit"
+                  hx-disabled-elt="this"
+                  class="text-xs inline-flex items-center gap-1 px-3 py-1.5 rounded border border-subtle bg-surface-raised hover:bg-surface text-primary transition-all duration-150 ease-out disabled:opacity-60 disabled:cursor-wait">
+            <span class="inline-flex items-center gap-1 [.htmx-request_&]:hidden">
+              <i class="fa-solid fa-rotate-left text-[11px]"></i> Revert to default
+            </span>
+            <span class="htmx-indicator inline-flex items-center gap-1">
+              <i class="fa-solid fa-spinner fa-spin text-[11px]"></i> Reverting…
+            </span>
+          </button>
+        </form>
+      {% endif %}
+    </div>
+
+    {# The char counter uses a tiny x-data scope with `count` bound
+       via @input — NOT `x-model`. With x-model, Alpine can overwrite
+       the textarea's inner text during init, especially after an
+       HTMX swap, which is how empty-save submissions slipped through.
+       Native input listener leaves the DOM `.value` strictly
+       user-controlled. #}
+    <form method="post"
+          action="/settings/streamer-facts"
+          hx-post="/settings/streamer-facts"
+          hx-target="#{{ _id }}"
+          hx-swap="outerHTML"
+          class="space-y-3"
+          x-data="{ count: {{ facts_text | length }}, max: {{ facts_max }} }">
+
+      <div class="flex items-baseline justify-end text-[11px] text-muted">
+        <span x-text="`${count} / ${max} chars`"
+              :class="count > max ? 'text-danger font-semibold' : 'text-muted'"
+              class="tabular-nums"></span>
       </div>
-    {% else %}
-      <div class="text-xs text-warning italic inline-flex items-start gap-2">
-        <i class="fa-solid fa-triangle-exclamation mt-0.5"></i>
-        <span>
-          Streamer-facts file isn't writable from here. Either set
-          <code class="text-accent">streamer_facts_path</code> in
-          Settings → Insights, or check that the path resolves to a
-          regular file in a writable directory.
-        </span>
-      </div>
-    {% endif %}
-  </form>
+
+      {% if facts_writable %}
+        <textarea name="content"
+                  rows="12"
+                  spellcheck="false"
+                  @input="count = $event.target.value.length"
+                  placeholder="# About the streamer&#10;&#10;(name, pronouns, what you usually stream)&#10;&#10;# Recurring bits&#10;&#10;(inside jokes, pet names, lore from past streams)"
+                  class="w-full font-mono text-xs leading-relaxed p-3 rounded-lg border border-subtle bg-canvas text-primary focus:border-accent focus:outline-none">{{ facts_text }}</textarea>
+
+        <div class="flex items-center justify-between gap-2 flex-wrap">
+          <p class="text-[11px] text-muted italic">
+            Saves to disk. Mtime-cached — the next AI refresh
+            (within ~3 min) picks up your change. Soft cap is
+            {{ facts_max }} chars; longer files get truncated when
+            loaded.
+          </p>
+          {# `hx-disabled-elt="this"` blocks the double-submits the
+             streamer was getting before; the request-state classes
+             swap label/icon to a spinner so it's visibly working. #}
+          <button type="submit"
+                  hx-disabled-elt="this"
+                  class="text-xs inline-flex items-center gap-1 px-3 py-1.5 rounded border border-accent/40 bg-accent/15 hover:bg-accent/25 text-accent transition-all duration-150 ease-out disabled:opacity-60 disabled:cursor-wait">
+            <span class="inline-flex items-center gap-1 [.htmx-request_&]:hidden">
+              <i class="fa-solid fa-floppy-disk text-[11px]"></i> Save facts
+            </span>
+            <span class="htmx-indicator inline-flex items-center gap-1">
+              <i class="fa-solid fa-spinner fa-spin text-[11px]"></i> Saving…
+            </span>
+          </button>
+        </div>
+      {% else %}
+        <div class="text-xs text-warning italic inline-flex items-start gap-2">
+          <i class="fa-solid fa-triangle-exclamation mt-0.5"></i>
+          <span>
+            Streamer-facts file isn't writable from here. Either set
+            <code class="text-accent">streamer_facts_path</code> in
+            Settings → Insights, or check that the path resolves to a
+            regular file in a writable directory.
+          </span>
+        </div>
+      {% endif %}
+    </form>
+  </div>
 </article>

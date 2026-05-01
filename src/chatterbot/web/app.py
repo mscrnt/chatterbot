@@ -1357,6 +1357,12 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     # counter and the loader agree on what gets sent to the LLM.
     _STREAMER_FACTS_MAX_CHARS = 4000
 
+    # Generic template shipped in the repo. Doubles as both "download
+    # default" and "revert to default" source — keeps the two paths
+    # in sync without the streamer ever picking up another channel's
+    # facts by accident.
+    _STREAMER_FACTS_DEFAULT_PATH = Path("data/streamer_facts.example.md")
+
     def _streamer_facts_paths() -> tuple[Path | None, str]:
         """Resolve the configured streamer-facts path. Returns
         `(absolute_path, display_path)` — `display_path` is the value
@@ -1445,8 +1451,34 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             return TEMPLATES.TemplateResponse(
                 request, "partials/streamer_facts_editor.html", ctx,
             )
+        # The editor is now a single textarea + Save flow; "Load .md
+        # file" reads the file client-side (FileReader) and drops it
+        # into the textarea, so we only ever read `content` here.
         form = await request.form()
         content = (form.get("content") or "").replace("\r\n", "\n")
+        # Guard against the "blank-save wipes the file" footgun: if
+        # the textarea binding mis-fires (e.g. Alpine fails to
+        # initialise) and the form posts an empty string while a
+        # non-empty file is already on disk, refuse the save. To
+        # actually clear the file, the streamer can revert to default
+        # and then save an empty edit, or delete it on disk.
+        if not content.strip() and abs_path.is_file():
+            try:
+                existing = abs_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                existing = ""
+            if existing.strip():
+                ctx = _build_streamer_facts_context(
+                    flash=(
+                        "Refusing to overwrite existing facts with an "
+                        "empty save. Reload the page if the editor "
+                        "looks blank, or use Revert to default."
+                    ),
+                    flash_kind="error",
+                )
+                return TEMPLATES.TemplateResponse(
+                    request, "partials/streamer_facts_editor.html", ctx,
+                )
         # Hard cap = soft cap × 2 so the editor's counter going
         # slightly red doesn't reject a save outright; a runaway
         # paste 10× the cap does.
@@ -1476,6 +1508,84 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             flash=(
                 f"Saved ({len(content)} chars). The next AI refresh "
                 "picks up the change."
+            ),
+            flash_kind="success",
+        )
+        return TEMPLATES.TemplateResponse(
+            request, "partials/streamer_facts_editor.html", ctx,
+        )
+
+    @app.get("/settings/streamer-facts/default")
+    async def settings_streamer_facts_default():
+        """Serve the canonical generic facts template as a download.
+        Streamers fill it in offline and re-upload via the editor."""
+        p = _STREAMER_FACTS_DEFAULT_PATH
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        if not p.is_file():
+            raise HTTPException(404, "default template missing")
+        return FileResponse(
+            p,
+            media_type="text/markdown; charset=utf-8",
+            filename="streamer_facts.md",
+        )
+
+    @app.post("/settings/streamer-facts/revert", response_class=HTMLResponse)
+    async def settings_streamer_facts_revert(request: Request):
+        """Overwrite the configured facts file with the canonical
+        generic template. Used when the streamer wants a clean slate
+        — recovers from an accidental upload of someone else's file."""
+        abs_path, display = _streamer_facts_paths()
+        if abs_path is None:
+            ctx = _build_streamer_facts_context(
+                flash=(
+                    "No path configured. Set "
+                    "streamer_facts_path in Settings → Insights first."
+                ),
+                flash_kind="error",
+            )
+            return TEMPLATES.TemplateResponse(
+                request, "partials/streamer_facts_editor.html", ctx,
+            )
+        default_p = _STREAMER_FACTS_DEFAULT_PATH
+        if not default_p.is_absolute():
+            default_p = Path.cwd() / default_p
+        try:
+            default_text = default_p.read_text(encoding="utf-8")
+        except OSError as e:
+            ctx = _build_streamer_facts_context(
+                flash=f"Default template missing: {e}",
+                flash_kind="error",
+            )
+            return TEMPLATES.TemplateResponse(
+                request, "partials/streamer_facts_editor.html", ctx,
+            )
+        if abs_path.exists() and not abs_path.is_file():
+            ctx = _build_streamer_facts_context(
+                flash=(
+                    f"Path {display!r} exists but is not a regular "
+                    "file. Refusing to overwrite."
+                ),
+                flash_kind="error",
+            )
+            return TEMPLATES.TemplateResponse(
+                request, "partials/streamer_facts_editor.html", ctx,
+            )
+        try:
+            abs_path.parent.mkdir(parents=True, exist_ok=True)
+            abs_path.write_text(default_text, encoding="utf-8")
+        except OSError as e:
+            ctx = _build_streamer_facts_context(
+                flash=f"Couldn't write file: {e}",
+                flash_kind="error",
+            )
+            return TEMPLATES.TemplateResponse(
+                request, "partials/streamer_facts_editor.html", ctx,
+            )
+        ctx = _build_streamer_facts_context(
+            flash=(
+                f"Reverted to default ({len(default_text)} chars). Fill "
+                "in the bracketed sections for your channel."
             ),
             flash_kind="success",
         )
