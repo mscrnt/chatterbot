@@ -57,9 +57,9 @@
               aria-selected="{{ 'false' if _is_summary else 'true' }}"
               class="{% if not _is_summary %}{{ _btn_active }}{% else %}{{ _btn_idle }}{% endif %}"
               onclick="localStorage.setItem('chatterbot.transcriptView','log'); document.body.dispatchEvent(new CustomEvent('transcript-view-changed'));"
-              title="Show every raw utterance">
+              title="Show every raw transcribed utterance">
         {% if not _is_summary %}<i class="fa-solid fa-circle-check text-[9px]"></i>{% else %}<i class="fa-solid fa-list text-[9px]"></i>{% endif %}
-        full log
+        transcriptions
       </button>
       {% if _is_summary and groups %}
         <span class="text-[10px] text-muted ml-1 tabular-nums">{{ groups | length }}</span>
@@ -103,7 +103,7 @@
     {% if not groups %}
       <div class="text-xs text-muted italic px-1 py-2">
         Every ~60 s of audio rolls up into one timeline moment. None
-        yet for this stream — switch to <strong class="text-primary">full log</strong>
+        yet for this stream — switch to <strong class="text-primary">transcriptions</strong>
         if you want raw utterances right now.
       </div>
     {% else %}
@@ -115,18 +115,28 @@
       <div x-data="{ expanded: localStorage.getItem('chatterbot.transcriptExpanded') === '1' }">
         <ul class="space-y-1 text-sm">
           {% for g in groups %}
+            {% set _is_chat_only = g.kind == 'chat_only' %}
             <li {% if loop.index0 >= _strip_visible %}x-show="expanded" x-cloak{% endif %}>
               <button type="button"
                       class="{{ _row_btn }}"
                       hx-get="/modals/transcript-group/{{ g.id }}"
                       hx-target="#modal-root"
                       hx-swap="innerHTML"
-                      title="Open with the underlying utterances + screenshots">
+                      title="{{ 'Open chat-only summary with messages + screenshots' if _is_chat_only else 'Open with the underlying utterances + screenshots' }}">
                 <span class="{{ _row_ts }}">{{ g.start_ts | short_ts }}</span>
-                <i class="fa-solid fa-microphone-lines text-muted text-[10px] shrink-0"></i>
+                {% if _is_chat_only %}
+                  <i class="fa-solid fa-comments text-muted text-[10px] shrink-0"
+                     title="chat-only — no audio in this window"></i>
+                {% else %}
+                  <i class="fa-solid fa-microphone-lines text-muted text-[10px] shrink-0"></i>
+                {% endif %}
                 <span class="{{ _row_text }}">{{ g.summary }}</span>
                 <span class="{{ _row_trail }}">
-                  {{ g.last_chunk_id - g.first_chunk_id + 1 }} lines
+                  {% if _is_chat_only %}
+                    chat
+                  {% else %}
+                    {{ g.last_chunk_id - g.first_chunk_id + 1 }} lines
+                  {% endif %}
                 </span>
               </button>
             </li>

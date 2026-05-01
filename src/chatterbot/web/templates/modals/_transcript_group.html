@@ -1,5 +1,6 @@
-{% set modal_title = 'Timeline moment' %}
-{% set modal_icon = 'fa-clock-rotate-left' %}
+{% set _is_chat_only = (group.kind == 'chat_only') %}
+{% set modal_title = 'Chat moment' if _is_chat_only else 'Timeline moment' %}
+{% set modal_icon = 'fa-comments' if _is_chat_only else 'fa-clock-rotate-left' %}
 {% set modal_tone = 'accent' %}
 {% set modal_size = 'lg' %}
 {% extends "components/_modal.html" %}
@@ -17,8 +18,15 @@
       <span>·</span>
       <span>{{ duration_s }}s window</span>
     {% endif %}
-    <span>·</span>
-    <span>{{ chunks | length }} utterance{{ '' if chunks|length == 1 else 's' }}</span>
+    {% if _is_chat_only %}
+      <span>·</span>
+      <span class="inline-flex items-center gap-1 text-accent">
+        <i class="fa-solid fa-comments text-[10px]"></i> chat-only
+      </span>
+    {% else %}
+      <span>·</span>
+      <span>{{ chunks | length }} utterance{{ '' if chunks|length == 1 else 's' }}</span>
+    {% endif %}
     {% if chat_messages %}
       <span>·</span>
       <span>{{ chat_messages | length }} chat line{{ '' if chat_messages|length == 1 else 's' }}</span>
@@ -29,8 +37,10 @@
      evidence the LLM used to write it. #}
   <section class="rounded-lg border border-accent/30 bg-accent/5 p-3">
     <div class="flex items-baseline gap-2 mb-1">
-      <i class="fa-solid fa-microphone-lines text-accent text-[10px]"></i>
-      <span class="text-[11px] uppercase tracking-wider text-muted">summary</span>
+      <i class="fa-solid {% if _is_chat_only %}fa-comments{% else %}fa-microphone-lines{% endif %} text-accent text-[10px]"></i>
+      <span class="text-[11px] uppercase tracking-wider text-muted">
+        summary{% if _is_chat_only %} · chat only (no audio in this window){% endif %}
+      </span>
     </div>
     <p class="text-primary leading-snug">{{ group.summary }}</p>
   </section>
@@ -64,7 +74,9 @@
   {% endif %}
 
   {# Underlying utterances. Click any single one to open its own
-     context modal (re-anchors on that utterance with neighbours). #}
+     context modal (re-anchors on that utterance with neighbours).
+     Suppressed for chat-only rows — there are no chunks to render. #}
+  {% if not _is_chat_only %}
   <section>
     <p class="text-[11px] uppercase tracking-wider text-muted mb-1">
       raw utterances ({{ chunks | length }})
@@ -92,6 +104,7 @@
       {% endfor %}
     </ul>
   </section>
+  {% endif %}
 
   {# Chat that paired with this audio — same exact rows the LLM saw
      as the CHAT DURING THIS WINDOW context block when building the

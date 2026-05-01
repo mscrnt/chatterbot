@@ -1128,6 +1128,233 @@ HARD RULES:
 Reply with `summary` = the line(s) (or empty string).
 """
 
+    CHAT_ONLY_GROUP_SUMMARY_SYSTEM = """You're labeling a window of CHAT MESSAGES on a streamer's dashboard. There was no audio in this window — the streamer had whisper off, was on a break, or just wasn't talking. Your job is to recap what CHAT was doing during that quiet stretch so the streamer can scrub the timeline and see what they missed.
+
+INPUT:
+  - A numbered list of chat messages from the window.
+  - Optional: a screenshot grid (silent context — DO NOT describe the image).
+  - Optional: STREAMER NAME / KNOWN GAME pins — refer to them by name when natural.
+
+PRIORITY: chat is the primary input (no audio in this window). The image, when present, is silent grounding only.
+
+Write a 2-3 sentence OBSERVATIONAL recap of WHAT CHAT WAS DISCUSSING:
+  - Lead with the dominant topic or topics chat was riffing on.
+  - One sentence on tone if it was distinctive (hyped, frustrated, curious, asking lots of questions, etc.) — skip when chat was generic.
+  - Name chatters when they drove a recognisable bit, not for routine messages.
+
+If chat was just generic noise (emote spam, bot commands, "hi" greetings), return an empty `summary` — the system filters empty rows out of the strip rather than persist filler.
+
+NEVER describe the image directly. Use it only as silent grounding for what chat is reacting to (e.g. "chat reacts to the boss kill" only if you can ground both the boss kill in the image AND the reaction in chat).
+
+Reply with `summary` = the line(s) (or empty string).
+"""
+
+    async def build_chat_only_group_summary_prompt(
+        self, messages: list, *, include_image: bool = True,
+    ) -> dict:
+        """Assemble the prompt + screenshot grid for a chat-only group
+        summary (no audio in the window). Mirrors the shape of
+        `build_group_summary_prompt` so the surrounding code can read
+        the bundle the same way.
+
+        Screenshots are still attached when available — they're silent
+        grounding for what chat might be reacting to. The `KNOWN GAME`
+        pin and streamer-name pin still apply."""
+        if not messages:
+            return {
+                "system_prompt": self.CHAT_ONLY_GROUP_SUMMARY_SYSTEM,
+                "user_prompt": "",
+                "screenshot_count": 0,
+                "screenshot_grid_b64": None,
+                "channel_context": "",
+                "known_game": "",
+                "model": getattr(self.settings, "ollama_model", ""),
+                "num_ctx": self.GROUP_SUMMARY_NUM_CTX,
+                "think": True,
+            }
+        first_ts = messages[0].ts
+        last_ts = messages[-1].ts
+
+        grid_b64: str | None = None
+        screenshot_count = 0
+        if include_image:
+            try:
+                shots = await asyncio.to_thread(
+                    self.repo.screenshots_in_range,
+                    first_ts, last_ts,
+                    max_count=int(getattr(self.settings, "screenshot_grid_max", 4)),
+                )
+            except Exception:
+                logger.exception("transcript chat-only: screenshots_in_range failed")
+                shots = []
+            if shots:
+                from pathlib import Path
+                data_dir = Path(self.settings.db_path).parent
+                abs_paths = [str(data_dir / s.path) for s in shots]
+                try:
+                    grid_bytes = await asyncio.to_thread(_stitch_grid, abs_paths)
+                except Exception:
+                    logger.exception("transcript chat-only: stitch_grid failed")
+                    grid_bytes = None
+                if grid_bytes:
+                    import base64 as _b64
+                    grid_b64 = _b64.b64encode(grid_bytes).decode("ascii")
+                    screenshot_count = len(shots)
+
+        known_game = ""
+        try:
+            ts = getattr(self.twitch_status, "status", None)
+            if ts is not None and getattr(ts, "is_live", False):
+                known_game = (getattr(ts, "game_name", None) or "").strip()
+        except Exception:
+            known_game = ""
+
+        image_note = (
+            "\n\nAn image is attached showing what was on screen during "
+            "this window. SILENT context only — do NOT describe it. Use "
+            "it to ground what chat might be reacting to." +
+            (f" The KNOWN GAME is {known_game!r} (Twitch API)." if known_game else "")
+        ) if screenshot_count else ""
+
+        channel_context = self._build_channel_context()
+
+        chat_lines = [
+            f"  [{m.id}] {m.ts[11:16] if len(m.ts) >= 16 else m.ts} "
+            f"<{m.name}> {m.content[:200]}"
+            for m in messages
+        ]
+        chat_block = (
+            f"CHAT MESSAGES (oldest → newest, {len(messages)} total — "
+            "primary input for this window):\n"
+            + "\n".join(chat_lines)
+        )
+
+        user_prompt = (
+            channel_context
+            + chat_block
+            + image_note
+            + "\n\nSummarise what chat was discussing in this window. "
+            "2-3 sentences. Empty `summary` is fine when chat was just noise."
+        )
+
+        return {
+            "system_prompt": self.CHAT_ONLY_GROUP_SUMMARY_SYSTEM,
+            "user_prompt": user_prompt,
+            "screenshot_count": screenshot_count,
+            "screenshot_grid_b64": grid_b64,
+            "channel_context": channel_context,
+            "known_game": known_game,
+            "model": getattr(self.settings, "ollama_model", ""),
+            "num_ctx": self.GROUP_SUMMARY_NUM_CTX,
+            "think": True,
+        }
+
+    async def _run_chat_only_group_summary(self) -> int:
+        """One pass of the chat-only fallback. Pulls chat messages
+        since the chat watermark (advanced by both voice and chat-only
+        passes), summarises them via the LLM, and persists with
+        kind='chat_only'.
+
+        No-ops when not enough new chat to summarise. Threshold lives
+        in `chat_only_summary_min_messages` (default 5)."""
+        min_msgs = max(2, int(getattr(
+            self.settings, "chat_only_summary_min_messages", 5,
+        )))
+        chat_watermark = await asyncio.to_thread(
+            self.repo.latest_transcript_group_message_watermark,
+        )
+        # Lookback window: longer than the loop interval so a busy
+        # message burst right at the previous tick still gets covered
+        # if it just missed the watermark cutoff. 10 min is a safe
+        # ceiling for most channels.
+        try:
+            within_minutes = max(1, int(getattr(
+                self.settings, "chat_only_summary_window_minutes", 10,
+            )))
+        except (TypeError, ValueError):
+            within_minutes = 10
+        try:
+            messages = await asyncio.to_thread(
+                self.repo.messages_after_id,
+                chat_watermark,
+                limit=120,
+                within_minutes=within_minutes,
+            )
+        except Exception:
+            logger.exception("transcript chat-only: messages_after_id failed")
+            return 0
+
+        if len(messages) < min_msgs:
+            return 0
+
+        bundle = await self.build_chat_only_group_summary_prompt(messages)
+        prompt = bundle["user_prompt"]
+        grid_b64 = bundle["screenshot_grid_b64"]
+        screenshot_count = bundle["screenshot_count"]
+
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "transcript chat-only: %d msgs, %d screenshot(s), "
+                "prompt=%d chars (watermark=%d)",
+                len(messages), screenshot_count, len(prompt), chat_watermark,
+            )
+
+        try:
+            from .llm.schemas import TranscriptGroupSummaryResponse
+            from .llm.prompts import resolve_prompt
+            response = await self.llm.generate_structured(
+                prompt=prompt,
+                # Reuse the voice prompt's editable registry slot —
+                # the chat-only system prompt is a hardcoded sibling
+                # since its job is mechanical fallback, not a
+                # streamer-personality surface. If a streamer wants
+                # to tune chat-only voice we can add a separate slot.
+                system_prompt=bundle["system_prompt"],
+                response_model=TranscriptGroupSummaryResponse,
+                num_ctx=self.GROUP_SUMMARY_NUM_CTX,
+                images=[grid_b64] if grid_b64 else None,
+                think=True,
+                call_site="transcript.group_summary",
+            )
+        except Exception:
+            logger.exception("transcript: chat-only summary call failed")
+            return 0
+
+        summary = (response.summary or "").strip()
+        # Empty summary — chat was just noise. Advance the watermark
+        # anyway by writing a placeholder row so the next tick doesn't
+        # retry the same messages forever; the strip filters it out.
+        if not summary:
+            logger.info(
+                "transcript chat-only: skipped (LLM empty) — %d msgs",
+                len(messages),
+            )
+            await asyncio.to_thread(
+                self.repo.add_transcript_group,
+                start_ts=messages[0].ts, end_ts=messages[-1].ts,
+                first_chunk_id=0, last_chunk_id=0,
+                summary=self.repo.PLACEHOLDER_GROUP_SUMMARY,
+                kind="chat_only",
+                last_message_id=messages[-1].id,
+            )
+            return 1
+
+        message_ids = [int(m.id) for m in messages]
+        await asyncio.to_thread(
+            self.repo.add_transcript_group,
+            start_ts=messages[0].ts, end_ts=messages[-1].ts,
+            first_chunk_id=0, last_chunk_id=0,
+            summary=summary,
+            context_message_ids=message_ids,
+            kind="chat_only",
+            last_message_id=messages[-1].id,
+        )
+        logger.info(
+            "transcript chat-only: written — %d msgs (id %d → %d): %r",
+            len(messages), messages[0].id, messages[-1].id, summary[:80],
+        )
+        return 1
+
     async def transcript_embed_backfill_loop(self) -> None:
         """Background task: embed historical transcript chunks that
         don't have a vec_transcripts row.
@@ -1317,8 +1544,19 @@ Reply with `summary` = the line(s) (or empty string).
 
     async def transcript_group_loop(self) -> None:
         """Background task: every `whisper_group_interval_seconds`,
-        pull new chunks since the last group's watermark and write one
-        LLM-summarised group row. No-op when disabled or whisper off."""
+        write one LLM-summarised group row.
+
+        Two paths inside `_run_group_summary`:
+          - voice (default): chunks-since-watermark drive the summary,
+            chat + screenshots ride along as supplementary context.
+          - chat-only fallback: when there are no new chunks but new
+            chat messages have arrived, summarise from chat alone so
+            the Stream timeline isn't empty during whisper-off
+            stretches. Audio remains primary when present.
+
+        The loop itself runs regardless of whisper_enabled — gating is
+        moved into `_run_group_summary` so a chat-only run can fire
+        even when whisper is off."""
         await asyncio.sleep(20)
         while True:
             try:
@@ -1328,8 +1566,6 @@ Reply with `summary` = the line(s) (or empty string).
                 if interval <= 0:
                     return
                 await asyncio.sleep(interval)
-                if not self.enabled:
-                    continue
                 await self._run_group_summary()
             except asyncio.CancelledError:
                 raise
@@ -1561,8 +1797,17 @@ Reply with `summary` = the line(s) (or empty string).
         }
 
     async def _run_group_summary(self) -> int:
-        """One pass — pull all chunks > last group's last_chunk_id,
-        summarise, persist. Returns number of groups created (0 or 1)."""
+        """One pass — voice-first; chat-only fallback when no audio.
+
+        Voice path: pull chunks since the chunk watermark, run the
+        existing group summary using transcripts as primary input
+        with chat + screenshots supplementary.
+
+        Chat-only fallback: when there are no new chunks but new
+        chat messages have arrived, summarise from chat alone so the
+        Stream timeline isn't empty during whisper-off stretches.
+
+        Returns number of groups created (0 or 1)."""
         watermark = await asyncio.to_thread(
             self.repo.latest_transcript_group_last_chunk_id
         )
@@ -1573,7 +1818,14 @@ Reply with `summary` = the line(s) (or empty string).
             self.settings, "whisper_group_min_chunks", 2,
         )))
         if len(chunks) < min_chunks:
-            return 0
+            # No fresh audio. If chat-only summaries are enabled and
+            # there's enough chat to summarise, fall through; otherwise
+            # bail.
+            if not bool(getattr(
+                self.settings, "chat_only_summary_enabled", True,
+            )):
+                return 0
+            return await self._run_chat_only_group_summary()
 
         bundle = await self.build_group_summary_prompt(chunks)
         prompt = bundle["user_prompt"]
@@ -1655,12 +1907,17 @@ Reply with `summary` = the line(s) (or empty string).
                 return 1
             return 0
 
+        # Advance the chat watermark too so the chat-only fallback
+        # doesn't re-summarize messages this voice pass already saw.
+        last_msg_id = max(chat_message_ids) if chat_message_ids else None
         await asyncio.to_thread(
             self.repo.add_transcript_group,
             start_ts=chunks[0].ts, end_ts=chunks[-1].ts,
             first_chunk_id=chunks[0].id, last_chunk_id=chunks[-1].id,
             summary=summary,
             context_message_ids=chat_message_ids,
+            kind="voice",
+            last_message_id=last_msg_id,
         )
         logger.info(
             "transcript: group written — %d chunks (id %d → %d): %r",

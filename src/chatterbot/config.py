@@ -389,6 +389,14 @@ class Settings(BaseSettings):
     # the LLM alongside the transcript text on each group summary —
     # the model gets visual context too, not just audio. Set
     # interval=0 to disable screenshot capture entirely.
+    # Chat-only fallback group summaries — fire when there's chat
+    # but no audio in the window so the Stream timeline isn't empty
+    # during whisper-off stretches. Audio remains primary when it
+    # exists; this is a fallback only.
+    chat_only_summary_enabled: bool = True
+    chat_only_summary_min_messages: int = 5
+    chat_only_summary_window_minutes: int = 10
+
     screenshot_interval_seconds: int = 15
     # 0 = keep forever (default). Captures are content-hash deduped
     # and stored as WebP so disk growth is bounded; raise above 0 to

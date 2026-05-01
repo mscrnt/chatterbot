@@ -159,6 +159,15 @@ class TranscriptGroup:
     summary: str
     created_at: str
     context_message_ids: list[int] = field(default_factory=list)
+    # 'voice' = current behavior (transcripts primary, chat + screenshots
+    # supplementary). 'chat_only' = whisper had no audio in the window;
+    # chat is the primary input. The strip + modal render the two
+    # variants slightly differently (icon + label).
+    kind: str = "voice"
+    # Watermark for chat-only passes — largest message_id this group
+    # consumed, so the next chat-only pass starts after it. None for
+    # legacy voice rows that predate the column.
+    last_message_id: int | None = None
 
 
 @dataclass
@@ -957,6 +966,24 @@ class ChatterRepo:
                 cur.execute(
                     "ALTER TABLE transcript_groups "
                     "ADD COLUMN context_message_ids TEXT"
+                )
+            # Chat-only fallback summaries — when whisper isn't running
+            # (or just had no audio in the window), the grouper can
+            # still emit a row from chat alone. `kind` distinguishes
+            # 'voice' (the default — transcripts as primary input,
+            # current behavior) from 'chat_only' (no transcripts; chat
+            # is the primary input). `last_message_id` tracks the
+            # chat-message watermark so successive chat-only passes
+            # don't re-summarize the same messages.
+            if "kind" not in tg_cols:
+                cur.execute(
+                    "ALTER TABLE transcript_groups "
+                    "ADD COLUMN kind TEXT NOT NULL DEFAULT 'voice'"
+                )
+            if "last_message_id" not in tg_cols:
+                cur.execute(
+                    "ALTER TABLE transcript_groups "
+                    "ADD COLUMN last_message_id INTEGER"
                 )
             # OBS screenshots paired with transcript chunks, captured by
             # the screenshot loop every N seconds while whisper + OBS
@@ -2776,11 +2803,17 @@ class ChatterRepo:
         self, *, start_ts: str, end_ts: str,
         first_chunk_id: int, last_chunk_id: int, summary: str,
         context_message_ids: list[int] | None = None,
+        kind: str = "voice",
+        last_message_id: int | None = None,
     ) -> int:
         """Persist one summarised group. `context_message_ids` records
         the chat messages the LLM saw as the CHAT DURING THIS WINDOW
         block — the modal hydrates those exact rows so the streamer
-        sees the same chat the LLM did, not a re-queried approximation."""
+        sees the same chat the LLM did, not a re-queried approximation.
+
+        `kind='chat_only'` rows pass first_chunk_id=last_chunk_id=0 as
+        sentinels (the column is NOT NULL legacy) and set
+        `last_message_id` so the chat-only watermark advances."""
         ctx_json = (
             json.dumps([int(i) for i in context_message_ids])
             if context_message_ids else None
@@ -2790,11 +2823,14 @@ class ChatterRepo:
                 """
                 INSERT INTO transcript_groups(
                     start_ts, end_ts, first_chunk_id, last_chunk_id,
-                    summary, created_at, context_message_ids
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    summary, created_at, context_message_ids,
+                    kind, last_message_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (start_ts, end_ts, int(first_chunk_id), int(last_chunk_id),
-                 summary.strip(), _now_iso(), ctx_json),
+                 summary.strip(), _now_iso(), ctx_json,
+                 str(kind),
+                 int(last_message_id) if last_message_id is not None else None),
             )
             return int(cur.lastrowid)
 
@@ -2810,18 +2846,19 @@ class ChatterRepo:
         Placeholder rows (the LLM gave up but we needed to advance the
         watermark) are hidden by default — they exist for the system,
         not for the streamer."""
+        cols = (
+            "id, start_ts, end_ts, first_chunk_id, last_chunk_id, "
+            "summary, created_at, kind, last_message_id"
+        )
         if include_placeholders:
             sql = (
-                "SELECT id, start_ts, end_ts, first_chunk_id, last_chunk_id, "
-                "       summary, created_at "
-                "FROM transcript_groups ORDER BY id DESC LIMIT ?"
+                f"SELECT {cols} FROM transcript_groups "
+                "ORDER BY id DESC LIMIT ?"
             )
             params: tuple = (int(limit),)
         else:
             sql = (
-                "SELECT id, start_ts, end_ts, first_chunk_id, last_chunk_id, "
-                "       summary, created_at "
-                "FROM transcript_groups "
+                f"SELECT {cols} FROM transcript_groups "
                 "WHERE summary IS NOT NULL AND summary != '' AND summary != ? "
                 "ORDER BY id DESC LIMIT ?"
             )
@@ -2834,6 +2871,11 @@ class ChatterRepo:
                     first_chunk_id=int(r["first_chunk_id"]),
                     last_chunk_id=int(r["last_chunk_id"]),
                     summary=r["summary"], created_at=r["created_at"],
+                    kind=(r["kind"] or "voice"),
+                    last_message_id=(
+                        int(r["last_message_id"])
+                        if r["last_message_id"] is not None else None
+                    ),
                 )
                 for r in cur.fetchall()
             ]
@@ -2843,7 +2885,8 @@ class ChatterRepo:
             cur.execute(
                 """
                 SELECT id, start_ts, end_ts, first_chunk_id, last_chunk_id,
-                       summary, created_at, context_message_ids
+                       summary, created_at, context_message_ids,
+                       kind, last_message_id
                 FROM transcript_groups WHERE id = ?
                 """,
                 (int(group_id),),
@@ -2864,6 +2907,11 @@ class ChatterRepo:
                 last_chunk_id=int(r["last_chunk_id"]),
                 summary=r["summary"], created_at=r["created_at"],
                 context_message_ids=ctx_ids,
+                kind=(r["kind"] or "voice"),
+                last_message_id=(
+                    int(r["last_message_id"])
+                    if r["last_message_id"] is not None else None
+                ),
             )
 
     def latest_transcript_group_last_chunk_id(self) -> int:
@@ -2874,6 +2922,59 @@ class ChatterRepo:
                 "SELECT COALESCE(MAX(last_chunk_id), 0) AS x FROM transcript_groups"
             ).fetchone()
             return int(r["x"]) if r else 0
+
+    def latest_transcript_group_message_watermark(self) -> int:
+        """Chat-message watermark for the grouper loop — returns the
+        largest message_id consumed by any prior group (voice with
+        chat context OR chat-only). 0 when no groups yet OR no group
+        has recorded a message_id (e.g. a voice-only stream where
+        chat was empty).
+
+        Both paths advance this watermark so the chat-only fallback
+        doesn't re-summarize chat the voice path already covered."""
+        with self._cursor() as cur:
+            r = cur.execute(
+                "SELECT COALESCE(MAX(last_message_id), 0) AS x "
+                "FROM transcript_groups WHERE last_message_id IS NOT NULL"
+            ).fetchone()
+            return int(r["x"]) if r else 0
+
+    def messages_after_id(
+        self, message_id: int, *,
+        limit: int = 80, within_minutes: int = 10,
+    ) -> list[Message]:
+        """Recent clean messages with id > `message_id`, oldest-first.
+        Used by the chat-only group-summary path to pull a window of
+        chat that hasn't been summarised yet — bounded by a recency
+        clamp so a long-quiet channel doesn't dump hours of stale
+        chat into one summary."""
+        with self._cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT m.id, m.user_id, u.name, u.source, m.ts, m.content,
+                       m.reply_parent_login, m.reply_parent_body
+                FROM messages m
+                JOIN users u ON u.twitch_id = m.user_id
+                WHERE {self._CLEAN_MSG_WHERE}
+                  AND m.id > ?
+                  AND datetime(m.ts) >= datetime('now', ?)
+                ORDER BY m.id ASC
+                LIMIT ?
+                """,
+                (int(message_id),
+                 f"-{int(within_minutes)} minutes",
+                 int(limit)),
+            )
+            return [
+                Message(
+                    id=int(r["id"]), user_id=r["user_id"], name=r["name"],
+                    source=r["source"] or "twitch",
+                    ts=r["ts"], content=r["content"],
+                    reply_parent_login=r["reply_parent_login"],
+                    reply_parent_body=r["reply_parent_body"],
+                )
+                for r in cur.fetchall()
+            ]
 
     # ---- transcript screenshots -----------------------------------------
 
