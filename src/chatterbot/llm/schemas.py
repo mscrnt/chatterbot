@@ -413,3 +413,26 @@ class QuestionAnswerAnglesResponse(BaseModel):
     the streamer's dashboard."""
 
     angles: list[QuestionAngleText] = Field(default_factory=list, max_length=5)
+
+
+# ---- per-thread "what to say next" openers ----
+
+OpenerText = Annotated[
+    str,
+    StringConstraints(min_length=4, max_length=180, strip_whitespace=True),
+]
+
+
+class HighImpactOpenersResponse(BaseModel):
+    """Reply for the high-impact subjects modal's opener generator.
+    The LLM gets ONE topic thread plus the live chatters who've
+    historically driven it (with quotes from each), the streamer's
+    recent voice, and channel context, and returns 3-5 short opener
+    lines the streamer could use to pivot to this topic right now.
+
+    Openers should sometimes name-drop a live chatter ("alice, you
+    were saying X about this last week...") so the streamer addresses
+    the audience they actually have. Output is private to the
+    streamer's dashboard."""
+
+    openers: list[OpenerText] = Field(default_factory=list, max_length=5)

@@ -55,6 +55,24 @@
     {% endif %}
   </section>
 
+  {# Openers — async-loaded LLM bullets the streamer could use to
+     pivot to this topic right now. Cache key on the backend factors
+     in the live driver set so a change in audience triggers a
+     fresh generation; we pass the live driver ids through the URL
+     so the lookup matches what the modal saw. #}
+  {% if live_drivers %}
+    {% set _live_ids = live_drivers | map(attribute='user_id') | join(',') %}
+    <div hx-get="/insights/high-impact/{{ thread.id }}/openers?live_drivers={{ _live_ids | urlencode }}"
+         hx-trigger="intersect once"
+         hx-swap="outerHTML">
+      <p class="text-[11px] uppercase tracking-wider text-muted mb-1">openers</p>
+      <div class="flex items-center gap-2 text-xs text-muted italic py-2">
+        <i class="fa-solid fa-spinner fa-spin text-accent"></i>
+        thinking up ways to bring this up with {{ live_drivers | length }} chatter{{ '' if live_drivers|length == 1 else 's' }}…
+      </div>
+    </div>
+  {% endif %}
+
   {# Per-live-chatter quotes — what each of them said about this
      topic before. Lets the streamer open with "alice, you were
      saying X about this last week..." instead of just shouting

@@ -37,6 +37,7 @@ def test_registry_has_expected_call_sites():
         "insights.subject_talking_points",
         "insights.open_questions",
         "insights.question_answer_angles",
+        "insights.high_impact_openers",
         "insights.thread_recaps",
         "summarizer.topics_snapshot",
         "transcript.group_summary",

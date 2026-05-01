@@ -1,0 +1,36 @@
+{# Openers partial — replaces the placeholder block in
+   modals/_high_impact.html via HTMX outerHTML swap.
+
+   Three states:
+     - openers non-empty       → ordered list, accent bullet
+     - openers empty + error   → small inline warning
+     - openers empty + no err  → "no openers" empty state #}
+<div>
+  <div class="flex items-baseline justify-between mb-1">
+    <p class="text-[11px] uppercase tracking-wider text-muted">openers</p>
+    {% if openers %}
+      <span class="text-[10px] text-muted">
+        {{ openers | length }} option{{ '' if openers|length == 1 else 's' }}
+      </span>
+    {% endif %}
+  </div>
+  {% if openers %}
+    <ul class="space-y-1.5 rounded-xl border border-accent/20 bg-accent/5 p-3">
+      {% for o in openers %}
+        <li class="flex items-start gap-2 text-sm text-primary leading-snug">
+          <i class="fa-solid fa-comment-dots text-accent text-[11px] mt-1 shrink-0"></i>
+          <span>{{ o }}</span>
+        </li>
+      {% endfor %}
+    </ul>
+  {% elif error %}
+    <p class="text-xs text-warning italic inline-flex items-center gap-1">
+      <i class="fa-solid fa-triangle-exclamation"></i> {{ error }}
+    </p>
+  {% else %}
+    <p class="text-xs text-muted italic">
+      No openers to surface — the topic may not have a clear hook
+      with the people currently in chat.
+    </p>
+  {% endif %}
+</div>

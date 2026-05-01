@@ -77,6 +77,7 @@ EXPECTED_CALL_SITES = {
     "insights.talking_points",
     "insights.thread_recaps",
     "insights.engaging_subjects",
+    "insights.high_impact_openers",
     "insights.open_questions",
     "insights.question_answer_angles",
     "insights.subject_talking_points",

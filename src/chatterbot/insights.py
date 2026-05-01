@@ -260,6 +260,11 @@ class InsightsService:
         # in _refresh_open_questions when a question drops off the
         # cache so memory doesn't accumulate forever.
         self._question_angles_cache: dict[int, list[str]] = {}
+        # High-impact-subjects openers cache, keyed by composite
+        # `<thread_id>|<sorted_driver_ids>` so a change in the live
+        # audience triggers a re-generation. DB-backed; survives
+        # restarts via llm_modal_outputs.
+        self._high_impact_openers_cache: dict[str, list[str]] = {}
         # Streamer-authored channel facts, cached with mtime so a hot
         # call site (every ~3 min) doesn't re-read the file every
         # pass. Edited file → next call picks up the change.
@@ -2359,3 +2364,200 @@ Return AT MOST 5 angles. 3 is a fine answer when the question is narrow.
         except Exception:
             logger.exception("question-angles: persist failed")
         return list(angles), None
+
+    # =========================================================
+    # High-impact-subjects openers — generates short pivot lines
+    # the streamer could use to bring up a topic with the people
+    # currently in chat. Surfaced in the "What to say next" modal.
+    # Cache key factors in the live driver set so the openers
+    # refresh when the audience changes.
+    # =========================================================
+
+    HIGH_IMPACT_OPENERS_NUM_CTX = INFORMED_NUM_CTX
+
+    HIGH_IMPACT_OPENERS_SYSTEM = """You're helping a Twitch streamer figure out HOW TO PIVOT to a specific topic right now, given the chatters who are actually in chat at this moment. Your output is shown ONLY on the streamer's private dashboard — they read your suggestions, pick what feels natural, and say it out loud in their own voice.
+
+You'll receive:
+  - TOPIC — the subject the streamer is considering bringing up.
+  - RECAP — what was previously said about it on this channel (may be older).
+  - LIVE CHATTERS — the people currently in chat who have driven this topic before, each with their actual past quotes about it.
+  - STREAMER VOICE — what the streamer has been saying out loud recently (so you don't suggest something they just said).
+  - CHANNEL CONTEXT — what's currently being streamed.
+
+Produce 3-5 SHORT openers (one line each) the streamer could USE TO PIVOT to this topic. Openers are starter phrases — not full speeches:
+- WHEN POSSIBLE, name-drop a specific live chatter and reference their actual past take ("Alice, weren't you saying X last week?"). Use the streamer's own conversational voice; don't formal-sounding ("It has come to my attention that..."), don't read like an essay.
+- Vary the shapes: a name-drop opener, a topic-pivot opener that doesn't single anyone out, an invite-the-room opener.
+- Stay grounded in what's actually visible — don't invent positions a chatter never held. If the past quote is ambiguous, summarize it neutrally.
+- Don't suggest anything the streamer has already said in the recent voice transcript.
+
+Return AT MOST 5 openers. 3 is a fine answer. If the topic genuinely doesn't fit the current room (no live drivers + no clear hook), say so as one of the openers ("acknowledge there's no obvious hook for this right now") instead of fabricating engagement.
+"""
+
+    async def generate_high_impact_openers(
+        self,
+        thread_id: int,
+        live_driver_ids: list[str],
+        *,
+        force: bool = False,
+    ) -> tuple[list[str], str | None]:
+        """Generate per-thread "what to say now" openers for the
+        high-impact subjects modal.
+
+        Returns `(openers, error)` — `error` is None on success, a
+        short string when the LLM call failed.
+
+        Cache key = `<thread_id>|<sorted_driver_ids>` so a change
+        in the live audience triggers a fresh generation. Old keys
+        get pruned via the `older_than_secs` filter on the modal
+        outputs table (6h TTL — opener relevance decays fast)."""
+        cache_key = (
+            f"{thread_id}|"
+            + ",".join(sorted(str(d) for d in live_driver_ids))
+        )
+        # In-memory cache — same composite key, free re-open within
+        # the same session.
+        if not force and cache_key in self._high_impact_openers_cache:
+            return list(self._high_impact_openers_cache[cache_key]), None
+
+        thread = await asyncio.to_thread(self.repo.get_thread, thread_id)
+        if thread is None:
+            return [], "thread not found"
+
+        # DB-backed cache (survives a dashboard restart). Same
+        # composite key. Hydrate the in-memory cache and serve.
+        if not force:
+            row = await asyncio.to_thread(
+                self.repo.get_llm_modal_output,
+                "high_impact_openers", cache_key,
+            )
+            if row is not None:
+                stored, _stored_at = row
+                if stored:
+                    self._high_impact_openers_cache[cache_key] = stored
+                    return list(stored), None
+
+        # Pull the per-live-driver quotes so the LLM can name-drop
+        # with grounded references.
+        driver_quote_blocks: list[str] = []
+        for did in live_driver_ids:
+            user = await asyncio.to_thread(self.repo.get_user, did)
+            if user is None:
+                continue
+            quotes = await asyncio.to_thread(
+                self.repo.thread_messages_for_user,
+                thread_id, did, limit=4,
+            )
+            if not quotes:
+                # Live driver with no quotes from inside snapshot
+                # windows — surface them as eligible to name-drop
+                # but with no anchor text.
+                driver_quote_blocks.append(
+                    f"  - {user.name} (in chat now; no past quotes "
+                    "from snapshot windows)"
+                )
+                continue
+            quote_lines = "\n".join(
+                f"      [{q.ts}] {q.content[:200].strip()}"
+                for q in quotes
+            )
+            driver_quote_blocks.append(
+                f"  - {user.name} (in chat now):\n{quote_lines}"
+            )
+
+        if not driver_quote_blocks:
+            # No live drivers with usable context — opener generation
+            # would have to invent the audience. Cleaner to return
+            # nothing than hallucinate.
+            return [], "no live chatters with past context on this topic"
+
+        # Streamer voice from the last ~30 min so the LLM doesn't
+        # suggest something the streamer just said.
+        try:
+            transcripts = await asyncio.to_thread(
+                self.repo.recent_transcripts,
+                within_minutes=30, limit=60,
+            )
+        except Exception:
+            transcripts = []
+
+        transcript_section = ""
+        if transcripts:
+            tlines = [
+                f"  - {t.text[:240].strip()}"
+                for t in transcripts if t.text and t.text.strip()
+            ]
+            if tlines:
+                transcript_section = (
+                    "STREAMER VOICE (last 30 min, oldest first — don't "
+                    "suggest something already said):\n"
+                    + "\n".join(tlines[-50:])
+                    + "\n\n"
+                )
+
+        channel_context = self._build_channel_context(authoritative=False)
+        grid_b64 = await self._latest_screenshot_grid(window_minutes=15)
+
+        recap_block = (
+            f"RECAP: {thread.recap}\n\n" if thread.recap else ""
+        )
+
+        prompt = (
+            channel_context
+            + transcript_section
+            + f"TOPIC: {thread.title}\n\n"
+            + recap_block
+            + "LIVE CHATTERS (name them in openers when natural — "
+            "their past quotes are the anchor):\n"
+            + "\n".join(driver_quote_blocks)
+            + "\n\nProduce 3-5 short openers the streamer could use "
+            "to pivot to this topic right now. Mix shapes."
+        )
+        if grid_b64:
+            prompt += (
+                "\n\nAn image is attached showing what is currently "
+                "on screen. Use it ONLY as silent context. Do NOT "
+                "describe the image."
+            )
+
+        from .llm.schemas import HighImpactOpenersResponse
+        from .llm.prompts import resolve_prompt
+        try:
+            response = await self.llm.generate_structured(
+                prompt=prompt,
+                system_prompt=await self._streamer_facts_prepended(
+                    resolve_prompt(
+                        "insights.high_impact_openers", self.repo,
+                    ),
+                ),
+                response_model=HighImpactOpenersResponse,
+                num_ctx=self.HIGH_IMPACT_OPENERS_NUM_CTX,
+                images=[grid_b64] if grid_b64 else None,
+                think=True,
+                call_site="insights.high_impact_openers",
+            )
+        except ValidationError as e:
+            logger.warning("high-impact-openers validation failed: %s", e)
+            return [], "the model's response didn't validate"
+        except Exception:
+            logger.exception("high-impact-openers LLM call failed")
+            return [], "LLM call failed (check server logs)"
+
+        openers = [o.strip() for o in response.openers if o.strip()]
+        self._high_impact_openers_cache[cache_key] = openers
+        try:
+            await asyncio.to_thread(
+                self.repo.set_llm_modal_output,
+                "high_impact_openers", cache_key,
+                openers, time.time(),
+            )
+            # Drop opener rows older than 6h — opener relevance
+            # decays fast as live-audience composition shifts;
+            # keeping ancient rows around just clogs the table.
+            await asyncio.to_thread(
+                self.repo.prune_llm_modal_outputs,
+                "high_impact_openers",
+                older_than_secs=6 * 3600.0,
+            )
+        except Exception:
+            logger.exception("high-impact-openers: persist failed")
+        return list(openers), None

@@ -460,6 +460,67 @@ def _build_registry() -> None:
             ),
         ),
 
+        "insights.high_impact_openers": PromptDef(
+            call_site="insights.high_impact_openers",
+            section="insights",
+            title="Per-topic openers",
+            description=(
+                "When the streamer opens a 'What to say next' card, "
+                "this prompt suggests 3-5 short openers they could "
+                "use to pivot to that topic with the chatters who "
+                "are actually in chat."
+            ),
+            factory=InsightsService.HIGH_IMPACT_OPENERS_SYSTEM,
+            guided_template=(
+                InsightsService.HIGH_IMPACT_OPENERS_SYSTEM
+                + _injection_block(
+                    "opener voice + audience tactics",
+                    "Voice / phrasing style — {voice}.\n"
+                    "Name-drop tactics — {namedrop}.\n"
+                    "Number of openers to generate — {count}.\n"
+                    "Openers must still be grounded in past quotes "
+                    "and visible context — no invented positions.",
+                )
+            ),
+            guided_slots=(
+                GuidedSlot(
+                    name="voice",
+                    question="How should the openers sound?",
+                    default=(
+                        "casual and conversational — what the "
+                        "streamer would actually say while playing"
+                    ),
+                    placeholder=(
+                        "e.g. dry / curious / opinionated / playful"
+                    ),
+                ),
+                GuidedSlot(
+                    name="namedrop",
+                    question="How should openers reference live chatters?",
+                    default=(
+                        "name-drop a specific live chatter when the "
+                        "anchor is strong; otherwise pivot without"
+                    ),
+                    options=(
+                        "always name-drop a live chatter (favor specificity)",
+                        "name-drop a specific live chatter when the anchor is strong; otherwise pivot without",
+                        "rarely name-drop — keep openers room-wide",
+                    ),
+                ),
+                GuidedSlot(
+                    name="count",
+                    question="How many openers to generate?",
+                    default="3-5 (mix of options)",
+                    options=(
+                        "3 (focused — best openers only)",
+                        "3-5 (mix of options)",
+                        "5 (give me variety)",
+                    ),
+                    advanced=True,
+                ),
+            ),
+        ),
+
         "insights.thread_recaps": PromptDef(
             call_site="insights.thread_recaps",
             section="insights",

@@ -3840,6 +3840,41 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             },
         )
 
+    @app.get(
+        "/insights/high-impact/{thread_id}/openers",
+        response_class=HTMLResponse,
+    )
+    async def high_impact_openers(
+        request: Request,
+        thread_id: int,
+        live_drivers: str = Query(""),
+    ):
+        """Async-loaded openers for the high-impact modal. Fired by
+        the modal's HTMX `intersect once` trigger so the modal opens
+        instantly and this lazy-loads in the background.
+
+        `live_drivers` is the comma-separated twitch_id list of
+        chatters currently in chat that the modal computed at render
+        time — passed through so the cache key (which factors in the
+        audience) stays consistent between the modal render and the
+        opener lookup."""
+        ids = [d for d in live_drivers.split(",") if d.strip()]
+        try:
+            openers, error = await insights.generate_high_impact_openers(
+                thread_id, ids,
+            )
+        except Exception:
+            logger.exception("high-impact openers: unexpected error")
+            openers, error = [], "internal error generating openers"
+        return TEMPLATES.TemplateResponse(
+            request,
+            "partials/high_impact_openers.html",
+            {
+                "openers": openers, "error": error,
+                "thread_id": thread_id,
+            },
+        )
+
     @app.get("/modals/high-impact/{thread_id}", response_class=HTMLResponse)
     async def modal_high_impact(request: Request, thread_id: int):
         """Dedicated modal for the "What to say next" card.
