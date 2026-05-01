@@ -410,7 +410,7 @@ FIELDS: dict[str, dict[str, Any]] = {
     "screenshot_interval_seconds": {
         "label": "Screenshot every",
         "tooltip": "How often to grab an OBS screenshot. 0 disables.",
-        "help": "Whisper + OBS together: chatterbot grabs a screenshot every this-many seconds while you're live. Up to 4 from each summary's window are stitched into a 2x2 grid and given to the AI alongside the transcript text. Set to 0 to disable screenshot capture. Default 15s.",
+        "help": "Whisper + OBS together: chatterbot grabs a screenshot every this-many seconds while you're live. Up to 6 from each summary's window are stitched into a 3x2 grid (with near-duplicate frames deduped via perceptual hash) and given to the AI alongside the transcript text. Set to 0 to disable screenshot capture. Default 10s.",
         "type": "number",
         "min": 0, "max": 600, "step": 1,
         "suffix": "seconds (0 = off)",
@@ -440,6 +440,13 @@ FIELDS: dict[str, dict[str, Any]] = {
         "min": 5, "max": 100, "step": 5,
         "suffix": "5-100",
     },
+    "screenshot_phash_distance": {
+        "label": "Scene-change dedup strictness",
+        "tooltip": "Hamming-distance cut for adjacent-frame dedup at stitch time.",
+        "help": "Before stitching frames into the AI grid, the dashboard compares each frame to the previous one via a tiny perceptual hash and drops near-duplicates. 0 disables dedup (every frame goes in). 6 is conservative — only pixel-near-identical frames (paused / static scenes) get dropped. 10+ starts dropping 'same scene with HUD changes' which is usually too aggressive. Default 6.",
+        "type": "number",
+        "min": 0, "max": 20, "step": 1,
+    },
     "screenshot_width": {
         "label": "Screenshot width",
         "tooltip": "Pixels wide. Smaller = much smaller files.",
@@ -450,8 +457,8 @@ FIELDS: dict[str, dict[str, Any]] = {
     },
     "screenshot_grid_max": {
         "label": "Screenshots per summary grid",
-        "tooltip": "Max screenshots stitched into a 2x2 grid for the AI.",
-        "help": "Up to this many screenshots from a summary's time window get stitched into a single grid for the AI. Default 4 keeps a clean 2x2 layout. More = more visual context but a bigger image payload.",
+        "tooltip": "Max screenshots stitched into the AI grid.",
+        "help": "Up to this many screenshots from a summary's time window get stitched into a single grid for the AI. 4 = 2x2 layout (960x540). 6 = 3x2 layout (1440x540, +50% bytes). With perceptual-hash dedup most streams pay 4-cell cost most of the time; the bigger layout only kicks in when there's genuinely new visual content. Default 6.",
         "type": "number",
         "min": 1, "max": 9, "step": 1,
         "suffix": "screenshots",
@@ -948,6 +955,7 @@ SECTIONS: list[dict[str, Any]] = [
                     "screenshot_webp_quality",
                     "screenshot_width",
                     "screenshot_grid_max",
+                    "screenshot_phash_distance",
                 ],
             },
             {
@@ -1139,6 +1147,108 @@ SECTIONS: list[dict[str, Any]] = [
 ]
 
 
+# =====================================================================
+# Restart impact — what does the bot have to do to pick up a change?
+#
+# 'live'    — value is read fresh on each access (app_settings KV store
+#             or read at the top of a loop iteration). The change
+#             applies on the next refresh tick of whatever feature
+#             reads it; no bot-side action required.
+#
+# 'reload'  — value is held in a service object that has a
+#             reconfigure() path. Dashboard writes a `bot_reload_at`
+#             flag and the bot's reload poller calls reconfigure()
+#             on each service in place. No process bounce.
+#
+# 'restart' — value is genuinely cold (Twitch IRC creds, LLM client
+#             class, whisper model load, DB path). Dashboard writes a
+#             `bot_restart_at` flag; bot self-exits and the supervisor
+#             (`make all`, docker compose restart-policy, systemd)
+#             brings it back. Works the same in containers and bare-
+#             metal because there's no cross-PID-namespace signaling.
+# =====================================================================
+
+RESTART_REQUIRED_KEYS: frozenset[str] = frozenset({
+    # Twitch IRC connection state — held inside the bot's Twitch
+    # client; reconnect needs full client tear-down.
+    "twitch_channel",
+    "twitch_oauth_token",
+    "twitch_bot_nick",
+    "twitch_client_id",
+    "twitch_client_secret",
+    # LLM provider switch — different client class. Slice 10C may
+    # promote some of these to 'reload' once the client gets a
+    # reconfigure() path.
+    "llm_provider",
+    "anthropic_api_key",
+    "anthropic_model",
+    "anthropic_thinking_budget_tokens",
+    "openai_api_key",
+    "openai_model",
+    "openai_reasoning_model",
+    "openai_organization",
+    # Whisper model — heavy load, lazy-init at first audio chunk.
+    "whisper_model",
+    # Cross-process bus — internal-notify secret + URL are shared
+    # between bot and dashboard at startup; rotating them needs a
+    # full handshake refresh.
+    "internal_notify_secret",
+    "dashboard_internal_url",
+    # Discord client — held by discord_bot service.
+    "discord_bot_token",
+    # YouTube API client.
+    "youtube_api_key",
+    # OBS WebSocket — connection state.
+    "obs_host",
+    "obs_port",
+    "obs_password",
+    # StreamElements WebSocket auth.
+    "streamelements_jwt",
+    # Dataset capture init / DEK setup is special-cased through the
+    # /dataset page; toggling via /settings still needs a bounce
+    # because the capture machinery initializes at boot.
+    "dataset_capture_enabled",
+})
+
+RELOAD_REQUIRED_KEYS: frozenset[str] = frozenset({
+    # Integration toggles — the relevant background task is started /
+    # stopped at boot. With slice 10B's reconfigure() path the bot
+    # can start / stop the task in place without a full restart.
+    "mod_mode_enabled",
+    "youtube_enabled",
+    "discord_enabled",
+    "streamelements_enabled",
+    "obs_enabled",
+    "whisper_enabled",
+    # Channel IDs — re-subscribe-target for their respective services.
+    "discord_channel_ids",
+    "streamelements_channel_id",
+    "youtube_channel_id",
+    # Whisper model size + tuning that only takes effect on next model
+    # load. Reload-class because we can drop the model and lazy-load
+    # the new one without bouncing the whole process.
+    "whisper_buffer_seconds",
+    "whisper_min_silence_ms",
+    "whisper_beam_size",
+})
+
+
+def restart_kind(key: str) -> str:
+    """Return 'restart' | 'reload' | 'live' for one setting key.
+    Drives the UI badge in _settings_field.html and (slice 10B) the
+    bot's reload-poller routing. Defaults to 'live' for everything
+    not explicitly classified — the override is opt-in toward
+    *more* disruption, never less. A wrongly-classified 'live'
+    setting just won't pick up its change until the next refresh
+    tick; a wrongly-classified 'restart' setting bounces the bot
+    when it didn't need to."""
+    if key in RESTART_REQUIRED_KEYS:
+        return "restart"
+    if key in RELOAD_REQUIRED_KEYS:
+        return "reload"
+    return "live"
+
+
 def field_meta(key: str) -> dict[str, Any]:
     """Look up a field's metadata, returning a defaults-filled dict
     even for keys that aren't yet in FIELDS (so a forgotten metadata
@@ -1158,4 +1268,5 @@ def field_meta(key: str) -> dict[str, Any]:
         "placeholder": base.get("placeholder", ""),
         "depends_on": base.get("depends_on"),
         "advanced": bool(base.get("advanced", False)),
+        "restart_kind": restart_kind(key),
     }

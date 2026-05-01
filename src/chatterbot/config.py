@@ -72,6 +72,7 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "screenshot_max_age_hours",
     "screenshot_jpeg_quality",
     "screenshot_webp_quality",
+    "screenshot_phash_distance",
     "screenshot_width",
     "screenshot_grid_max",
     "quiet_cohort_silence_minutes",
@@ -397,7 +398,12 @@ class Settings(BaseSettings):
     chat_only_summary_min_messages: int = 5
     chat_only_summary_window_minutes: int = 10
 
-    screenshot_interval_seconds: int = 15
+    # Capture interval. 10s with the 6-cell grid + scene-change
+    # dedup gives the LLM finer-grained visual context for active
+    # streams without blowing up payload during paused / static
+    # scenes (the dedup collapses near-duplicate frames before
+    # stitching).
+    screenshot_interval_seconds: int = 10
     # 0 = keep forever (default). Captures are content-hash deduped
     # and stored as WebP so disk growth is bounded; raise above 0 to
     # opt back into age-based deletion.
@@ -411,10 +417,17 @@ class Settings(BaseSettings):
     # for visual context to a multimodal LLM — smaller than JPEG
     # at the same quality, dedup-friendly via content hash.
     screenshot_webp_quality: int = 65
-    # Maximum screenshots stitched into the per-group grid. 4 keeps a
-    # 2x2 layout that's still legible when a group's window contains
-    # many shots.
-    screenshot_grid_max: int = 4
+    # Perceptual-hash Hamming-distance threshold for adjacent-frame
+    # dedup at stitch time. 0 disables dedup; higher = more
+    # aggressive (drops more "similar" frames). 6 is conservative —
+    # only kills near-pixel-identical frames (paused / static scenes).
+    screenshot_phash_distance: int = 6
+    # Maximum screenshots stitched into the per-group grid. 6 uses a
+    # 3x2 layout (1440x540 canvas, cells stay 480x270 — same
+    # legibility as the 4-cell layout). With phash dedup the average
+    # payload is ~unchanged; only grids with 6 genuinely-different
+    # frames pay the +50% byte cost.
+    screenshot_grid_max: int = 6
 
     # Quiet-cohort detection on the engagement view. Surfaces topic
     # threads whose driver chatters have all gone silent — clusters
@@ -551,6 +564,7 @@ def _coerce(key: str, value: str) -> Any:
         "youtube_min_poll_seconds", "youtube_max_poll_seconds",
         "screenshot_interval_seconds", "screenshot_max_age_hours",
         "screenshot_jpeg_quality", "screenshot_webp_quality",
+        "screenshot_phash_distance",
         "screenshot_width", "screenshot_grid_max",
         "quiet_cohort_silence_minutes", "quiet_cohort_lookback_hours",
         "quiet_cohort_min_drivers", "quiet_cohort_limit",
@@ -581,12 +595,13 @@ def _coerce(key: str, value: str) -> Any:
                 "chat_lag_auto_tune_interval_seconds": 600,
                 "youtube_min_poll_seconds": 10,
                 "youtube_max_poll_seconds": 30,
-                "screenshot_interval_seconds": 15,
+                "screenshot_interval_seconds": 10,
                 "screenshot_max_age_hours": 0,
                 "screenshot_jpeg_quality": 85,
                 "screenshot_webp_quality": 65,
+                "screenshot_phash_distance": 6,
                 "screenshot_width": 480,
-                "screenshot_grid_max": 4,
+                "screenshot_grid_max": 6,
                 "quiet_cohort_silence_minutes": 15,
                 "quiet_cohort_lookback_hours": 24,
                 "quiet_cohort_min_drivers": 2,

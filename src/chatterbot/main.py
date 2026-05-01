@@ -54,6 +54,77 @@ def _clear_pid_file() -> None:
         pass
 
 
+# Poll cadence for the lifecycle flags. Short enough that streamer
+# clicks feel responsive (<5s perceived); long enough that an idle
+# bot isn't hammering the DB on a tight loop.
+_LIFECYCLE_POLL_SECONDS = 3
+
+
+async def _lifecycle_poller(
+    repo: ChatterRepo,
+    shutdown_event: asyncio.Event,
+) -> None:
+    """Watch the dashboard-driven lifecycle flags and signal a clean
+    shutdown when the streamer requests a restart. The dashboard
+    writes `bot_restart_at` / `bot_reload_at` to app_settings as ISO
+    timestamps; we remember the values we saw at boot and trigger
+    the corresponding action whenever the persisted value moves past
+    the one in memory.
+
+    Setting `shutdown_event` lets run_bot's outer await break out of
+    `asyncio.wait(...)` so all tasks get cancelled cleanly through
+    the regular finally-block; the repo closes, the pid file gets
+    cleared, and the process returns. The supervisor (`make all`,
+    docker compose restart-policy, systemd) takes it from there.
+
+    This indirection (vs os.kill) is what makes the restart / reload
+    buttons work uniformly across topologies — same-process, separate
+    containers, and separate hosts. Both sides only need to share the
+    SQLite file."""
+    last_restart = (await asyncio.to_thread(
+        repo.get_app_setting, "bot_restart_at",
+    )) or ""
+    last_reload = (await asyncio.to_thread(
+        repo.get_app_setting, "bot_reload_at",
+    )) or ""
+    while True:
+        try:
+            await asyncio.sleep(_LIFECYCLE_POLL_SECONDS)
+            cur_restart = (await asyncio.to_thread(
+                repo.get_app_setting, "bot_restart_at",
+            )) or ""
+            if cur_restart and cur_restart != last_restart:
+                logger.info(
+                    "lifecycle: restart requested at %s — signalling "
+                    "clean shutdown (supervisor will respawn)",
+                    cur_restart,
+                )
+                shutdown_event.set()
+                return
+
+            cur_reload = (await asyncio.to_thread(
+                repo.get_app_setting, "bot_reload_at",
+            )) or ""
+            if cur_reload and cur_reload != last_reload:
+                # Slice 10B replaces this with reconfigure() fan-out.
+                # For now, fall back to a restart so the streamer's
+                # change actually takes effect — better than silent
+                # no-op while the wiring lands.
+                logger.info(
+                    "lifecycle: reload requested at %s — reconfigure "
+                    "wiring lands in slice 10B; falling back to "
+                    "restart for safety", cur_reload,
+                )
+                shutdown_event.set()
+                return
+            last_restart = cur_restart
+            last_reload = cur_reload
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("lifecycle_poller: iteration failed")
+
+
 async def run_bot(settings: Settings) -> None:
     if not settings.twitch_oauth_token or not settings.twitch_channel:
         logger.error("missing TWITCH_OAUTH_TOKEN or TWITCH_CHANNEL — refusing to start")
@@ -184,14 +255,45 @@ async def run_bot(settings: Settings) -> None:
         dc = DiscordListener(settings, repo, summarizer)
         tasks.append(asyncio.create_task(dc.start(), name="discord_listener"))
 
+    # Lifecycle poller — watches the dashboard's `bot_restart_at`
+    # flag in app_settings. When it advances past the value we saw
+    # at boot, the poller sets `shutdown_event`; the outer await
+    # below breaks out, the finally-block cancels every task
+    # cleanly, and run_bot returns. The supervisor (`make all`,
+    # docker compose restart-policy, systemd) brings the process
+    # back with the new settings.
+    #
+    # Why DB-flag instead of SIGTERM: works the same in-container
+    # and bare-metal because there's no cross-PID-namespace
+    # signaling. Both sides only need to share the SQLite file.
+    shutdown_event = asyncio.Event()
+    lifecycle_task = asyncio.create_task(
+        _lifecycle_poller(repo, shutdown_event),
+        name="lifecycle_poller",
+    )
+    tasks.append(lifecycle_task)
+
+    shutdown_waiter = asyncio.create_task(
+        shutdown_event.wait(), name="shutdown_waiter",
+    )
     try:
-        await asyncio.gather(*tasks)
+        # asyncio.wait with FIRST_COMPLETED so a service crashing
+        # OR the lifecycle poller setting `shutdown_event` both
+        # exit the bot cleanly. Without FIRST_COMPLETED, a single
+        # task crash would leave the rest running silently.
+        await asyncio.wait(
+            [*tasks, shutdown_waiter],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
     except asyncio.CancelledError:
         pass
     finally:
+        shutdown_waiter.cancel()
         for t in tasks:
             t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(
+            *tasks, shutdown_waiter, return_exceptions=True,
+        )
         repo.close()
         _clear_pid_file()
 

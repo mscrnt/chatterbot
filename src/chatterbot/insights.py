@@ -366,11 +366,19 @@ class InsightsService:
         data_dir = Path(self.settings.db_path).parent
         abs_paths = [str(data_dir / s.path) for s in shots]
         try:
-            # Reuse the transcript service's stitcher — same 960x540
-            # JPEG output the group-summary call uses, so the LLM sees
+            # Reuse the transcript service's stitcher — same JPEG
+            # output the group-summary call uses, so the LLM sees
             # screenshots in a consistent format across all calls.
+            # phash_distance pulled from settings so the streamer can
+            # tune dedup strictness without touching code.
             from .transcript import _stitch_grid
-            grid_bytes = await asyncio.to_thread(_stitch_grid, abs_paths)
+            phash_dist = int(getattr(
+                self.settings, "screenshot_phash_distance", 6,
+            ))
+            grid_bytes = await asyncio.to_thread(
+                _stitch_grid, abs_paths,
+                phash_distance=phash_dist,
+            )
         except Exception:
             logger.exception("informed-call: stitch_grid failed")
             return None

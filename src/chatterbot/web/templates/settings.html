@@ -36,10 +36,19 @@
     <div class="flex items-center gap-2">
       <button type="button"
               class="text-xs text-muted hover:text-primary inline-flex items-center gap-1"
+              hx-post="/reload-bot"
+              hx-target="#restart-bot-result"
+              hx-swap="outerHTML"
+              title="Reload settings without bouncing the bot. Cheaper than restart — keeps caches, IRC connection, and warmups intact.">
+        <i class="fa-solid fa-arrows-rotate"></i> reload settings
+      </button>
+      <button type="button"
+              class="text-xs text-muted hover:text-primary inline-flex items-center gap-1"
               hx-post="/restart-bot"
               hx-target="#restart-bot-result"
               hx-swap="outerHTML"
-              hx-confirm="Send SIGTERM to the bot? It restarts automatically when launched via `make all`.">
+              hx-confirm="Restart the bot? Drops in-flight LLM calls and the Twitch connection. Use Reload first if the changes don't have a 'restart' badge."
+              title="Hard restart — uses a DB flag so it works in containers AND bare-metal. The supervisor (make all / docker compose / systemd) respawns the bot.">
         <i class="fa-solid fa-rotate"></i> restart bot
       </button>
       <button class="text-xs text-muted hover:text-primary inline-flex items-center gap-1"
@@ -53,16 +62,30 @@
   <div class="rounded-xl border border-success/40 bg-success/10 px-3 py-2 text-sm text-primary flex flex-col sm:flex-row sm:items-center gap-2">
     <span class="inline-flex items-center gap-2">
       <i class="fa-solid fa-circle-check text-success"></i>
-      Saved. Restart the bot to pick up credential changes.
+      Saved. Most changes apply on the next refresh tick — see the
+      <span class="px-1 text-[9px] uppercase tracking-wider rounded-full bg-success/15 text-success border border-success/30">live</span>,
+      <span class="px-1 text-[9px] uppercase tracking-wider rounded-full bg-accent/15 text-accent border border-accent/30">reload</span>,
+      and
+      <span class="px-1 text-[9px] uppercase tracking-wider rounded-full bg-warning/15 text-warning border border-warning/30">restart</span>
+      badges next to each field.
     </span>
-    <button type="button"
-            class="tap inline-flex items-center justify-center gap-2 px-3 rounded bg-accent hover:bg-accent-600 text-white text-sm font-medium ml-auto"
-            hx-post="/restart-bot"
-            hx-target="#restart-bot-result"
-            hx-swap="outerHTML"
-            hx-confirm="Send SIGTERM to the bot? It restarts automatically when launched via `make all`.">
-      <i class="fa-solid fa-rotate"></i> Restart bot
-    </button>
+    <div class="ml-auto flex items-center gap-1.5">
+      <button type="button"
+              class="tap inline-flex items-center justify-center gap-2 px-3 rounded border border-accent/30 bg-accent/10 hover:bg-accent/20 text-accent text-sm font-medium"
+              hx-post="/reload-bot"
+              hx-target="#restart-bot-result"
+              hx-swap="outerHTML">
+        <i class="fa-solid fa-arrows-rotate"></i> Reload
+      </button>
+      <button type="button"
+              class="tap inline-flex items-center justify-center gap-2 px-3 rounded bg-accent hover:bg-accent-600 text-white text-sm font-medium"
+              hx-post="/restart-bot"
+              hx-target="#restart-bot-result"
+              hx-swap="outerHTML"
+              hx-confirm="Restart the bot? Drops in-flight LLM calls and the Twitch connection. Use Reload if your changes don't have a 'restart' badge.">
+        <i class="fa-solid fa-rotate"></i> Restart
+      </button>
+    </div>
   </div>
   {% endif %}
 

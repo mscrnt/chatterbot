@@ -1926,57 +1926,144 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     # so the practical effect is "pick up new credentials." Bare `make bot`
     # users will see the bot exit and need to re-run it themselves.
 
-    @app.post("/restart-bot", response_class=HTMLResponse)
-    async def restart_bot(request: Request):
-        import os
+    # Lifecycle-flag keys read by the bot's lifecycle poller. The
+    # dashboard writes a fresh ISO timestamp to these to request the
+    # corresponding action; the bot polls on a short interval and
+    # acts when the value advances past the one it remembers.
+    #
+    # This indirection (vs os.kill) is what makes the restart button
+    # work uniformly across topologies:
+    #   - same-process / make all: bot polls its own DB, self-exits,
+    #     the make-all respawn loop relaunches.
+    #   - separate containers (docker compose): bot container polls
+    #     the shared DB volume, self-exits, compose restart-policy
+    #     relaunches.
+    #   - separate hosts: as long as both sides reach the same
+    #     SQLite file, it works.
+    _BOT_RESTART_FLAG_KEY = "bot_restart_at"
+    _BOT_RELOAD_FLAG_KEY = "bot_reload_at"
+
+    def _stamp_now() -> str:
+        """Compact UTC ISO timestamp for lifecycle flags. Comparable
+        as strings (lexicographic == chronological at second
+        resolution) so the bot's poller can tell when the value
+        advanced without parsing dates."""
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    def _try_sigterm_bot() -> tuple[bool, str | None]:
+        """Best-effort SIGTERM via the pid file, for same-PID-namespace
+        setups (make all, single-container). Returns (signalled,
+        skip_reason). Failures are NOT fatal — the DB flag covers
+        cross-container topologies. We just want to send SIGTERM
+        when we can, since it's instant."""
+        import os as _os
         import signal as _signal
         from pathlib import Path as _P
-
         pid_file = _P("data/.bot.pid")
-        ctx: dict[str, Any] = {"ok": False, "message": ""}
         if not pid_file.exists():
-            ctx["message"] = (
-                "no bot pid file at data/.bot.pid. If you just updated "
-                "chatterbot, restart `make all` once manually — the bot only "
-                "writes its pid here on versions that include this restart "
-                "feature. After that one restart, this button works going "
-                "forward."
-            )
-            return TEMPLATES.TemplateResponse(
-                request, "partials/restart_bot_result.html", ctx
-            )
+            return False, "no pid file (cross-container topology?)"
         try:
             pid = int(pid_file.read_text().strip())
         except (OSError, ValueError) as e:
-            ctx["message"] = f"could not read pid file: {e}"
-            return TEMPLATES.TemplateResponse(
-                request, "partials/restart_bot_result.html", ctx
-            )
+            return False, f"unreadable pid file: {e}"
         try:
-            os.kill(pid, _signal.SIGTERM)
+            _os.kill(pid, _signal.SIGTERM)
+            return True, None
         except ProcessLookupError:
-            ctx["message"] = (
-                f"bot pid {pid} not running. If you started with `make all`, "
-                "the auto-restart loop will pick up the next launch."
-            )
-            return TEMPLATES.TemplateResponse(
-                request, "partials/restart_bot_result.html", ctx
-            )
+            return False, f"pid {pid} not running"
         except PermissionError:
-            ctx["message"] = (
-                f"can't signal pid {pid} — bot is owned by a different user."
+            return False, f"can't signal pid {pid} (different user / PID namespace)"
+        except OSError as e:
+            return False, f"signal failed: {e}"
+
+    @app.post("/restart-bot", response_class=HTMLResponse)
+    async def restart_bot(request: Request):
+        """Request a bot restart via two complementary mechanisms:
+
+          1) DB flag `bot_restart_at` — picked up by the bot's
+             lifecycle_poller. Works in any topology (same-process,
+             separate containers, separate hosts) as long as the
+             SQLite file is shared. Latency ≤ poll cadence (~3s).
+
+          2) SIGTERM via pid file — instant when the dashboard
+             shares a PID namespace with the bot (make all, single
+             container). Best-effort: a cross-container setup will
+             skip this without complaining; the DB flag covers it.
+
+        Either path triggers the same shutdown_event in run_bot, the
+        finally-block cancels every task cleanly, and the supervisor
+        respawns the process with the new settings."""
+        ctx: dict[str, Any] = {"ok": False, "message": ""}
+        try:
+            await asyncio.to_thread(
+                repo.set_app_setting,
+                _BOT_RESTART_FLAG_KEY, _stamp_now(),
             )
+        except Exception as e:
+            ctx["message"] = f"could not write restart flag: {e}"
             return TEMPLATES.TemplateResponse(
-                request, "partials/restart_bot_result.html", ctx
+                request, "partials/restart_bot_result.html", ctx,
             )
+        signalled, sig_skip_reason = _try_sigterm_bot()
+        ctx["ok"] = True
+        if signalled:
+            ctx["message"] = (
+                "Restart requested. SIGTERM sent + DB flag stamped — "
+                "the bot will exit cleanly and the supervisor "
+                "(`make all` / docker compose / systemd) respawns it."
+            )
+        else:
+            ctx["message"] = (
+                "Restart requested via DB flag (SIGTERM skipped: "
+                f"{sig_skip_reason}). The bot's lifecycle poller picks "
+                "up the flag within a few seconds; the supervisor "
+                "respawns it. If nothing happens within ~30 s, your "
+                "bot is on a version that predates the lifecycle "
+                "poller — update + relaunch it once manually."
+            )
+        return TEMPLATES.TemplateResponse(
+            request, "partials/restart_bot_result.html", ctx,
+        )
+
+    @app.post("/reload-bot", response_class=HTMLResponse)
+    async def reload_bot(request: Request):
+        """Hot config reload. Slice 10B replaces this with an in-place
+        reconfigure() fan-out across services; for now, this falls
+        back to the same DB-flag + SIGTERM dual-path the restart
+        button uses, with copy that's honest about that. The
+        streamer still gets their settings applied; the only thing
+        missing is the "no in-flight LLM calls dropped" optimization."""
+        ctx: dict[str, Any] = {"ok": False, "message": ""}
+        try:
+            await asyncio.to_thread(
+                repo.set_app_setting,
+                _BOT_RELOAD_FLAG_KEY, _stamp_now(),
+            )
+            # Also stamp the restart flag so older bots without the
+            # reload-aware poller still cycle. New bots will see the
+            # reload flag first and (slice 10B) reconfigure in place
+            # without hitting the restart path.
+            await asyncio.to_thread(
+                repo.set_app_setting,
+                _BOT_RESTART_FLAG_KEY, _stamp_now(),
+            )
+        except Exception as e:
+            ctx["message"] = f"could not write reload flag: {e}"
+            return TEMPLATES.TemplateResponse(
+                request, "partials/restart_bot_result.html", ctx,
+            )
+        signalled, sig_skip_reason = _try_sigterm_bot()
         ctx["ok"] = True
         ctx["message"] = (
-            "sent SIGTERM to bot. If you launched via `make all`, it'll "
-            "respawn within a few seconds with the new settings. "
-            "Otherwise re-run `make bot` to start it again."
+            "Reload requested. " + (
+                "Bot will cycle in a few seconds via SIGTERM."
+                if signalled else
+                f"DB flag stamped (SIGTERM skipped: {sig_skip_reason})."
+            ) + " In-place reconfigure (no process bounce) lands in "
+            "a follow-up slice; until then this acts like a fast restart."
         )
         return TEMPLATES.TemplateResponse(
-            request, "partials/restart_bot_result.html", ctx
+            request, "partials/restart_bot_result.html", ctx,
         )
 
     # ---------------- diagnostic bundle ----------------

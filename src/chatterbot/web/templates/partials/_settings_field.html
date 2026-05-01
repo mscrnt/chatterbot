@@ -29,6 +29,26 @@
       {% else %}
         {% with label='unset', tone='warning' %}{% include "components/_pill.html" %}{% endwith %}
       {% endif %}
+      {# Restart-impact badge — what the bot has to do to pick this
+         up. 'live' = silently applies on next refresh; 'reload' =
+         dashboard signals the bot to reconfigure() in place;
+         'restart' = bot self-exits, supervisor respawns. #}
+      {% if m.restart_kind == 'restart' %}
+        <span class="px-1.5 text-[9px] uppercase tracking-wider rounded-full bg-warning/15 text-warning border border-warning/30"
+              title="changing this needs a bot restart — use the Restart button after saving">
+          restart
+        </span>
+      {% elif m.restart_kind == 'reload' %}
+        <span class="px-1.5 text-[9px] uppercase tracking-wider rounded-full bg-accent/15 text-accent border border-accent/30"
+              title="changing this needs a config reload — click Reload after saving">
+          reload
+        </span>
+      {% else %}
+        <span class="px-1.5 text-[9px] uppercase tracking-wider rounded-full bg-success/10 text-success border border-success/30"
+              title="applies on the next refresh tick of the feature that reads it — no bot action needed">
+          live
+        </span>
+      {% endif %}
       {% if m.advanced %}
         <span class="px-1.5 text-[9px] uppercase tracking-wider rounded-full bg-muted/15 text-muted border border-muted/30"
               title="advanced — defaults are sensible">

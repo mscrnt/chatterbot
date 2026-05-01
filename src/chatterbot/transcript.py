@@ -39,11 +39,86 @@ _ALNUM_RE = re.compile(r"[^a-z0-9]+")
 _TRAIL_DIGITS_RE = re.compile(r"\d+$")
 
 
-def _stitch_grid(image_paths: list[str], max_size: tuple[int, int] = (960, 540)) -> bytes | None:
-    """Stitch up to 4 JPEGs into a 2x2 grid (or 1x1 / 1x2 for fewer).
-    Returns JPEG bytes ready to base64-encode for the multimodal LLM
-    call. Returns None if no images load — not an error, just "skip
-    the image attachment for this group."
+# Layout table for the screenshot grid.
+#
+# Each entry is (cols, rows, canvas_w, canvas_h). Cell size
+# (canvas_w / cols, canvas_h / rows) is held at 480x270 for any
+# count by widening the canvas at 5+ frames — that's the legibility
+# cap below which game UI / small text starts disappearing.
+#
+# The 1-4 cell cases stay at 960x540 for legacy compatibility (any
+# downstream code that assumed the old size keeps working). 5-6
+# cells widen to 1440x540 (3x2 layout, +50% bytes per stitch).
+_GRID_LAYOUTS: dict[int, tuple[int, int, int, int]] = {
+    1: (1, 1, 960, 540),
+    2: (2, 1, 960, 540),
+    3: (2, 2, 960, 540),  # last cell blank
+    4: (2, 2, 960, 540),
+    5: (3, 2, 1440, 540),  # last cell blank
+    6: (3, 2, 1440, 540),
+}
+
+
+def _phash_64(image_bytes_or_path) -> int:
+    """Tiny perceptual hash via 8x8 grayscale thumbnail + per-pixel
+    above-mean threshold. Returns a 64-bit integer (one bit per pixel).
+    Cheap to compute (~1ms per image) and stable enough to spot
+    near-duplicate frames — paused-on-menu, static-cutscene, idle-
+    in-spawn — without false-merging "same scene with HUD changes."
+
+    Hamming distance between two phashes is a good "how visually
+    similar" measure. 0 = pixel-identical at 8x8 (extremely close),
+    ~5 = same scene with minor changes, >12 = different scenes.
+    The dedup threshold lives in `screenshot_phash_distance` (default
+    6 — conservative; only drops near-duplicates)."""
+    from PIL import Image
+    if isinstance(image_bytes_or_path, (bytes, bytearray)):
+        from io import BytesIO
+        im = Image.open(BytesIO(image_bytes_or_path))
+    else:
+        im = Image.open(image_bytes_or_path)
+    im = im.convert("L").resize((8, 8), Image.Resampling.LANCZOS)
+    # `tobytes()` for an L-mode 8x8 returns exactly 64 bytes — one
+    # per pixel intensity. Equivalent to the deprecated `getdata()`
+    # call but stable across Pillow versions (Pillow 14 will drop
+    # getdata entirely).
+    pixels = im.tobytes()
+    avg = sum(pixels) / len(pixels)
+    h = 0
+    for i, p in enumerate(pixels):
+        if p > avg:
+            h |= 1 << i
+    return h
+
+
+def _hamming(a: int, b: int) -> int:
+    """Bit-distance between two 64-bit perceptual hashes. Equivalent
+    to bin(a ^ b).count('1') but expressed via int.bit_count for
+    Python 3.10+ which has the popcount instruction."""
+    return (a ^ b).bit_count()
+
+
+def _stitch_grid(
+    image_paths: list[str],
+    max_size: tuple[int, int] = (960, 540),
+    *,
+    phash_distance: int = 6,
+) -> bytes | None:
+    """Stitch up to 6 frames into a grid (1x1 / 2x1 / 2x2 / 3x2
+    based on count). Returns JPEG bytes ready to base64-encode for
+    the multimodal LLM call. Returns None if no images load — not
+    an error, just "skip the image attachment for this group."
+
+    Adjacent-frame perceptual-hash dedup is applied as we open each
+    image: a frame whose phash Hamming-distance to the previously
+    accepted frame is `<= phash_distance` is dropped. This keeps a
+    paused-on-menu stream from showing 6 identical cells; the LLM
+    sees only the scene transitions worth grounding on.
+
+    `max_size` is kept on the signature for backward-compat but is
+    no longer authoritative — `_GRID_LAYOUTS` drives the canvas
+    dimensions per cell count. 5-6 cell layouts use a wider canvas
+    so cells stay at 480x270 instead of shrinking to 320x180.
 
     Lazy-imports Pillow so the dashboard boots fine without it (the
     feature is opt-in via screenshot_interval_seconds > 0)."""
@@ -52,27 +127,49 @@ def _stitch_grid(image_paths: list[str], max_size: tuple[int, int] = (960, 540))
     except ImportError:
         logger.warning(
             "transcript: Pillow not installed — skipping screenshot grid. "
-            "Run `uv sync --extra whisper` to enable."
+            "Run `uv sync --extra whisper` to enable.",
         )
         return None
     paths = [p for p in image_paths if p]
     if not paths:
         return None
-    n = min(4, len(paths))
-    if n == 1:
-        cols, rows = 1, 1
-    elif n == 2:
-        cols, rows = 2, 1
-    else:  # 3 or 4 — always 2x2 with last cell blank if N=3
-        cols, rows = 2, 2
-    cell_w = max_size[0] // cols
-    cell_h = max_size[1] // rows
-    canvas = Image.new("RGB", (cell_w * cols, cell_h * rows), (10, 10, 14))
-    for i, path in enumerate(paths[:n]):
+
+    # First pass: open + dedup. Done in one loop so we don't read
+    # the same file twice. `loaded` is the surviving (image, path)
+    # list after dedup; we cap at 6 since `_GRID_LAYOUTS` only
+    # defines layouts up to 6.
+    loaded: list = []
+    last_hash: int | None = None
+    threshold = max(0, int(phash_distance))
+    for path in paths:
+        if len(loaded) >= 6:
+            break
         try:
             im = Image.open(path).convert("RGB")
         except Exception:
             continue
+        # Compute phash from the loaded image (no second file read).
+        try:
+            ph = _phash_64(path)
+        except Exception:
+            ph = None
+        if ph is not None and last_hash is not None and threshold > 0:
+            if _hamming(ph, last_hash) <= threshold:
+                # Near-duplicate of the previous accepted frame; skip.
+                continue
+        loaded.append(im)
+        if ph is not None:
+            last_hash = ph
+
+    n = len(loaded)
+    if n == 0:
+        return None
+    layout = _GRID_LAYOUTS.get(n) or _GRID_LAYOUTS[6]
+    cols, rows, canvas_w, canvas_h = layout
+    cell_w = canvas_w // cols
+    cell_h = canvas_h // rows
+    canvas = Image.new("RGB", (cell_w * cols, cell_h * rows), (10, 10, 14))
+    for i, im in enumerate(loaded):
         im.thumbnail((cell_w, cell_h))
         col = i % cols
         row = i // cols
@@ -1192,7 +1289,13 @@ Reply with `summary` = the line(s) (or empty string).
                 data_dir = Path(self.settings.db_path).parent
                 abs_paths = [str(data_dir / s.path) for s in shots]
                 try:
-                    grid_bytes = await asyncio.to_thread(_stitch_grid, abs_paths)
+                    phash_dist = int(getattr(
+                        self.settings, "screenshot_phash_distance", 6,
+                    ))
+                    grid_bytes = await asyncio.to_thread(
+                        _stitch_grid, abs_paths,
+                        phash_distance=phash_dist,
+                    )
                 except Exception:
                     logger.exception("transcript chat-only: stitch_grid failed")
                     grid_bytes = None
@@ -1621,7 +1724,13 @@ Reply with `summary` = the line(s) (or empty string).
                 data_dir = Path(self.settings.db_path).parent
                 abs_paths = [str(data_dir / s.path) for s in shots]
                 try:
-                    grid_bytes = await asyncio.to_thread(_stitch_grid, abs_paths)
+                    phash_dist = int(getattr(
+                        self.settings, "screenshot_phash_distance", 6,
+                    ))
+                    grid_bytes = await asyncio.to_thread(
+                        _stitch_grid, abs_paths,
+                        phash_distance=phash_dist,
+                    )
                 except Exception:
                     logger.exception("transcript: stitch_grid failed")
                     grid_bytes = None
