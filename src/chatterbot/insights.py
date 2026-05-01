@@ -1268,45 +1268,87 @@ When in doubt, fewer high-quality points beats more weak ones.
             return ""
 
 
+    # Source-controlled generic default that ships in the repo. Used
+    # as a fallback when the streamer's configured `streamer_facts_path`
+    # doesn't exist yet — so a fresh install still gets baseline
+    # grounding (game-terminology rules, default sensitive-topic
+    # carve-outs) without the streamer having to manually copy a
+    # template into place. Streamers customize by writing their own
+    # file at the configured path; that override takes precedence.
+    _STREAMER_FACTS_FALLBACK_PATH = "data/streamer_facts.example.md"
+
     def _load_streamer_facts(self) -> str:
         """Load streamer-authored channel facts from disk, cached with
         mtime so hot LLM call sites don't re-read the file every pass.
-        Missing / empty / unreadable returns "" — caller falls back
-        to the default prompt without a facts block.
+
+        Lookup order:
+          1. The configured `streamer_facts_path` (default
+             `data/streamer_facts.md`). The streamer's own customized
+             file — takes precedence when it exists and is non-empty.
+          2. The shipped fallback at `data/streamer_facts.example.md`.
+             A generic-but-active default with conservative grounding
+             rules (game-terminology = game terminology, M-rated
+             content is on-topic, etc). Lets a fresh install benefit
+             from facts-grounding without a mandatory customization
+             step.
+          3. Empty string when neither file exists / both unreadable.
+             Callers no-op the facts-prepended block in that case.
 
         Used by `_streamer_facts_prepended` to inject channel-specific
-        context (recurring bits, current arcs, inside jokes) into the
-        system prompt of every LLM call where streamer-grounding helps:
-        engaging-subjects, talking points, thread recaps, subject
-        talking-points, and question answer-angles."""
+        context into the system prompt of every LLM call where
+        streamer-grounding helps: engaging-subjects, talking points,
+        thread recaps, subject talking-points, and question
+        answer-angles."""
         from pathlib import Path
         path_str = getattr(self.settings, "streamer_facts_path", "") or ""
-        if not path_str:
+        # Build the lookup chain: configured path first, then the
+        # generic fallback. The fallback is keyed by its on-disk
+        # mtime in the cache so a `git pull` that updates the
+        # template gets picked up on the next call.
+        candidates: list[Path] = []
+        if path_str:
+            p = Path(path_str)
+            if not p.is_absolute():
+                p = Path.cwd() / p
+            candidates.append(p)
+        fallback = Path(self._STREAMER_FACTS_FALLBACK_PATH)
+        if not fallback.is_absolute():
+            fallback = Path.cwd() / fallback
+        # Avoid duplicate stat when the streamer's path equals the
+        # fallback (rare but possible if they pointed
+        # streamer_facts_path at the example).
+        if not candidates or candidates[-1] != fallback:
+            candidates.append(fallback)
+
+        chosen: Path | None = None
+        chosen_mtime: float = 0.0
+        for cand in candidates:
+            try:
+                m = cand.stat().st_mtime
+            except OSError:
+                continue
+            chosen = cand
+            chosen_mtime = m
+            break
+        if chosen is None:
             self._facts_text = ""
             self._facts_mtime = 0.0
             return ""
-        p = Path(path_str)
-        if not p.is_absolute():
-            # Resolve relative to the chatterbot project root (the
-            # working directory the dashboard runs from).
-            p = Path.cwd() / p
-        try:
-            mtime = p.stat().st_mtime
-        except OSError:
-            self._facts_text = ""
-            self._facts_mtime = 0.0
-            return ""
-        if mtime == self._facts_mtime and self._facts_text:
+
+        # Cache key includes mtime — invalidates correctly when EITHER
+        # the configured file appears (overriding the fallback) OR
+        # the chosen file is edited.
+        if chosen_mtime == self._facts_mtime and self._facts_text:
             return self._facts_text
         try:
-            text = p.read_text(encoding="utf-8").strip()
+            text = chosen.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeDecodeError):
             return ""
         # Cap at 4k chars so a runaway file can't blow the context budget.
         if len(text) > 4000:
             text = text[:4000] + "\n\n[…truncated…]"
         self._facts_text = text
-        self._facts_mtime = mtime
+        self._facts_mtime = chosen_mtime
         return text
 
     async def _streamer_facts_prepended(self, system_prompt: str) -> str:
