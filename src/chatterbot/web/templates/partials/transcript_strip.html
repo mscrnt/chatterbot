@@ -193,6 +193,16 @@
                   <i class="fa-solid fa-circle text-subtle text-[10px] shrink-0"></i>
                 {% endif %}
                 <span class="{{ _row_text }}">{{ c.text }}</span>
+                {% if c.transcribed_v2_at %}
+                  {# Slice 12 — perfect-pass refined this chunk's text.
+                     Subtle ✓ next to the row's similarity tag so the
+                     streamer can see at a glance which chunks have
+                     been polished beyond the live first pass. #}
+                  <span class="{{ _row_trail }} text-success"
+                        title="refined via perfect-pass transcription">
+                    <i class="fa-solid fa-wand-magic-sparkles text-[9px]"></i>
+                  </span>
+                {% endif %}
                 {% if _sim is not none %}
                   <span class="{{ _row_trail }}">{{ '%.2f'|format(_sim) }}</span>
                 {% else %}

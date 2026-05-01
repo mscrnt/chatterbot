@@ -91,6 +91,14 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "engaging_subjects_max_drivers_with_notes",
     "streamer_facts_path",
     "insights_modal_prewarm_top_n",
+    "whisper_perfect_pass_enabled",
+    "whisper_perfect_pass_model",
+    "whisper_perfect_pass_beam_size",
+    "whisper_perfect_pass_best_of",
+    "whisper_perfect_pass_confidence_threshold",
+    "whisper_perfect_pass_interval_seconds",
+    "audio_clip_storage_enabled",
+    "audio_clip_retention_hours",
     # ---------- LLM provider switch ----------
     "llm_provider",
     "anthropic_api_key",
@@ -422,6 +430,43 @@ class Settings(BaseSettings):
     # aggressive (drops more "similar" frames). 6 is conservative —
     # only kills near-pixel-identical frames (paused / static scenes).
     screenshot_phash_distance: int = 6
+
+    # Perfect-pass transcription (slice 12). The first pass runs at
+    # `whisper_model` for live signal (card-matching, the strip).
+    # The perfect pass re-transcribes low-confidence chunks with
+    # accuracy-tuned settings (beam=5, best_of=5,
+    # condition_on_previous_text=True, biased initial_prompt with
+    # previous chunks + streamer_facts vocabulary). Same model
+    # by default — empty `whisper_perfect_pass_model` reuses the
+    # first-pass model so no extra VRAM. Set to `large-v3` for the
+    # additional ~5-10% accuracy bump on hard cases at the cost of
+    # doubling VRAM.
+    whisper_perfect_pass_enabled: bool = True
+    whisper_perfect_pass_model: str = ""  # "" = same as whisper_model
+    whisper_perfect_pass_beam_size: int = 5
+    whisper_perfect_pass_best_of: int = 5
+    # Chunks with avg_logprob < this threshold are queued for re-pass.
+    # NULL avg_logprob (legacy rows or whisper didn't return it) is
+    # also queued so the perfect pass benefits everything captured
+    # before the slice landed.
+    whisper_perfect_pass_confidence_threshold: float = -0.5
+    # Cadence the perfect-pass loop polls the queue at. The loop
+    # processes one chunk per tick + sleeps between, so this is
+    # effectively "minimum seconds between perfect-pass GPU bursts."
+    whisper_perfect_pass_interval_seconds: int = 5
+
+    # Audio-clip storage (slice 12) — persists the WAV bytes for each
+    # captured chunk so the perfect-pass loop can re-transcribe and
+    # future features (replay-on-click, multimodal LLM input) have
+    # the source bytes available. Content-hashed under
+    # `data/audio_clips/` (same scheme as screenshots). Disabling
+    # storage also disables the perfect pass since it has nothing
+    # to re-transcribe.
+    audio_clip_storage_enabled: bool = True
+    # 0 = keep forever (default). Captures are content-hash deduped
+    # so disk growth is bounded by unique audio content; raise above
+    # 0 to opt back into age-based deletion.
+    audio_clip_retention_hours: int = 0
     # Maximum screenshots stitched into the per-group grid. 6 uses a
     # 3x2 layout (1440x540 canvas, cells stay 480x270 — same
     # legibility as the 4-cell layout). With phash dedup the average
@@ -555,6 +600,11 @@ def _coerce(key: str, value: str) -> Any:
             return max(1, min(10, int(value)))
         except (TypeError, ValueError):
             return 3
+    if key == "whisper_perfect_pass_confidence_threshold":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return -0.5
     if key in (
         "whisper_llm_match_interval_seconds", "whisper_llm_match_min_chunks",
         "whisper_auto_confirm_seconds",
@@ -579,6 +629,10 @@ def _coerce(key: str, value: str) -> Any:
         "engaging_subjects_notes_per_driver",
         "engaging_subjects_max_drivers_with_notes",
         "anthropic_thinking_budget_tokens",
+        "whisper_perfect_pass_beam_size",
+        "whisper_perfect_pass_best_of",
+        "whisper_perfect_pass_interval_seconds",
+        "audio_clip_retention_hours",
     ):
         try:
             return int(value)
@@ -617,6 +671,10 @@ def _coerce(key: str, value: str) -> Any:
                 "engaging_subjects_notes_per_driver": 2,
                 "engaging_subjects_max_drivers_with_notes": 8,
                 "anthropic_thinking_budget_tokens": 4096,
+                "whisper_perfect_pass_beam_size": 5,
+                "whisper_perfect_pass_best_of": 5,
+                "whisper_perfect_pass_interval_seconds": 5,
+                "audio_clip_retention_hours": 0,
             }[key]
     if key in (
         "streamelements_enabled", "mod_mode_enabled",
@@ -624,6 +682,8 @@ def _coerce(key: str, value: str) -> Any:
         "youtube_enabled", "discord_enabled",
         "whisper_enabled", "whisper_llm_match_enabled",
         "whisper_initial_prompt_enabled",
+        "whisper_perfect_pass_enabled",
+        "audio_clip_storage_enabled",
     ):
         return value.strip().lower() in ("true", "1", "yes", "on")
     if key == "obs_port":

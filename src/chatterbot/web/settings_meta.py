@@ -440,6 +440,69 @@ FIELDS: dict[str, dict[str, Any]] = {
         "min": 5, "max": 100, "step": 5,
         "suffix": "5-100",
     },
+    "audio_clip_storage_enabled": {
+        "label": "Persist audio clips",
+        "tooltip": "Save WAV clips of each utterance for re-transcription + future replay.",
+        "help": "When on, each whisper-captured utterance has its raw audio bytes saved to disk under data/audio_clips/ (content-hashed, so paused / repeated stretches dedup to one file). The perfect-pass background transcriber needs these — disabling storage also disables perfect-pass. Default on. Disk: ~150-300 KB per clip; ~50-100 MB per stream-hour before dedup.",
+        "type": "bool",
+    },
+    "audio_clip_retention_hours": {
+        "label": "Keep audio clips for",
+        "tooltip": "How long old audio clips stay on disk. 0 = forever.",
+        "help": "Audio clips older than this many hours get deleted. Default 0 = keep forever — content-hash dedup keeps disk growth bounded. Raise to opt back into time-based cleanup.",
+        "type": "number",
+        "min": 0, "max": 720, "step": 1,
+        "suffix": "hours (0 = forever)",
+        "depends_on": ("audio_clip_storage_enabled", True),
+    },
+    "whisper_perfect_pass_enabled": {
+        "label": "Run the perfect pass",
+        "tooltip": "Background re-transcribe of low-confidence chunks with accuracy-tuned settings.",
+        "help": "When on, a background loop re-transcribes any chunk whose first-pass confidence falls below the threshold below, using accuracy-tuned settings (bigger beam, best-of-5, condition_on_previous_text, biased initial prompt with previous chunks + your channel-facts vocabulary). The chunk's text + search-index embedding both update in place. Refined chunks get a tiny ✓ in the live strip. Default on. Requires audio storage to be enabled.",
+        "type": "bool",
+        "depends_on": ("audio_clip_storage_enabled", True),
+    },
+    "whisper_perfect_pass_model": {
+        "label": "Perfect-pass whisper model",
+        "tooltip": "Which whisper model the perfect pass uses. Empty = same as first pass.",
+        "help": "Empty (default) reuses your first-pass model — no extra VRAM. The accuracy bump comes from settings (beam, best-of, context, biased prompt) rather than model size; ~5-15% improvement on jargon-heavy / fast / mumbled speech. Set to a bigger model name like 'large-v3' for an additional ~5-10% on hard audio at the cost of doubling VRAM (the second model is loaded lazily on first perfect-pass run).",
+        "type": "select",
+        "options": ["", "tiny.en", "base.en", "small.en", "medium.en", "large-v2", "large-v3"],
+        "depends_on": ("whisper_perfect_pass_enabled", True),
+    },
+    "whisper_perfect_pass_beam_size": {
+        "label": "Perfect-pass beam size",
+        "tooltip": "Decoding beam width on the perfect pass.",
+        "help": "Higher = more thorough decoding, slower. 5 is the recommended balance for accuracy-tuned offline work; 3 (the live-pass default) prioritizes speed. Default 5.",
+        "type": "number",
+        "min": 1, "max": 10, "step": 1,
+        "depends_on": ("whisper_perfect_pass_enabled", True),
+    },
+    "whisper_perfect_pass_best_of": {
+        "label": "Perfect-pass best-of",
+        "tooltip": "Number of decodings to try; pick the best.",
+        "help": "Whisper runs the decoder N times with different sampling and picks the highest-probability output. 5 gives ~+3-8% accuracy at ~5x compute (acceptable since the perfect pass isn't latency-bound). Default 5.",
+        "type": "number",
+        "min": 1, "max": 10, "step": 1,
+        "depends_on": ("whisper_perfect_pass_enabled", True),
+    },
+    "whisper_perfect_pass_confidence_threshold": {
+        "label": "Re-pass when confidence below",
+        "tooltip": "avg_logprob cutoff. Chunks below this get re-transcribed.",
+        "help": "Whisper returns an average log-probability per segment — lower = less confident. Chunks below this threshold get queued for the perfect pass. -0.5 (default) catches the worst ~10-25% on a typical stream; -0.3 catches more (cheaper-confidence floor); -1.0 catches only the obviously-bad ones. NULL/legacy chunks are always queued.",
+        "type": "number",
+        "min": -3.0, "max": 0.0, "step": 0.05,
+        "depends_on": ("whisper_perfect_pass_enabled", True),
+    },
+    "whisper_perfect_pass_interval_seconds": {
+        "label": "Perfect-pass interval",
+        "tooltip": "Seconds between perfect-pass GPU bursts.",
+        "help": "How often the loop ticks. One chunk is processed per tick; the queue drains gradually so the live pass keeps GPU priority. 5s (default) is fine for most streams; raise it if your GPU is shared with the game.",
+        "type": "number",
+        "min": 1, "max": 60, "step": 1,
+        "suffix": "seconds",
+        "depends_on": ("whisper_perfect_pass_enabled", True),
+    },
     "screenshot_phash_distance": {
         "label": "Scene-change dedup strictness",
         "tooltip": "Hamming-distance cut for adjacent-frame dedup at stitch time.",
@@ -937,6 +1000,34 @@ SECTIONS: list[dict[str, Any]] = [
                 "fields": [
                     "whisper_group_interval_seconds",
                     "whisper_group_min_chunks",
+                ],
+            },
+            {
+                "id": "voice-perfect-pass",
+                "title": "Perfect-pass transcription",
+                "icon": "fa-solid fa-wand-magic-sparkles",
+                "blurb": (
+                    "After the first whisper pass writes a quick "
+                    "transcript for the live strip, a background "
+                    "perfect-pass re-transcribes low-confidence chunks "
+                    "with accuracy-tuned settings (bigger beam, "
+                    "best-of-5, context across segments, biased "
+                    "prompt). Same model by default — empty 'perfect "
+                    "pass model' reuses your first-pass model so no "
+                    "extra VRAM. Set to large-v3 for the full "
+                    "accuracy bump on hard cases at the cost of "
+                    "doubling VRAM. Disabling audio storage also "
+                    "disables the perfect pass."
+                ),
+                "fields": [
+                    "audio_clip_storage_enabled",
+                    "audio_clip_retention_hours",
+                    "whisper_perfect_pass_enabled",
+                    "whisper_perfect_pass_model",
+                    "whisper_perfect_pass_beam_size",
+                    "whisper_perfect_pass_best_of",
+                    "whisper_perfect_pass_confidence_threshold",
+                    "whisper_perfect_pass_interval_seconds",
                 ],
             },
             {

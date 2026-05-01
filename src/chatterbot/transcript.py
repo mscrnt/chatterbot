@@ -217,6 +217,51 @@ def _encode_webp(jpeg_bytes: bytes, quality: int) -> bytes | None:
         return None
 
 
+def _persist_audio_clip(
+    audio_segment,
+    sample_rate: int,
+    data_dir: "Path",
+) -> str | None:
+    """Persist a float32 audio segment to disk as int16 WAV under
+    `data/audio_clips/<sha[:2]>/<sha[2:4]>/<sha>.wav`. Content-hashed
+    so identical audio (paused stream, repeated phrases) collapses to
+    one file on disk; same scheme as the screenshot storage.
+
+    Returns the relative path (under data_dir) so the caller can stash
+    it on the transcript_chunk row, or None on any persist failure
+    (capture loop continues without the audio reference; perfect-pass
+    just won't run on this chunk)."""
+    try:
+        import numpy as np
+        import wave
+        import io
+        # float32 [-1, 1] → int16 [-32768, 32767]. Clamp + cast.
+        if hasattr(audio_segment, "dtype") and audio_segment.dtype.kind == "f":
+            scaled = (audio_segment * 32767.0).clip(-32768, 32767).astype(np.int16)
+        else:
+            scaled = audio_segment.astype(np.int16)
+        # WAV bytes via stdlib wave — no external dep, broad reader
+        # support, larger-than-opus but fine at the size we're at
+        # (5-10s mono ≈ 160-320 KB).
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)  # int16
+            w.setframerate(int(sample_rate))
+            w.writeframes(scaled.tobytes())
+        wav_bytes = buf.getvalue()
+        sub_path = _content_hashed_relpath(wav_bytes, ext=".wav")
+        rel_path = f"audio_clips/{sub_path}"
+        fpath = data_dir / "audio_clips" / sub_path
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+        if not fpath.exists():
+            fpath.write_bytes(wav_bytes)
+        return rel_path
+    except Exception:
+        logger.exception("transcript: persist_audio_clip failed")
+        return None
+
+
 def _content_hashed_relpath(content: bytes, ext: str = ".webp") -> str:
     """Build the on-disk relative path for a content-addressed
     screenshot. Layout `<sha[:2]>/<sha[2:4]>/<sha><ext>` keeps any
@@ -353,6 +398,20 @@ class TranscriptService:
         self._model = None  # lazy-loaded WhisperModel
         self._model_load_attempted = False
         self._model_load_error: str | None = None
+        # Perfect-pass model — separate WhisperModel instance when
+        # `whisper_perfect_pass_model` differs from `whisper_model`.
+        # Same lazy-loading semantics as the first-pass model; loaded
+        # on the first perfect-pass run, not at boot. When the perfect-
+        # pass model name is empty / matches the first-pass model,
+        # this stays None and `_perfect_model_handle()` returns the
+        # first-pass `_model` instead — no second weights in VRAM.
+        self._perfect_model = None
+        self._perfect_model_load_attempted = False
+        self._perfect_model_loaded_for: str | None = None
+        # Lock for the perfect-pass loop so two ticks can't run
+        # concurrently — the GPU has one queue and we want to keep
+        # the order predictable.
+        self._perfect_pass_lock = asyncio.Lock()
         # Cached embeddings of open insight cards. Refreshed every minute
         # so adds/removes propagate. Keyed by (kind, item_key) → vector.
         self._card_embeds: dict[tuple[str, str], list[float]] = {}
@@ -413,6 +472,275 @@ class TranscriptService:
             self._model_load_error = f"{type(e).__name__}: {e}"
             logger.exception("transcript: failed to load whisper model")
         return self._model
+
+    async def _perfect_model_handle(self):
+        """Return the WhisperModel instance the perfect pass should use.
+
+        - Empty `whisper_perfect_pass_model` (default) OR a value
+          equal to `whisper_model` → reuse the first-pass model. No
+          second weights load; entire VRAM cost stays at the first-
+          pass model.
+        - Any other model name → lazy-load a separate WhisperModel
+          instance the first time the perfect pass runs. Streamer
+          pays the second model's load + VRAM cost; the trade is
+          ~5-10% bonus accuracy on hard cases.
+
+        If the configured perfect-pass model changes at runtime
+        (settings reload), this method drops the now-stale instance
+        on the next call so the new model loads cleanly."""
+        target = (getattr(
+            self.settings, "whisper_perfect_pass_model", "",
+        ) or "").strip()
+        first_pass = (self.settings.whisper_model or "").strip()
+        # Same as first pass → reuse it.
+        if not target or target == first_pass:
+            return await self._ensure_model()
+        # If we previously loaded a perfect model for a different name,
+        # drop it; the streamer changed the setting.
+        if (
+            self._perfect_model is not None
+            and self._perfect_model_loaded_for != target
+        ):
+            self._perfect_model = None
+            self._perfect_model_load_attempted = False
+            self._perfect_model_loaded_for = None
+        if (
+            self._perfect_model is not None
+            or self._perfect_model_load_attempted
+        ):
+            return self._perfect_model
+        self._perfect_model_load_attempted = True
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
+            logger.warning(
+                "transcript perfect-pass: faster-whisper not installed",
+            )
+            return None
+        compute = self.settings.whisper_compute_type
+        try:
+            self._perfect_model = await asyncio.to_thread(
+                WhisperModel, target, device="auto", compute_type=compute,
+            )
+            self._perfect_model_loaded_for = target
+            logger.info(
+                "transcript perfect-pass: loaded model=%s compute=%s",
+                target, compute,
+            )
+        except Exception:
+            logger.exception(
+                "transcript perfect-pass: failed to load model %s", target,
+            )
+            self._perfect_model = None
+        return self._perfect_model
+
+    async def perfect_pass_loop(self) -> None:
+        """Background loop — re-transcribes low-confidence chunks with
+        accuracy-tuned settings. One chunk per tick + a sleep between
+        so the live first-pass keeps GPU priority. No-op when the
+        feature is disabled OR audio storage is disabled (no audio =
+        nothing to re-transcribe).
+
+        The loop self-tunes its sleep to the configured interval; a
+        streamer who wants the perfect pass less aggressive can raise
+        `whisper_perfect_pass_interval_seconds`."""
+        # Initial delay so we don't fight the first-pass at boot.
+        await asyncio.sleep(30)
+        while True:
+            try:
+                interval = max(1, int(getattr(
+                    self.settings,
+                    "whisper_perfect_pass_interval_seconds", 5,
+                )))
+                if not bool(getattr(
+                    self.settings, "whisper_perfect_pass_enabled", True,
+                )):
+                    await asyncio.sleep(interval)
+                    continue
+                if not bool(getattr(
+                    self.settings, "audio_clip_storage_enabled", True,
+                )):
+                    await asyncio.sleep(interval)
+                    continue
+                threshold = float(getattr(
+                    self.settings,
+                    "whisper_perfect_pass_confidence_threshold", -0.5,
+                ))
+                pending = await asyncio.to_thread(
+                    self.repo.chunks_pending_perfect_pass,
+                    confidence_threshold=threshold,
+                    limit=1,
+                )
+                if not pending:
+                    await asyncio.sleep(interval)
+                    continue
+                async with self._perfect_pass_lock:
+                    await self._run_perfect_pass(pending[0])
+                # Sleep between chunks even on success — the GPU is
+                # shared with the live pass, the LLM, and possibly the
+                # streamer's game; back off so the queue drains
+                # gradually rather than burning a hot loop.
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "transcript perfect_pass_loop: iteration failed",
+                )
+                # Sleep on error so we don't burn CPU on a tight error
+                # loop. Use the interval as the natural backoff.
+                try:
+                    await asyncio.sleep(int(getattr(
+                        self.settings,
+                        "whisper_perfect_pass_interval_seconds", 5,
+                    )))
+                except asyncio.CancelledError:
+                    raise
+
+    async def _run_perfect_pass(self, chunk) -> None:
+        """Re-transcribe one chunk with accuracy-tuned settings + a
+        biased initial prompt that includes the previous chunks'
+        text. Updates `transcript_chunks.text`, stamps
+        `transcribed_v2_at`, and replaces the `vec_transcripts`
+        embedding so search reflects the corrected text. Failures
+        log + leave the chunk's first-pass text alone."""
+        if not chunk.audio_path:
+            return
+        from pathlib import Path as _Path
+        data_dir = _Path(self.settings.db_path).parent
+        wav_path = data_dir / chunk.audio_path
+        if not wav_path.is_file():
+            logger.warning(
+                "transcript perfect-pass: audio missing at %s "
+                "(chunk %d) — skipping", wav_path, chunk.id,
+            )
+            return
+
+        model = await self._perfect_model_handle()
+        if model is None:
+            return  # already logged
+
+        # Read the WAV back as a float32 array faster-whisper can
+        # consume directly. wave + numpy keeps us off any new dep.
+        try:
+            import wave
+            import numpy as np
+            with wave.open(str(wav_path), "rb") as w:
+                n_frames = w.getnframes()
+                raw = w.readframes(n_frames)
+            audio = (
+                np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0
+            )
+        except Exception:
+            logger.exception(
+                "transcript perfect-pass: read failed for chunk %d", chunk.id,
+            )
+            return
+
+        # Biased initial prompt — chat vocab + streamer-facts as the
+        # live pass uses, plus the previous N chunks' text so whisper
+        # has flow context. Capped to faster-whisper's ~244-token
+        # initial-prompt budget.
+        live_prompt = self._build_initial_prompt() or ""
+        try:
+            recent = await asyncio.to_thread(
+                self.repo.list_transcript_chunks, limit=8,
+            )
+            # newest-first → reverse to oldest-first; drop the chunk
+            # we're about to re-transcribe so it doesn't bias itself.
+            prior = " ".join(
+                c.text for c in reversed(recent)
+                if c.id != chunk.id and c.text
+            )[:600]
+        except Exception:
+            prior = ""
+        # Combine: prior context first, then the live vocab block.
+        combined = (prior + ("\n\n" if prior and live_prompt else "") + live_prompt)
+        if combined:
+            combined = combined[:1200]
+
+        beam = max(1, int(getattr(
+            self.settings, "whisper_perfect_pass_beam_size", 5,
+        )))
+        best_of = max(1, int(getattr(
+            self.settings, "whisper_perfect_pass_best_of", 5,
+        )))
+        no_speech = float(getattr(
+            self.settings, "whisper_no_speech_threshold", 0.4,
+        ))
+        log_prob = float(getattr(
+            self.settings, "whisper_log_prob_threshold", -1.5,
+        ))
+
+        def _run() -> str | None:
+            try:
+                segments, _info = model.transcribe(
+                    audio,
+                    beam_size=beam,
+                    best_of=best_of,
+                    no_speech_threshold=no_speech,
+                    log_prob_threshold=log_prob,
+                    condition_on_previous_text=True,
+                    initial_prompt=combined or None,
+                    word_timestamps=True,
+                    language="en",
+                )
+                pieces = [s.text.strip() for s in segments if s.text]
+                joined = " ".join(p for p in pieces if p).strip()
+                return joined or None
+            except Exception:
+                logger.exception(
+                    "transcript perfect-pass: transcribe failed",
+                )
+                return None
+
+        new_text = await asyncio.to_thread(_run)
+        if not new_text:
+            # Empty result — don't overwrite the first-pass text.
+            # Stamp transcribed_v2_at so the loop doesn't keep
+            # retrying this chunk forever.
+            try:
+                await asyncio.to_thread(
+                    self.repo.update_chunk_text_v2,
+                    chunk.id, chunk.text, new_embedding=None,
+                )
+            except Exception:
+                logger.exception(
+                    "transcript perfect-pass: stamp-only update failed",
+                )
+            return
+
+        # Re-embed the new text so vec_transcripts reflects the
+        # corrected transcript. Cheap (single embed call); skipping
+        # would mean search sees the first-pass text via the index
+        # while readers see the perfect-pass text via the row.
+        new_embedding: list[float] | None = None
+        try:
+            new_embedding = await self.llm.embed(new_text[:500])
+        except Exception:
+            logger.exception(
+                "transcript perfect-pass: embed failed for chunk %d",
+                chunk.id,
+            )
+
+        try:
+            await asyncio.to_thread(
+                self.repo.update_chunk_text_v2,
+                chunk.id, new_text, new_embedding=new_embedding,
+            )
+        except Exception:
+            logger.exception(
+                "transcript perfect-pass: db update failed for chunk %d",
+                chunk.id,
+            )
+            return
+
+        if new_text != chunk.text:
+            logger.info(
+                "transcript perfect-pass: chunk %d refined "
+                "(%r → %r)", chunk.id,
+                chunk.text[:80], new_text[:80],
+            )
 
     async def ingest_chunk(
         self,
@@ -628,7 +956,7 @@ class TranscriptService:
         vad_thr = float(getattr(self.settings, "whisper_vad_threshold", 0.3))
         prompt = self._build_initial_prompt()
 
-        def _run() -> list[tuple[str, float, float]]:
+        def _run() -> list[tuple[str, float, float, float | None]]:
             try:
                 segments, _info = model.transcribe(
                     audio,
@@ -643,7 +971,16 @@ class TranscriptService:
                     condition_on_previous_text=False,
                     initial_prompt=prompt,
                 )
-                return [(s.text.strip(), s.start, s.end) for s in segments]
+                return [
+                    (
+                        s.text.strip(), s.start, s.end,
+                        # faster-whisper exposes avg_logprob; defensive
+                        # getattr so tests / older versions that don't
+                        # populate it still work.
+                        getattr(s, "avg_logprob", None),
+                    )
+                    for s in segments
+                ]
             except Exception:
                 logger.exception("transcript: whisper.transcribe failed")
                 return []
@@ -652,6 +989,19 @@ class TranscriptService:
         if not segments:
             return
 
+        # Audio-clip persistence (slice 12) — slice out each segment's
+        # range from the buffer and save as content-hashed WAV. The
+        # perfect-pass loop reads from these. Disabled = no perfect
+        # pass (audio bytes are gone after this function returns).
+        audio_clip_enabled = bool(getattr(
+            self.settings, "audio_clip_storage_enabled", True,
+        ))
+        if audio_clip_enabled:
+            from pathlib import Path as _Path
+            clip_data_dir = _Path(self.settings.db_path).parent
+        else:
+            clip_data_dir = None
+
         # Refresh card embeddings if stale.
         await self._refresh_card_embeds_if_stale()
 
@@ -659,11 +1009,29 @@ class TranscriptService:
         unnamed_threshold = float(
             getattr(self.settings, "whisper_unnamed_match_threshold", 0.80)
         )
-        for text, start_s, end_s in segments:
+        for text, start_s, end_s, seg_logprob in segments:
             text = (text or "").strip()
             if not text or len(text) < 4:
                 continue
             duration_ms = max(0, int((end_s - start_s) * 1000))
+            # Slice + persist this segment's audio when storage is
+            # enabled. Slicing in Python (numpy view) is cheap; the
+            # WAV write happens off-thread via to_thread.
+            audio_path: str | None = None
+            if audio_clip_enabled and clip_data_dir is not None:
+                try:
+                    a = max(0, int(start_s * SAMPLE_RATE))
+                    b = max(a, int(end_s * SAMPLE_RATE))
+                    if b > a and b <= len(audio):
+                        seg_bytes = audio[a:b]
+                        audio_path = await asyncio.to_thread(
+                            _persist_audio_clip,
+                            seg_bytes, SAMPLE_RATE, clip_data_dir,
+                        )
+                except Exception:
+                    logger.exception(
+                        "transcript: audio-clip slice failed (chunk continues)",
+                    )
             best_kind, best_key, best_sim, best_text, qv = (
                 await self._best_candidate(text)
             )
@@ -696,6 +1064,8 @@ class TranscriptService:
                 matched_kind=best_kind, matched_item_key=best_key,
                 similarity=best_sim, embedding=qv,
                 ts=buffer_captured_at,
+                avg_logprob=seg_logprob,
+                audio_path=audio_path,
             )
             # When the batched LLM matcher is active, it owns auto-pending
             # writes — per-utterance cosine still runs to populate

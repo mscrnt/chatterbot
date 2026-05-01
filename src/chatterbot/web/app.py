@@ -456,6 +456,17 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
                 name="transcript_embed_backfill",
             )
         )
+        # Perfect-pass transcription (slice 12) — re-transcribes
+        # low-confidence chunks with accuracy-tuned settings off the
+        # live latency path. Settings-gated and a no-op when
+        # `whisper_perfect_pass_enabled=False` or audio storage is
+        # off; the loop just sleeps in those cases without doing work.
+        _bg_tasks.add(
+            asyncio.create_task(
+                transcript_service.perfect_pass_loop(),
+                name="transcript_perfect_pass",
+            )
+        )
         # Dashboard-side lifecycle reload poller — same DB-flag
         # mechanism the bot uses, but scoped to dashboard-resident
         # services. Watches `bot_reload_at`; when it advances, fans

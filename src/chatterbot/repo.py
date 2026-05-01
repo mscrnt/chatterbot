@@ -117,7 +117,12 @@ class TranscriptChunk:
     """One VAD-bounded utterance the streamer spoke on stream, transcribed
     by whisper. When the embedding cosine-matches an open insight card
     above threshold, matched_* + similarity are populated AND that card
-    auto-flips to 'addressed' with this chunk's text as its note."""
+    auto-flips to 'addressed' with this chunk's text as its note.
+
+    Slice 12 fields (`audio_path`, `avg_logprob`, `transcribed_v2_at`)
+    are NULL on legacy rows and on chunks captured when audio storage
+    or perfect-pass are disabled. The perfect-pass loop only operates
+    on rows where `audio_path` is set."""
 
     id: int
     ts: str
@@ -126,6 +131,19 @@ class TranscriptChunk:
     matched_kind: str | None = None
     matched_item_key: str | None = None
     similarity: float | None = None
+    # Average log-probability returned by faster-whisper for this
+    # chunk's segment(s). Lower = less confident. The perfect-pass
+    # loop selects chunks below `whisper_perfect_pass_confidence_
+    # threshold` for re-transcription.
+    avg_logprob: float | None = None
+    # Relative path to the persisted audio clip
+    # (`audio_clips/<sha[:2]>/<sha[2:4]>/<sha>.wav`). Set when
+    # `audio_clip_storage_enabled=True` at capture time. The perfect-
+    # pass loop reads from here.
+    audio_path: str | None = None
+    # ISO timestamp of when the perfect pass last updated this row's
+    # text. NULL = first-pass only.
+    transcribed_v2_at: str | None = None
 
 
 @dataclass
@@ -934,6 +952,32 @@ class ChatterRepo:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_transcript_ts "
                 "ON transcript_chunks(ts)"
+            )
+            # Slice 12 — perfect-pass + audio storage. Additive
+            # migration: NULL on every row that predates the slice OR
+            # is captured with the feature disabled.
+            cur.execute("PRAGMA table_info(transcript_chunks)")
+            tc_cols = {row["name"] for row in cur.fetchall()}
+            if "avg_logprob" not in tc_cols:
+                cur.execute(
+                    "ALTER TABLE transcript_chunks "
+                    "ADD COLUMN avg_logprob REAL"
+                )
+            if "audio_path" not in tc_cols:
+                cur.execute(
+                    "ALTER TABLE transcript_chunks "
+                    "ADD COLUMN audio_path TEXT"
+                )
+            if "transcribed_v2_at" not in tc_cols:
+                cur.execute(
+                    "ALTER TABLE transcript_chunks "
+                    "ADD COLUMN transcribed_v2_at TEXT"
+                )
+            # Index lookups for the perfect-pass queue: rows that have
+            # an audio_path (capture-side persisted) but no v2 text yet.
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_transcript_perfect_queue "
+                "ON transcript_chunks(transcribed_v2_at, audio_path)"
             )
             # Per-window LLM-summarized groups of transcript chunks.
             # Replaces the per-utterance live strip on the dashboard
@@ -2482,6 +2526,8 @@ class ChatterRepo:
         similarity: float | None = None,
         embedding: list[float] | None = None,
         ts: str | None = None,
+        avg_logprob: float | None = None,
+        audio_path: str | None = None,
     ) -> int:
         """Persist one whisper-transcribed utterance + any auto-match
         state. The embedding (when provided) is mirrored into
@@ -2492,19 +2538,31 @@ class ChatterRepo:
         ISO timestamp when the audio's actual capture time is known
         and differs from arrival time — e.g. when audio was buffered
         on the OBS-side audio_client during a dashboard outage. Live
-        ingest (no outage) just falls through to now()."""
+        ingest (no outage) just falls through to now().
+
+        `avg_logprob` is the segment's average log-probability from
+        faster-whisper; the perfect-pass loop uses it to pick low-
+        confidence chunks for re-transcription. NULL = unknown
+        (legacy rows or whisper didn't return it).
+
+        `audio_path` is the relative path to the persisted WAV clip
+        for this chunk (under the screenshots-style content-hashed
+        layout). NULL when audio storage is disabled."""
         ts_value = ts or _now_iso()
         with self._cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO transcript_chunks(
                     ts, duration_ms, text,
-                    matched_kind, matched_item_key, similarity
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    matched_kind, matched_item_key, similarity,
+                    avg_logprob, audio_path
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     ts_value, int(duration_ms), text,
                     matched_kind, matched_item_key, similarity,
+                    (float(avg_logprob) if avg_logprob is not None else None),
+                    audio_path,
                 ),
             )
             chunk_id = int(cur.lastrowid)
@@ -2517,11 +2575,109 @@ class ChatterRepo:
                 )
             return chunk_id
 
+    def chunks_pending_perfect_pass(
+        self,
+        *,
+        confidence_threshold: float,
+        limit: int = 20,
+    ) -> list[TranscriptChunk]:
+        """Find chunks the perfect-pass loop should re-transcribe:
+        audio is persisted, no v2 transcript yet, and first-pass
+        confidence was below the threshold (or NULL — caller decides
+        whether to include unknown-confidence rows).
+
+        Sorted oldest-first so the queue drains in capture order;
+        a slow GPU is allowed to fall behind without losing rows."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, ts, duration_ms, text,
+                       matched_kind, matched_item_key, similarity,
+                       avg_logprob, audio_path, transcribed_v2_at
+                FROM transcript_chunks
+                WHERE audio_path IS NOT NULL
+                  AND transcribed_v2_at IS NULL
+                  AND (avg_logprob IS NULL OR avg_logprob < ?)
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (float(confidence_threshold), int(limit)),
+            )
+            return [
+                TranscriptChunk(
+                    id=int(r["id"]), ts=r["ts"],
+                    duration_ms=int(r["duration_ms"] or 0),
+                    text=r["text"],
+                    matched_kind=r["matched_kind"],
+                    matched_item_key=r["matched_item_key"],
+                    similarity=(
+                        float(r["similarity"])
+                        if r["similarity"] is not None else None
+                    ),
+                    avg_logprob=(
+                        float(r["avg_logprob"])
+                        if r["avg_logprob"] is not None else None
+                    ),
+                    audio_path=r["audio_path"],
+                    transcribed_v2_at=r["transcribed_v2_at"],
+                )
+                for r in cur.fetchall()
+            ]
+
+    def update_chunk_text_v2(
+        self,
+        chunk_id: int,
+        text: str,
+        *,
+        new_embedding: list[float] | None = None,
+    ) -> None:
+        """Apply a perfect-pass result to an existing chunk: rewrite
+        `text`, stamp `transcribed_v2_at`, and (optionally) replace
+        the row's `vec_transcripts` embedding so search reflects the
+        corrected text. Called once per chunk by the perfect-pass
+        loop; idempotent enough that a loop restart rerunning a
+        chunk still produces the same DB state."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE transcript_chunks "
+                "SET text = ?, transcribed_v2_at = ? "
+                "WHERE id = ?",
+                (text, _now_iso(), int(chunk_id)),
+            )
+            if new_embedding:
+                blob = _vec_to_blob(new_embedding)
+                # Drop the old vec row before re-inserting — vec0
+                # doesn't support upsert, and a stale embedding
+                # paired with the new text would silently degrade
+                # search.
+                cur.execute(
+                    "DELETE FROM vec_transcripts WHERE chunk_id = ?",
+                    (int(chunk_id),),
+                )
+                cur.execute(
+                    "INSERT INTO vec_transcripts(chunk_id, embedding) "
+                    "VALUES (?, ?)",
+                    (int(chunk_id), blob),
+                )
+
+    def list_referenced_audio_paths(self) -> list[str]:
+        """Every audio_path currently referenced by a chunk row.
+        Powers the orphan-sweep step of the audio-clip retention
+        loop — files in `data/audio_clips/` not in this set get
+        unlinked."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT audio_path FROM transcript_chunks "
+                "WHERE audio_path IS NOT NULL"
+            )
+            return [r["audio_path"] for r in cur.fetchall()]
+
     def get_transcript_chunk(self, chunk_id: int) -> TranscriptChunk | None:
         with self._cursor() as cur:
             cur.execute(
                 "SELECT id, ts, duration_ms, text, "
-                "       matched_kind, matched_item_key, similarity "
+                "       matched_kind, matched_item_key, similarity, "
+                "       avg_logprob, audio_path, transcribed_v2_at "
                 "FROM transcript_chunks WHERE id = ?",
                 (int(chunk_id),),
             )
@@ -2535,6 +2691,12 @@ class ChatterRepo:
                 matched_kind=r["matched_kind"],
                 matched_item_key=r["matched_item_key"],
                 similarity=float(r["similarity"]) if r["similarity"] is not None else None,
+                avg_logprob=(
+                    float(r["avg_logprob"])
+                    if r["avg_logprob"] is not None else None
+                ),
+                audio_path=r["audio_path"],
+                transcribed_v2_at=r["transcribed_v2_at"],
             )
 
     def transcript_context_around(
@@ -3105,7 +3267,8 @@ class ChatterRepo:
             cur.execute(
                 """
                 SELECT id, ts, duration_ms, text,
-                       matched_kind, matched_item_key, similarity
+                       matched_kind, matched_item_key, similarity,
+                       avg_logprob, audio_path, transcribed_v2_at
                 FROM transcript_chunks
                 ORDER BY id DESC LIMIT ?
                 """,
@@ -3119,6 +3282,12 @@ class ChatterRepo:
                     matched_kind=r["matched_kind"],
                     matched_item_key=r["matched_item_key"],
                     similarity=float(r["similarity"]) if r["similarity"] is not None else None,
+                    avg_logprob=(
+                        float(r["avg_logprob"])
+                        if r["avg_logprob"] is not None else None
+                    ),
+                    audio_path=r["audio_path"],
+                    transcribed_v2_at=r["transcribed_v2_at"],
                 )
                 for r in cur.fetchall()
             ]
@@ -3135,7 +3304,8 @@ class ChatterRepo:
             cur.execute(
                 """
                 SELECT id, ts, duration_ms, text,
-                       matched_kind, matched_item_key, similarity
+                       matched_kind, matched_item_key, similarity,
+                       avg_logprob, audio_path, transcribed_v2_at
                 FROM transcript_chunks
                 WHERE datetime(ts) >= datetime('now', ?)
                 ORDER BY id DESC LIMIT ?
@@ -3151,6 +3321,12 @@ class ChatterRepo:
                 matched_kind=r["matched_kind"],
                 matched_item_key=r["matched_item_key"],
                 similarity=float(r["similarity"]) if r["similarity"] is not None else None,
+                avg_logprob=(
+                    float(r["avg_logprob"])
+                    if r["avg_logprob"] is not None else None
+                ),
+                audio_path=r["audio_path"],
+                transcribed_v2_at=r["transcribed_v2_at"],
             )
             for r in rows
         ]
