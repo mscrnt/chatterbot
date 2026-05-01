@@ -567,6 +567,82 @@ class OpenAIClient(_EmbeddingDelegator):
 # Factory
 # ============================================================
 
+class LLMClientHandle:
+    """Stable proxy around the active LLMProvider so services can hold
+    a single reference while the underlying client is swapped during
+    a settings reload. Lifecycle:
+
+      - Constructed once at startup with `LLMClientHandle(settings)`.
+      - Every service (Summarizer, InsightsService, Moderator, etc.)
+        receives the handle and calls methods on it like any other
+        LLMProvider — `await self.llm.embed(...)`,
+        `await self.llm.generate_structured(...)`, etc.
+      - On reload, the lifecycle poller calls `handle.reconfigure(
+        new_settings)` which builds a fresh inner client and atomically
+        swaps the reference. Future calls go to the new client; calls
+        that already resolved a method handle out of the old one
+        complete on the old client.
+
+    Why a proxy instead of having every service hold a settings ref
+    and rebuild its own client on reload: the LLM client is shared
+    state. With per-service rebuilds the bot would briefly run with
+    a mix of old and new clients and the embed-via-Ollama wiring
+    would diverge across services. The proxy keeps "one client"
+    semantics.
+
+    `__getattr__` forwards every attribute access to the inner
+    client, so `await handle.health_check()` etc. work without
+    an explicit method on the handle. Explicit attrs on the handle
+    (_inner, _settings, reconfigure) take precedence — Python's
+    attribute lookup checks the instance + class before falling
+    through to __getattr__."""
+
+    def __init__(self, settings) -> None:
+        self._settings = settings
+        self._inner: LLMProvider = make_llm_client(settings)
+
+    def __getattr__(self, name: str):
+        # Reached only when normal attribute lookup fails — so
+        # _inner / _settings / reconfigure don't recurse.
+        return getattr(self._inner, name)
+
+    @property
+    def inner(self) -> LLMProvider:
+        """Direct handle to the wrapped client. Use sparingly — the
+        whole point of the proxy is to keep services holding the
+        handle, not the inner. Useful for `isinstance` checks and
+        for code that genuinely needs to bypass the proxy."""
+        return self._inner
+
+    def reconfigure(self, settings) -> None:
+        """Swap the inner client to one configured by `settings`.
+        Provider switch (Ollama → Anthropic → OpenAI), API-key
+        rotation, model change all flow through here. The old client
+        is dropped on the floor — its httpx clients close on GC.
+
+        Logs the provider class transition so a streamer can confirm
+        the swap actually happened by reading the bot logs."""
+        old_cls = type(self._inner).__name__
+        try:
+            new_inner = make_llm_client(settings)
+        except Exception:
+            logger.exception(
+                "llm-handle: reconfigure failed; keeping old client",
+            )
+            return
+        self._inner = new_inner
+        self._settings = settings
+        new_cls = type(self._inner).__name__
+        if old_cls == new_cls:
+            logger.info(
+                "llm-handle: reconfigured (provider=%s, same class)", new_cls,
+            )
+        else:
+            logger.info(
+                "llm-handle: reconfigured (%s → %s)", old_cls, new_cls,
+            )
+
+
 def make_llm_client(settings) -> LLMProvider:
     """Build the right LLMProvider for the configured backend.
 

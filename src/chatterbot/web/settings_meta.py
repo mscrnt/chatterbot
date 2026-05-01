@@ -1170,40 +1170,28 @@ SECTIONS: list[dict[str, Any]] = [
 
 RESTART_REQUIRED_KEYS: frozenset[str] = frozenset({
     # Twitch IRC connection state — held inside the bot's Twitch
-    # client; reconnect needs full client tear-down.
+    # client; reconnect needs full client tear-down. Could be
+    # promoted to 'reload' if ChatterListener gains a reconnect-
+    # in-place path; for now this is the streamer's most-stable
+    # set so the friction is minimal.
     "twitch_channel",
     "twitch_oauth_token",
     "twitch_bot_nick",
     "twitch_client_id",
     "twitch_client_secret",
-    # LLM provider switch — different client class. Slice 10C may
-    # promote some of these to 'reload' once the client gets a
-    # reconfigure() path.
-    "llm_provider",
-    "anthropic_api_key",
-    "anthropic_model",
-    "anthropic_thinking_budget_tokens",
-    "openai_api_key",
-    "openai_model",
-    "openai_reasoning_model",
-    "openai_organization",
-    # Whisper model — heavy load, lazy-init at first audio chunk.
+    # Whisper model file — heavy lazy-load at first audio. Could
+    # be promoted to 'reload' by tearing down `_model` so the next
+    # transcription rebuilds it; deferred because model files are
+    # 100s of MB and the load latency is user-visible.
     "whisper_model",
     # Cross-process bus — internal-notify secret + URL are shared
     # between bot and dashboard at startup; rotating them needs a
     # full handshake refresh.
     "internal_notify_secret",
     "dashboard_internal_url",
-    # Discord client — held by discord_bot service.
+    # Discord client — held by discord_bot service. Promoted on
+    # token rotation would need the discord.py client to re-auth.
     "discord_bot_token",
-    # YouTube API client.
-    "youtube_api_key",
-    # OBS WebSocket — connection state.
-    "obs_host",
-    "obs_port",
-    "obs_password",
-    # StreamElements WebSocket auth.
-    "streamelements_jwt",
     # Dataset capture init / DEK setup is special-cased through the
     # /dataset page; toggling via /settings still needs a bounce
     # because the capture machinery initializes at boot.
@@ -1212,8 +1200,8 @@ RESTART_REQUIRED_KEYS: frozenset[str] = frozenset({
 
 RELOAD_REQUIRED_KEYS: frozenset[str] = frozenset({
     # Integration toggles — the relevant background task is started /
-    # stopped at boot. With slice 10B's reconfigure() path the bot
-    # can start / stop the task in place without a full restart.
+    # stopped at boot. The reconfigure() path swaps Settings live
+    # and the next loop iteration acts on the new value.
     "mod_mode_enabled",
     "youtube_enabled",
     "discord_enabled",
@@ -1224,12 +1212,36 @@ RELOAD_REQUIRED_KEYS: frozenset[str] = frozenset({
     "discord_channel_ids",
     "streamelements_channel_id",
     "youtube_channel_id",
-    # Whisper model size + tuning that only takes effect on next model
-    # load. Reload-class because we can drop the model and lazy-load
-    # the new one without bouncing the whole process.
+    # Whisper tuning that only takes effect on next model load.
+    # Reload-class because we can drop the model and lazy-load the
+    # new one without bouncing the whole process.
     "whisper_buffer_seconds",
     "whisper_min_silence_ms",
     "whisper_beam_size",
+    # LLM provider + per-provider knobs. Picked up via LLMClientHandle
+    # which atomically swaps the inner client on reconfigure(); a
+    # provider switch (Ollama → Anthropic → OpenAI) AND key /
+    # model rotations all flow through the handle without dropping
+    # in-flight work.
+    "llm_provider",
+    "anthropic_api_key",
+    "anthropic_model",
+    "anthropic_thinking_budget_tokens",
+    "openai_api_key",
+    "openai_model",
+    "openai_reasoning_model",
+    "openai_organization",
+    # OBS connection params — picked up by OBSStatusService's settings
+    # swap; the next poll tick reconnects with the new host/port/pass.
+    "obs_host",
+    "obs_port",
+    "obs_password",
+    # YouTube API key — picked up by YouTubeListener's settings swap;
+    # the next poll uses the new key.
+    "youtube_api_key",
+    # StreamElements WebSocket auth — picked up by the listener's
+    # settings swap; reconnects with the new JWT on next iteration.
+    "streamelements_jwt",
 })
 
 

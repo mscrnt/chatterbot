@@ -175,11 +175,15 @@ async def run_bot(settings: Settings) -> None:
     _write_pid_file()
 
     repo = ChatterRepo(settings.db_path, embed_dim=settings.ollama_embed_dim)
-    # `make_llm_client` returns the configured provider (Ollama by
-    # default, Claude / OpenAI via `LLM_PROVIDER` setting). Embeddings
-    # always go to a local Ollama regardless of provider.
-    from .llm.providers import make_llm_client
-    llm = make_llm_client(settings)
+    # LLMClientHandle wraps the configured provider (Ollama by default,
+    # Claude / OpenAI via `LLM_PROVIDER` setting). Embeddings always go
+    # to a local Ollama regardless of provider. The handle stays as a
+    # stable reference across reloads — `handle.reconfigure(settings)`
+    # rebuilds the inner client in place during a hot config reload,
+    # so a provider switch / API-key rotation doesn't require a
+    # full bot restart.
+    from .llm.providers import LLMClientHandle
+    llm = LLMClientHandle(settings)
 
     if not await llm.health_check():
         logger.warning(
@@ -306,7 +310,7 @@ async def run_bot(settings: Settings) -> None:
     # reconfigure() may propagate to its children (Summarizer →
     # Threader, etc.). Top-level only — nested services that don't
     # need explicit reconfigure() get reached via attribute hop.
-    reconfigurables: list = [obs, twitch_status, summarizer, listener, se]
+    reconfigurables: list = [llm, obs, twitch_status, summarizer, listener, se]
     if settings.mod_mode_enabled:
         # `moderator` is only defined inside the if branch above; pull
         # it from the local scope when present.

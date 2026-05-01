@@ -109,12 +109,87 @@ def _from_json(s: str | None):
 TEMPLATES.env.filters["from_json"] = _from_json
 
 
+# Cadence + helpers for the dashboard-side reload poller.
+# Mirrors the bot's _lifecycle_poller but scoped to reload only
+# (the dashboard's restart is owned by uvicorn / the supervisor).
+_DASHBOARD_RELOAD_POLL_SECONDS = 3
+
+
+def _apply_dashboard_reload(reconfigurables: list, new_settings) -> None:
+    """Fan a fresh Settings out to dashboard-resident services.
+    Mirrors the bot-side `_apply_reload`: services that expose
+    `reconfigure(settings)` get it called; everything else gets a
+    duck-type `s.settings = new_settings` swap. Failures per service
+    are logged and don't block the rest."""
+    for s in reconfigurables:
+        try:
+            if hasattr(s, "reconfigure"):
+                s.reconfigure(new_settings)
+            else:
+                s.settings = new_settings
+        except Exception:
+            logger.exception(
+                "dashboard reload: %s.reconfigure failed; continuing",
+                type(s).__name__,
+            )
+
+
+async def _dashboard_reload_poller(repo, reconfigurables: list) -> None:
+    """Watch `bot_reload_at` in app_settings (the same flag the bot
+    side watches) and fan reconfigure() calls to the dashboard's
+    long-lived services when the timestamp advances. Restart-class
+    settings still need a real bounce; the dashboard's uvicorn
+    process is supervised the same way the bot is.
+
+    Why a separate poller here: bot and dashboard run as separate
+    processes (sometimes separate containers), so the bot's
+    lifecycle_poller can't reach the dashboard's services. Same
+    DB-flag mechanism, same poll cadence, same code shape."""
+    last_reload = (await asyncio.to_thread(
+        repo.get_app_setting, "bot_reload_at",
+    )) or ""
+    while True:
+        try:
+            await asyncio.sleep(_DASHBOARD_RELOAD_POLL_SECONDS)
+            cur_reload = (await asyncio.to_thread(
+                repo.get_app_setting, "bot_reload_at",
+            )) or ""
+            if cur_reload and cur_reload != last_reload:
+                logger.info(
+                    "dashboard lifecycle: reload requested at %s — "
+                    "fanning out to %d service(s)",
+                    cur_reload, len(reconfigurables),
+                )
+                try:
+                    new_settings = await asyncio.to_thread(get_settings)
+                except Exception:
+                    logger.exception(
+                        "dashboard reload: failed to load fresh "
+                        "Settings; skipping this tick",
+                    )
+                else:
+                    await asyncio.to_thread(
+                        _apply_dashboard_reload,
+                        reconfigurables, new_settings,
+                    )
+                last_reload = cur_reload
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("dashboard_reload_poller: iteration failed")
+
+
 def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
-    # `make_llm_client` selects Ollama / Anthropic / OpenAI per
-    # settings.llm_provider. Embeddings always go to local Ollama.
-    from ..llm.providers import make_llm_client
-    llm = make_llm_client(settings)
+    # LLMClientHandle wraps the configured provider (Ollama / Anthropic
+    # / OpenAI per settings.llm_provider). The handle stays stable
+    # across hot reloads — `handle.reconfigure(settings)` swaps the
+    # inner client in place when the dashboard's lifecycle poller sees
+    # the `bot_reload_at` flag advance, so a provider switch / API-key
+    # rotation doesn't require a dashboard restart. Embeddings always
+    # go to local Ollama regardless of provider.
+    from ..llm.providers import LLMClientHandle
+    llm = LLMClientHandle(settings)
 
     # Personal-dataset capture unlock — opt-in. Same shape as the bot
     # process: no-op unless the streamer enabled capture, ran
@@ -379,6 +454,25 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             asyncio.create_task(
                 transcript_service.transcript_embed_backfill_loop(),
                 name="transcript_embed_backfill",
+            )
+        )
+        # Dashboard-side lifecycle reload poller — same DB-flag
+        # mechanism the bot uses, but scoped to dashboard-resident
+        # services. Watches `bot_reload_at`; when it advances, fans
+        # a fresh Settings out to the dashboard's reconfigurables
+        # (LLM handle, OBS poller, Twitch status, transcript
+        # service, insights) so a hot reload picks up new settings
+        # in the dashboard process too — not just the bot. The
+        # restart flag is not consumed here; restarts are bot-side
+        # and the dashboard's uvicorn handles its own lifecycle.
+        dashboard_reconfigurables = [
+            llm, obs_status, twitch_status,
+            transcript_service, insights,
+        ]
+        _bg_tasks.add(
+            asyncio.create_task(
+                _dashboard_reload_poller(repo, dashboard_reconfigurables),
+                name="dashboard_reload_poller",
             )
         )
         try:
