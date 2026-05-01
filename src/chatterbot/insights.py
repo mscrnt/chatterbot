@@ -265,6 +265,17 @@ class InsightsService:
         # pass. Edited file → next call picks up the change.
         self._facts_text: str = ""
         self._facts_mtime: float = 0.0
+        # Stitched OBS screenshot grids cached by window_minutes with
+        # a short TTL. The 5 generative LLM call sites each ask for a
+        # grid per refresh / modal open; without a cache they each
+        # do file IO + Pillow stitch independently even when their
+        # windows overlap. TTL > screenshot_interval_seconds (default
+        # 10s) so the cache survives long enough to dedupe one
+        # refresh cycle's worth of calls but invalidates before
+        # streamer-noticeable staleness.
+        self._screenshot_grid_cache: dict[
+            int, tuple[float, str | None],
+        ] = {}
 
     @property
     def cache(self) -> InsightsCache:
@@ -278,12 +289,24 @@ class InsightsService:
     def open_questions_cache(self) -> OpenQuestionsCache:
         return self._questions_cache
 
+    # Short TTL for the screenshot-grid cache. Longer than
+    # screenshot_interval_seconds (default 10s) so the cache survives
+    # one refresh cycle's worth of LLM calls; shorter than the
+    # fastest LLM-loop interval (60s) so streamers don't see
+    # multi-minute-stale visuals.
+    SCREENSHOT_GRID_TTL_SECONDS = 20
+
     async def _latest_screenshot_grid(
         self, window_minutes: int = 10,
     ) -> str | None:
         """Build a base64 2x2 grid of the most recent OBS screenshots so
         the multimodal LLM has visual game context for talking-points,
         engaging-subjects, and thread-recap calls.
+
+        Cached for `SCREENSHOT_GRID_TTL_SECONDS` keyed by
+        `window_minutes` so repeat calls within one refresh cycle
+        (or a modal open right after a panel refresh) skip the file
+        IO + Pillow stitch.
 
         Returns None when:
           - screenshot capture is disabled (interval = 0)
@@ -302,12 +325,25 @@ class InsightsService:
             interval = 0
         if interval <= 0:
             return None
+
+        # Cache hit — return the previously-stitched grid (or None
+        # for "no shots in window" outcomes; we cache negative
+        # results too to avoid re-querying screenshots_in_range when
+        # there genuinely aren't any shots).
+        key = int(window_minutes)
+        now = time.time()
+        cached = self._screenshot_grid_cache.get(key)
+        if cached is not None:
+            cached_at, cached_b64 = cached
+            if now - cached_at < self.SCREENSHOT_GRID_TTL_SECONDS:
+                return cached_b64
+
         try:
             from datetime import datetime as _dt, timedelta as _td, timezone as _tz
         except ImportError:
             return None
         end = _dt.now(_tz.utc)
-        start = end - _td(minutes=max(1, int(window_minutes)))
+        start = end - _td(minutes=max(1, key))
         try:
             shots = await asyncio.to_thread(
                 self.repo.screenshots_in_range,
@@ -319,6 +355,7 @@ class InsightsService:
             logger.exception("informed-call: screenshots_in_range failed")
             return None
         if not shots:
+            self._screenshot_grid_cache[key] = (now, None)
             return None
         from pathlib import Path
         data_dir = Path(self.settings.db_path).parent
@@ -333,9 +370,12 @@ class InsightsService:
             logger.exception("informed-call: stitch_grid failed")
             return None
         if not grid_bytes:
+            self._screenshot_grid_cache[key] = (now, None)
             return None
         import base64 as _b64
-        return _b64.b64encode(grid_bytes).decode("ascii")
+        encoded = _b64.b64encode(grid_bytes).decode("ascii")
+        self._screenshot_grid_cache[key] = (now, encoded)
+        return encoded
 
     async def _latest_transcript_summary(self) -> str:
         """Most recent transcript group summary, formatted as a prompt
