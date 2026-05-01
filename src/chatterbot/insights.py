@@ -1134,6 +1134,22 @@ When in doubt, fewer high-quality points beats more weak ones.
         ):
             return list(match.talking_points), None
 
+        # In-memory cold but DB warm — survives a dashboard restart.
+        # Hydrate the in-memory cache and serve from it. Same
+        # freshness gate as in-memory: skip if the subject was
+        # resurfaced after the row was generated.
+        if not force:
+            row = await asyncio.to_thread(
+                self.repo.get_llm_modal_output,
+                "subject_talking_points", slug,
+            )
+            if row is not None:
+                stored_points, stored_at = row
+                if stored_points and stored_at >= match.last_seen_ts:
+                    match.talking_points = stored_points
+                    match.talking_points_at = stored_at
+                    return list(stored_points), None
+
         # Hydrate the cited messages (current persistent msg_ids
         # cover historical refreshes too — gives the LLM more
         # signal than just the most-recent window).
@@ -1208,8 +1224,18 @@ When in doubt, fewer high-quality points beats more weak ones.
             return [], "LLM call failed (check server logs)"
 
         points = [p.strip() for p in response.points if p.strip()]
+        generated_at = match.last_seen_ts or time.time()
         match.talking_points = points
-        match.talking_points_at = match.last_seen_ts or time.time()
+        match.talking_points_at = generated_at
+        # Persist so a dashboard restart doesn't lose the result.
+        # Best-effort — a DB hiccup shouldn't break the modal flow.
+        try:
+            await asyncio.to_thread(
+                self.repo.set_llm_modal_output,
+                "subject_talking_points", slug, points, generated_at,
+            )
+        except Exception:
+            logger.exception("subject talking-points: persist failed")
         return list(points), None
 
     def _build_channel_context(self, *, authoritative: bool = False) -> str:
@@ -1793,6 +1819,24 @@ When in doubt, fewer high-quality points beats more weak ones.
                 dropped_sensitive, dropped_blocklist, dropped_orphan_msgs,
                 len(entries), len(self._subjects), aged,
             )
+            # Prune persisted talking-points rows for subjects that
+            # have aged out of the live set. Belt-and-braces 24h TTL
+            # to GC ancient rows even when a subject keeps getting
+            # resurfaced under the same slug.
+            import hashlib as _h
+            live_slugs = {
+                _h.sha1(s.name.lower().encode("utf-8")).hexdigest()[:12]
+                for s in self._subjects.values()
+            }
+            try:
+                await asyncio.to_thread(
+                    self.repo.prune_llm_modal_outputs,
+                    "subject_talking_points",
+                    keep_keys=live_slugs,
+                    older_than_secs=86400.0,
+                )
+            except Exception:
+                logger.exception("subject talking-points: prune failed")
 
     # =========================================================
     # Open chat questions — LLM filter pass over the heuristic
@@ -2031,6 +2075,21 @@ When uncertain, drop. Chat will re-ask anything that matters; surfacing an alrea
             stale = [k for k in self._question_angles_cache if k not in live_ids]
             for k in stale:
                 self._question_angles_cache.pop(k, None)
+            # Mirror the prune in the persisted output table so DB
+            # rows for dropped clusters don't accumulate forever.
+            # Belt-and-braces: also drop anything older than 24h
+            # regardless of liveness so a long-running dashboard
+            # eventually GCs ancient rows even if a question keeps
+            # getting resurfaced under the same id.
+            try:
+                await asyncio.to_thread(
+                    self.repo.prune_llm_modal_outputs,
+                    "question_answer_angles",
+                    keep_keys={str(i) for i in live_ids},
+                    older_than_secs=86400.0,
+                )
+            except Exception:
+                logger.exception("question-angles: prune failed")
             logger.info(
                 "open questions refreshed: %d candidates → %d open "
                 "(LLM kept %d, dropped %d)",
@@ -2096,6 +2155,19 @@ Return AT MOST 5 angles. 3 is a fine answer when the question is narrow.
         )
         if entry is None:
             return [], "question not found in cache"
+
+        # In-memory cold but DB warm — survives a dashboard restart.
+        # Hydrate the in-memory cache and serve from it.
+        if not force:
+            row = await asyncio.to_thread(
+                self.repo.get_llm_modal_output,
+                "question_answer_angles", str(last_msg_id),
+            )
+            if row is not None:
+                stored, _stored_at = row
+                if stored:
+                    self._question_angles_cache[last_msg_id] = stored
+                    return list(stored), None
 
         # Pull surrounding context. Same lookback as the filter pass
         # so the LLM sees the same chat the filter saw + a bit more.
@@ -2207,4 +2279,14 @@ Return AT MOST 5 angles. 3 is a fine answer when the question is narrow.
 
         angles = [a.strip() for a in response.angles if a.strip()]
         self._question_angles_cache[last_msg_id] = angles
+        # Persist so a dashboard restart doesn't lose the result.
+        # Best-effort — a DB hiccup shouldn't break the modal flow.
+        try:
+            await asyncio.to_thread(
+                self.repo.set_llm_modal_output,
+                "question_answer_angles", str(last_msg_id),
+                angles, time.time(),
+            )
+        except Exception:
+            logger.exception("question-angles: persist failed")
         return list(angles), None

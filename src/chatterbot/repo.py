@@ -1115,6 +1115,29 @@ class ChatterRepo:
                 )
                 """
             )
+            # Persisted LLM modal outputs — `kind` partitions the
+            # generators (subject_talking_points, question_answer_angles,
+            # extensible). `item_key` is the per-generator identity
+            # (subject slug, question last_msg_id, ...). `items_json`
+            # is the JSON-serialised list[str] the modal renders.
+            # generated_at lets refresh / TTL logic decide when to
+            # regenerate. Survives dashboard restart so a re-opened
+            # modal stays free even after a process bounce.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS llm_modal_outputs (
+                    kind         TEXT NOT NULL,
+                    item_key     TEXT NOT NULL,
+                    items_json   TEXT NOT NULL,
+                    generated_at REAL NOT NULL,
+                    PRIMARY KEY (kind, item_key)
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_llm_modal_outputs_kind "
+                "ON llm_modal_outputs(kind)"
+            )
     # ============================ WRITE surface (bot) ======================
 
     def upsert_user(self, twitch_id: str, name: str, *, source: str = "twitch") -> None:
@@ -7191,6 +7214,98 @@ class ChatterRepo:
                 k: v for k, v in self._app_settings_cache.items()
                 if v is not None
             }
+
+    # ===================== llm modal outputs (cache) =======================
+    # Persisted LLM-generated bullets the modals show — currently the
+    # subject talking-points + per-question answer-angles. In-memory
+    # caches lose state on dashboard restart; this layer keeps them
+    # warm across processes so re-opens stay free.
+
+    def set_llm_modal_output(
+        self, kind: str, item_key: str,
+        items: list[str], generated_at: float,
+    ) -> None:
+        """Upsert a generated bullet list. `kind` partitions generators
+        (subject_talking_points, question_answer_angles, ...);
+        `item_key` is the per-generator identity (subject slug,
+        str(last_msg_id), ...). `items` is JSON-serialised on the
+        way in."""
+        import json as _json
+        payload = _json.dumps(list(items), ensure_ascii=False)
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO llm_modal_outputs(kind, item_key, items_json, generated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(kind, item_key) DO UPDATE SET
+                    items_json   = excluded.items_json,
+                    generated_at = excluded.generated_at
+                """,
+                (kind, item_key, payload, float(generated_at)),
+            )
+
+    def get_llm_modal_output(
+        self, kind: str, item_key: str,
+    ) -> tuple[list[str], float] | None:
+        """Look up a previously-generated bullet list by (kind,
+        item_key). Returns (items, generated_at) or None when the row
+        doesn't exist or the JSON payload is unreadable (treated as
+        a cache miss so the caller regenerates fresh)."""
+        import json as _json
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT items_json, generated_at "
+                "FROM llm_modal_outputs WHERE kind = ? AND item_key = ?",
+                (kind, item_key),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        try:
+            items = _json.loads(row["items_json"])
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(items, list):
+            return None
+        return [str(x) for x in items], float(row["generated_at"])
+
+    def prune_llm_modal_outputs(
+        self,
+        kind: str,
+        *,
+        keep_keys: set[str] | None = None,
+        older_than_secs: float | None = None,
+    ) -> int:
+        """Delete rows for `kind` whose item_key is NOT in `keep_keys`
+        and / or whose generated_at is older than `older_than_secs`.
+
+        Either filter is optional; passing neither is a no-op so a
+        caller can compose conditions without raising. Returns the
+        deleted row count for logging."""
+        import time as _time
+        clauses = ["kind = ?"]
+        params: list = [kind]
+        if keep_keys is not None:
+            keys = list(keep_keys)
+            if keys:
+                placeholders = ",".join("?" for _ in keys)
+                clauses.append(f"item_key NOT IN ({placeholders})")
+                params.extend(keys)
+            # Empty keep_keys means "drop everything for this kind" —
+            # callers already encode that intent by passing keep_keys
+            # explicitly, so don't add a no-op clause here.
+        if older_than_secs is not None:
+            cutoff = _time.time() - float(older_than_secs)
+            clauses.append("generated_at < ?")
+            params.append(cutoff)
+        if len(clauses) == 1 and keep_keys is None and older_than_secs is None:
+            return 0
+        with self._cursor() as cur:
+            cur.execute(
+                f"DELETE FROM llm_modal_outputs WHERE {' AND '.join(clauses)}",
+                params,
+            )
+            return cur.rowcount
 
     # ============================ dataset capture =========================
     # Opt-in personal training-dataset surface. The hot path is one
