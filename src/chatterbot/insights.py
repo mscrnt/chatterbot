@@ -1838,6 +1838,53 @@ When in doubt, fewer high-quality points beats more weak ones.
             except Exception:
                 logger.exception("subject talking-points: prune failed")
 
+            # Pre-warm modal contents for the top N surfaced subjects
+            # so the streamer's first modal-open is instant. Skips
+            # subjects whose talking-points are already fresh in
+            # cache (in-memory or DB) — the generator's own freshness
+            # check handles that.
+            asyncio.create_task(
+                self._prewarm_subject_talking_points(
+                    [e.slug for e in entries[:self.MODAL_PREWARM_TOP_N]],
+                ),
+                name="prewarm_subject_talking_points",
+            )
+
+    MODAL_PREWARM_TOP_N = 3
+
+    async def _prewarm_subject_talking_points(self, slugs: list[str]) -> None:
+        """Fire generate_subject_talking_points for each slug
+        sequentially. Sequential not parallel so we don't hammer the
+        LLM with N concurrent multimodal calls; the cadence of
+        engaging-subjects refreshes (~3 min) gives plenty of time
+        even when each call takes ~10s.
+
+        Errors are logged but never bubble — pre-warm is best-effort
+        ergonomics, not correctness."""
+        for slug in slugs:
+            try:
+                await self.generate_subject_talking_points(slug)
+            except Exception:
+                logger.exception(
+                    "prewarm subject_talking_points failed for slug=%s",
+                    slug,
+                )
+
+    async def _prewarm_question_answer_angles(
+        self, last_msg_ids: list[int],
+    ) -> None:
+        """Same pattern as _prewarm_subject_talking_points but for
+        the open-question modal. Sequential, best-effort, errors
+        logged."""
+        for last_msg_id in last_msg_ids:
+            try:
+                await self.generate_question_answer_angles(last_msg_id)
+            except Exception:
+                logger.exception(
+                    "prewarm question_answer_angles failed for id=%s",
+                    last_msg_id,
+                )
+
     # =========================================================
     # Open chat questions — LLM filter pass over the heuristic
     # `recent_questions` candidates. The repo helper clusters by
@@ -2090,6 +2137,16 @@ When uncertain, drop. Chat will re-ask anything that matters; surfacing an alrea
                 )
             except Exception:
                 logger.exception("question-angles: prune failed")
+            # Pre-warm modal contents for the top N surfaced questions
+            # so the streamer's first modal-open is instant. Sorted
+            # newest-first already; take top N. Generator skips
+            # entries that already have fresh cached output.
+            asyncio.create_task(
+                self._prewarm_question_answer_angles(
+                    [e.last_msg_id for e in entries[:self.MODAL_PREWARM_TOP_N]],
+                ),
+                name="prewarm_question_answer_angles",
+            )
             logger.info(
                 "open questions refreshed: %d candidates → %d open "
                 "(LLM kept %d, dropped %d)",
