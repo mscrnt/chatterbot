@@ -417,21 +417,26 @@ FIELDS: dict[str, dict[str, Any]] = {
     },
     "screenshot_max_age_hours": {
         "label": "Keep screenshots for",
-        "tooltip": "How long old screenshots stay on disk.",
-        "help": "Screenshots older than this many hours are deleted to keep disk usage in check. Default 24h.",
+        "tooltip": "How long old screenshots stay on disk. 0 = forever.",
+        "help": "Screenshots older than this many hours get deleted to keep disk usage in check. Default 0 = keep forever — captures are content-hash deduped and stored as WebP, so disk growth is bounded even without an age limit. Raise to opt back into time-based cleanup.",
         "type": "number",
-        "min": 1, "max": 720, "step": 1,
-        "suffix": "hours",
+        "min": 0, "max": 720, "step": 1,
+        "suffix": "hours (0 = forever)",
     },
     "screenshot_jpeg_quality": {
-        "label": "JPEG quality",
-        "tooltip": "Compression quality for stored screenshots (5-100).",
-        "help": "Tradeoff: lower = smaller files, blurrier. Higher = bigger files, sharper. Default 60 (good middle). 80+ is overkill at the size we capture.",
+        "label": "Capture JPEG quality",
+        "tooltip": "Quality OBS uses for the in-memory capture before WebP transcode (5-100).",
+        "help": "OBS captures the frame as JPEG; we transcode to WebP before persisting. This is the input quality for the transcode — keep it high (80+) to avoid double-degrading. Default 85.",
         "type": "number",
-        # min must be on the step grid for HTML form validity. Default
-        # is 60 with step=5, so min=5 keeps the grid aligned (was 1,
-        # which made every default value fail browser validation and
-        # blocked the entire settings form from saving).
+        # min must be on the step grid for HTML form validity.
+        "min": 5, "max": 100, "step": 5,
+        "suffix": "5-100",
+    },
+    "screenshot_webp_quality": {
+        "label": "Stored WebP quality",
+        "tooltip": "Quality of the WebP file written to disk (5-100).",
+        "help": "Lower = smaller files, blurrier. Higher = bigger files, sharper. WebP packs ~25-35% smaller than JPEG at the same visual quality so this can sit lower than the JPEG knob did. Default 65.",
+        "type": "number",
         "min": 5, "max": 100, "step": 5,
         "suffix": "5-100",
     },
@@ -940,6 +945,7 @@ SECTIONS: list[dict[str, Any]] = [
                     "screenshot_interval_seconds",
                     "screenshot_max_age_hours",
                     "screenshot_jpeg_quality",
+                    "screenshot_webp_quality",
                     "screenshot_width",
                     "screenshot_grid_max",
                 ],

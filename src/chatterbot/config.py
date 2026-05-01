@@ -71,6 +71,7 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "screenshot_interval_seconds",
     "screenshot_max_age_hours",
     "screenshot_jpeg_quality",
+    "screenshot_webp_quality",
     "screenshot_width",
     "screenshot_grid_max",
     "quiet_cohort_silence_minutes",
@@ -389,9 +390,19 @@ class Settings(BaseSettings):
     # the model gets visual context too, not just audio. Set
     # interval=0 to disable screenshot capture entirely.
     screenshot_interval_seconds: int = 15
-    screenshot_max_age_hours: int = 24
-    screenshot_jpeg_quality: int = 60
+    # 0 = keep forever (default). Captures are content-hash deduped
+    # and stored as WebP so disk growth is bounded; raise above 0 to
+    # opt back into age-based deletion.
+    screenshot_max_age_hours: int = 0
+    # JPEG quality for the OBS-side capture; we transcode to WebP
+    # locally before persisting, so this is just the input quality
+    # for the transcode (kept high to not double-degrade).
+    screenshot_jpeg_quality: int = 85
     screenshot_width: int = 480
+    # WebP quality for the persisted file. 60-70 is the sweet spot
+    # for visual context to a multimodal LLM — smaller than JPEG
+    # at the same quality, dedup-friendly via content hash.
+    screenshot_webp_quality: int = 65
     # Maximum screenshots stitched into the per-group grid. 4 keeps a
     # 2x2 layout that's still legible when a group's window contains
     # many shots.
@@ -531,7 +542,8 @@ def _coerce(key: str, value: str) -> Any:
         "chat_lag_seconds", "chat_lag_auto_tune_interval_seconds",
         "youtube_min_poll_seconds", "youtube_max_poll_seconds",
         "screenshot_interval_seconds", "screenshot_max_age_hours",
-        "screenshot_jpeg_quality", "screenshot_width", "screenshot_grid_max",
+        "screenshot_jpeg_quality", "screenshot_webp_quality",
+        "screenshot_width", "screenshot_grid_max",
         "quiet_cohort_silence_minutes", "quiet_cohort_lookback_hours",
         "quiet_cohort_min_drivers", "quiet_cohort_limit",
         "engaging_subjects_interval_seconds",
@@ -562,8 +574,9 @@ def _coerce(key: str, value: str) -> Any:
                 "youtube_min_poll_seconds": 10,
                 "youtube_max_poll_seconds": 30,
                 "screenshot_interval_seconds": 15,
-                "screenshot_max_age_hours": 24,
-                "screenshot_jpeg_quality": 60,
+                "screenshot_max_age_hours": 0,
+                "screenshot_jpeg_quality": 85,
+                "screenshot_webp_quality": 65,
                 "screenshot_width": 480,
                 "screenshot_grid_max": 4,
                 "quiet_cohort_silence_minutes": 15,

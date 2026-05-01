@@ -85,6 +85,55 @@ def _stitch_grid(image_paths: list[str], max_size: tuple[int, int] = (960, 540))
     return buf.getvalue()
 
 
+def _encode_webp(jpeg_bytes: bytes, quality: int) -> bytes | None:
+    """Transcode JPEG bytes to WebP for compact, content-deduplicable
+    long-term storage. WebP lands ~25-35% smaller than JPEG at the
+    same visual quality, which matters since screenshots are kept
+    forever (no age-based prune); content-hash dedup (paused stream
+    on the same scene) compounds the savings further.
+
+    Returns None on any PIL failure so the caller falls back to
+    skipping the capture for that interval — never crashes the loop."""
+    try:
+        from PIL import Image
+        from io import BytesIO
+        img = Image.open(BytesIO(jpeg_bytes))
+        # Drop alpha if present — JPEGs don't carry it but defensive
+        # if a future capture path does, since WebP would otherwise
+        # paint a black background through the alpha channel.
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        out = BytesIO()
+        # method=4 is the libwebp default — balanced speed/quality.
+        # Higher methods (5-6) shave a few percent off filesize at
+        # ~2x encode time; not worth it on a 480px frame.
+        img.save(out, format="WEBP", quality=int(quality), method=4)
+        return out.getvalue()
+    except ImportError:
+        logger.warning(
+            "transcript: Pillow not installed — webp transcode skipped. "
+            "Run `uv sync --extra whisper` to enable.",
+        )
+        return None
+    except Exception:
+        logger.exception("transcript: webp transcode failed")
+        return None
+
+
+def _content_hashed_relpath(content: bytes, ext: str = ".webp") -> str:
+    """Build the on-disk relative path for a content-addressed
+    screenshot. Layout `<sha[:2]>/<sha[2:4]>/<sha><ext>` keeps any
+    one directory bounded to ~256 entries even at huge scale (uniform
+    hash distribution), avoiding the directory-bloat problem that
+    flat layouts hit after a few months of streaming.
+
+    Uses sha256 hex; the full hex digest is the filename so the
+    streamer can spot-check identity without a separate manifest."""
+    import hashlib
+    sha = hashlib.sha256(content).hexdigest()
+    return f"{sha[:2]}/{sha[2:4]}/{sha}{ext}"
+
+
 def _utterance_mentions_chatter(utterance: str, names: list[str]) -> bool:
     """Heuristic: did the streamer name the chatter in this utterance?
 
@@ -1720,7 +1769,7 @@ Reply with `summary` = the line(s) (or empty string).
                     self.obs.take_screenshot_sync,
                     image_format="jpg",
                     width=int(getattr(self.settings, "screenshot_width", 480)),
-                    quality=int(getattr(self.settings, "screenshot_jpeg_quality", 60)),
+                    quality=int(getattr(self.settings, "screenshot_jpeg_quality", 85)),
                 )
                 if shot is None:
                     if passes == 0:
@@ -1730,17 +1779,43 @@ Reply with `summary` = the line(s) (or empty string).
                             "WebSocket logs)"
                         )
                     continue
-                image_bytes, scene_name = shot
+                jpeg_bytes, scene_name = shot
+                # Transcode JPEG → WebP for persisted storage. WebP
+                # is meaningfully smaller at the same visual quality,
+                # which compounds with content-hash dedup to keep
+                # disk growth bounded under the keep-forever policy.
+                webp_quality = int(getattr(
+                    self.settings, "screenshot_webp_quality", 65,
+                ))
+                webp_bytes = await asyncio.to_thread(
+                    _encode_webp, jpeg_bytes, webp_quality,
+                )
+                if webp_bytes is None:
+                    # Pillow missing or encode failed — skip persisting
+                    # this interval. Modal grid will still work using
+                    # the screenshots already on disk.
+                    continue
                 from datetime import datetime as _dt2, timezone as _tz2
                 ts = _dt2.now(_tz2.utc).isoformat(timespec="seconds")
-                fname = ts.replace(":", "-").replace("+", "_") + ".jpg"
-                fpath = shot_dir / fname
+                # Content-addressed layout: <sha[:2]>/<sha[2:4]>/<sha>.webp.
+                # Identical bytes (a paused stream on the same scene)
+                # collapse to one on-disk file; multiple DB rows can
+                # reference it. The orphan sweep walks recursively so
+                # the dedup-shared file isn't accidentally pruned when
+                # one row's row-level lifecycle ends.
+                sub_path = _content_hashed_relpath(webp_bytes, ext=".webp")
+                fpath = shot_dir / sub_path
+                dedup_hit = False
                 try:
-                    fpath.write_bytes(image_bytes)
+                    fpath.parent.mkdir(parents=True, exist_ok=True)
+                    if fpath.exists():
+                        dedup_hit = True
+                    else:
+                        fpath.write_bytes(webp_bytes)
                 except OSError:
                     logger.exception("transcript: write screenshot failed")
                     continue
-                rel_path = f"transcript_screenshots/{fname}"
+                rel_path = f"transcript_screenshots/{sub_path}"
                 await asyncio.to_thread(
                     self.repo.add_transcript_screenshot,
                     ts=ts, path=rel_path, scene_name=scene_name,
@@ -1748,8 +1823,11 @@ Reply with `summary` = the line(s) (or empty string).
                 passes += 1
                 if passes in (1, 5, 30, 100) or passes % 240 == 0:
                     logger.info(
-                        "transcript: screenshot #%d saved (scene=%r, %d KB)",
-                        passes, scene_name, len(image_bytes) // 1024,
+                        "transcript: screenshot #%d saved (scene=%r, "
+                        "%d KB jpeg → %d KB webp, dedup=%s)",
+                        passes, scene_name,
+                        len(jpeg_bytes) // 1024, len(webp_bytes) // 1024,
+                        "hit" if dedup_hit else "miss",
                     )
             except asyncio.CancelledError:
                 raise
@@ -1757,40 +1835,61 @@ Reply with `summary` = the line(s) (or empty string).
                 logger.exception("transcript: screenshot_loop iteration failed")
 
     async def _prune_screenshots(self) -> None:
-        """Delete DB rows + JPEG files older than the configured TTL,
-        then sweep the screenshot dir for any files no longer
-        referenced in the DB (orphans from manual DB clears, crashes
-        between insert and write, container migrations, etc.)."""
-        max_age_h = max(1, int(getattr(
-            self.settings, "screenshot_max_age_hours", 24,
-        )))
-        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-        cutoff = (_dt.now(_tz.utc) - _td(hours=max_age_h)).isoformat(timespec="seconds")
+        """Optionally delete DB rows + image files older than the
+        configured TTL, then sweep the screenshot dir for orphan
+        files no longer referenced in the DB.
 
-        # Step 1 — age-based delete: drops DB rows and returns the
-        # paths so we can unlink the files.
+        `screenshot_max_age_hours` <= 0 means "keep forever" — only
+        the orphan sweep runs. With content-hash dedup + WebP, disk
+        growth stays bounded under that policy; the streamer can
+        opt back in to age-based deletion by raising the setting."""
         try:
-            paths = await asyncio.to_thread(
-                self.repo.delete_screenshots_older_than, cutoff,
-            )
-        except Exception:
-            logger.exception("transcript: screenshot prune DB step failed")
-            return
+            max_age_h = int(getattr(
+                self.settings, "screenshot_max_age_hours", 0,
+            ))
+        except (TypeError, ValueError):
+            max_age_h = 0
         from pathlib import Path
         data_dir = Path(self.settings.db_path).parent
-        aged_deleted = 0
-        for rel in paths:
-            try:
-                p = data_dir / rel
-                if p.exists():
-                    p.unlink()
-                    aged_deleted += 1
-            except OSError:
-                pass
 
-        # Step 2 — orphan sweep: find files in the screenshot dir
-        # whose paths aren't referenced in the DB any more, and
-        # remove them. Use a set for O(1) membership.
+        aged_deleted = 0
+        if max_age_h > 0:
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            cutoff = (_dt.now(_tz.utc) - _td(hours=max_age_h)).isoformat(timespec="seconds")
+            # Age-based delete: drop DB rows and unlink files. With
+            # dedup, multiple rows can share a file — only unlink
+            # when no remaining row still references this path.
+            try:
+                paths = await asyncio.to_thread(
+                    self.repo.delete_screenshots_older_than, cutoff,
+                )
+            except Exception:
+                logger.exception("transcript: screenshot prune DB step failed")
+                return
+            try:
+                still_ref = set(await asyncio.to_thread(
+                    self._list_referenced_screenshot_paths,
+                ))
+            except Exception:
+                still_ref = set()
+            for rel in paths:
+                if rel in still_ref:
+                    continue
+                try:
+                    p = data_dir / rel
+                    if p.exists():
+                        p.unlink()
+                        aged_deleted += 1
+                except OSError:
+                    pass
+
+        # Orphan sweep — find files in the screenshot dir not
+        # referenced in the DB. Walks recursively so the new
+        # nested `<sha[:2]>/<sha[2:4]>/<sha>.webp` layout is
+        # covered as well as legacy flat-dir files. Compares full
+        # relative paths (not basenames) so two unrelated files
+        # with the same name in different dedup buckets can't
+        # accidentally save each other.
         shot_dir = self._screenshot_dir()
         orphan_deleted = 0
         if shot_dir.exists():
@@ -1798,11 +1897,20 @@ Reply with `summary` = the line(s) (or empty string).
                 referenced_paths = await asyncio.to_thread(
                     self._list_referenced_screenshot_paths,
                 )
-                referenced = {Path(rel).name for rel in referenced_paths}
-                for f in shot_dir.iterdir():
+                referenced: set[str] = set()
+                for rel in referenced_paths:
+                    # DB paths are stored as
+                    # `transcript_screenshots/<...>` so strip the
+                    # prefix to get the path relative to shot_dir.
+                    if rel.startswith("transcript_screenshots/"):
+                        referenced.add(rel[len("transcript_screenshots/"):])
+                    else:
+                        referenced.add(rel)
+                for f in shot_dir.rglob("*"):
                     if not f.is_file():
                         continue
-                    if f.name in referenced:
+                    rel = f.relative_to(shot_dir).as_posix()
+                    if rel in referenced:
                         continue
                     try:
                         f.unlink()
@@ -1815,8 +1923,9 @@ Reply with `summary` = the line(s) (or empty string).
         if aged_deleted or orphan_deleted:
             logger.info(
                 "transcript: pruned %d aged + %d orphan screenshots "
-                "(TTL %dh)",
-                aged_deleted, orphan_deleted, max_age_h,
+                "(TTL %s)",
+                aged_deleted, orphan_deleted,
+                f"{max_age_h}h" if max_age_h > 0 else "off",
             )
 
     def _list_referenced_screenshot_paths(self) -> list[str]:
