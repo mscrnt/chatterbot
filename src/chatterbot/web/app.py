@@ -556,6 +556,47 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             },
         )
 
+    @app.get("/users/{twitch_id}/preview", response_class=HTMLResponse)
+    async def user_preview(
+        request: Request,
+        twitch_id: str = PathParam(..., min_length=1),
+    ):
+        """Tiny popover for the chatter-pill hover preview. Avatar +
+        soft-profile fields + last 1-2 LLM notes + last 1-2 messages
+        + a 'open profile' link. Loaded lazily by the chatter_pill
+        macro on first hover, cached in the DOM via HTMX `once`.
+
+        Falls back to a minimal "user not found" partial when the
+        twitch_id doesn't resolve — keeps merged-away or
+        not-yet-seen ids from spamming 404s in the streamer's network
+        tab on a hover."""
+        user = repo.get_user(twitch_id)
+        # Follow merge pointer so a hover on a child id surfaces the
+        # canonical profile's data, not a stub. The pill's link still
+        # points at the original id; the preview shows the parent
+        # profile so the streamer sees the real notes / messages.
+        if user and user.merged_into:
+            parent = repo.get_user(user.merged_into)
+            if parent is not None:
+                user = parent
+        if user is None:
+            return TEMPLATES.TemplateResponse(
+                request,
+                "partials/_chatter_preview.html",
+                {"user": None, "notes": [], "messages": []},
+            )
+        notes = repo.get_notes(user.twitch_id)[:2]
+        messages = repo.get_messages(user.twitch_id, limit=2)
+        return TEMPLATES.TemplateResponse(
+            request,
+            "partials/_chatter_preview.html",
+            {
+                "user": user,
+                "notes": notes,
+                "messages": messages,
+            },
+        )
+
     @app.get("/users/{twitch_id}/messages", response_class=HTMLResponse)
     async def user_messages_partial(
         request: Request,

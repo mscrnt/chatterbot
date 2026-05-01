@@ -43,6 +43,9 @@ def _service(tmp_repo, mock_llm) -> InsightsService:
     settings = SimpleNamespace(
         db_path="ignored",
         screenshot_interval_seconds=0,
+        # Disable modal-output pre-warming in tests — see the
+        # parallel comment in test_engaging_subjects.py.
+        insights_modal_prewarm_top_n=0,
     )
     return InsightsService(tmp_repo, mock_llm, settings)
 

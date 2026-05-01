@@ -57,6 +57,11 @@ def svc(tmp_repo, mock_llm) -> InsightsService:
     settings = SimpleNamespace(
         db_path="ignored",
         screenshot_interval_seconds=0,
+        # Disable modal-output pre-warming in tests — tests queue
+        # responses for the call sites they directly exercise; the
+        # background prewarm task would race the test's own call
+        # for a queued response and trip an unexpected-call assertion.
+        insights_modal_prewarm_top_n=0,
     )
     return InsightsService(tmp_repo, mock_llm, settings)
 

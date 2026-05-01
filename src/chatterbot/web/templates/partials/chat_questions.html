@@ -16,6 +16,7 @@
    clusters chat messages containing '?'. Distinct from
    recent_direct_mentions which is the @-style Talking-to-you panel. #}
 {% from "partials/_panel.html" import panel %}
+{% from "components/_chatter_pill.html" import chatter_pill %}
 
 {# Pre-filter clusters whose state is hidden (skipped / addressed,
    or snoozed-not-yet-due). Mirrors the pattern in insights_body.html
@@ -68,19 +69,14 @@
             {% endwith %}
           </div>
         </div>
-        {# Driver pills — clickable shortcut to /users/<id>. Each
-           link calls stopPropagation so a chatter-pill click jumps
-           to /users instead of opening the modal. #}
+        {# Driver pills — clickable shortcut to /users/<id> with
+           lazy hover-preview popover. Each pill calls
+           stopPropagation internally so a click jumps to /users
+           instead of opening the parent's modal. #}
         {% if q.drivers %}
           <div class="flex flex-wrap gap-1 mt-1.5 ml-5">
             {% for d in q.drivers[:8] %}
-              <a href="/users/{{ d.user_id }}"
-                 onclick="event.stopPropagation()"
-                 class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-subtle bg-canvas hover:bg-surface-raised text-[11px] text-accent hover:underline"
-                 title="{{ d.ts }}">
-                {% with name=d.name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
-                {{ d.name }}
-              </a>
+              {{ chatter_pill(d.user_id, d.name, variant='subtle') }}
             {% endfor %}
             {% if q.drivers | length > 8 %}
               <span class="text-[10px] text-muted self-center">+{{ q.drivers | length - 8 }} more</span>

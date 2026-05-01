@@ -88,6 +88,7 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "engaging_subjects_notes_per_driver",
     "engaging_subjects_max_drivers_with_notes",
     "streamer_facts_path",
+    "insights_modal_prewarm_top_n",
     # ---------- LLM provider switch ----------
     "llm_provider",
     "anthropic_api_key",
@@ -445,6 +446,13 @@ class Settings(BaseSettings):
     # to extraction prompts as channel context. Lets the streamer
     # correct hallucinations at source ("there is no FF8 remake").
     streamer_facts_path: str = "data/streamer_facts.md"
+
+    # Modal-output pre-warming — when an insights panel refreshes,
+    # eagerly generate the modal contents (subject talking-points /
+    # question answer-angles) for the top N entries so the
+    # streamer's first modal-open is instant. 0 disables; higher
+    # spends more LLM cost for snappier modal opens.
+    insights_modal_prewarm_top_n: int = 3
 
     # Moderation mode — opt-in. When enabled, the bot batches recent
     # messages through a strict-rubric LLM classifier and persists

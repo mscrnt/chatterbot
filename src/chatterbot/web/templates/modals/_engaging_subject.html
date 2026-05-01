@@ -19,6 +19,7 @@
 {% set modal_icon = 'fa-fire' %}
 {% set modal_tone = 'accent' %}
 {% set modal_size = 'lg' %}
+{% from "components/_chatter_pill.html" import chatter_pill %}
 {% extends "components/_modal.html" %}
 {% block modal_body %}
 <div class="space-y-4 text-sm">
@@ -84,11 +85,7 @@
     <div class="flex flex-wrap gap-1">
       {% for d in driver_links %}
         {% if d.user_id %}
-          <a href="/users/{{ d.user_id }}"
-             class="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full border border-accent/30 bg-accent/15 text-accent hover:bg-accent/25 transition-all duration-150 ease-out"
-             onclick="window.chatterbotCloseModal()">
-            <i class="fa-solid fa-user text-[10px]"></i> {{ d.name }}
-          </a>
+          {{ chatter_pill(d.user_id, d.name) }}
         {% else %}
           <span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full border border-subtle bg-surface-raised text-muted">
             <i class="fa-solid fa-user-slash text-[10px]"></i> {{ d.name }}

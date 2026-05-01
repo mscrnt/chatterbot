@@ -1850,7 +1850,19 @@ When in doubt, fewer high-quality points beats more weak ones.
                 name="prewarm_subject_talking_points",
             )
 
-    MODAL_PREWARM_TOP_N = 3
+    @property
+    def MODAL_PREWARM_TOP_N(self) -> int:
+        """How many entries from each panel refresh to pre-generate
+        modal contents for. 0 disables pre-warming entirely. Read
+        live from settings so a streamer who wants to save LLM cost
+        can dial it down without restarting. Tests opt out by
+        setting `insights_modal_prewarm_top_n=0` on their settings."""
+        try:
+            return max(0, int(getattr(
+                self.settings, "insights_modal_prewarm_top_n", 3,
+            )))
+        except (TypeError, ValueError):
+            return 3
 
     async def _prewarm_subject_talking_points(self, slugs: list[str]) -> None:
         """Fire generate_subject_talking_points for each slug

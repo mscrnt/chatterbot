@@ -627,9 +627,16 @@ FIELDS: dict[str, dict[str, Any]] = {
     "streamer_facts_path": {
         "label": "Streamer facts file",
         "tooltip": "Path to a markdown file with channel-specific facts.",
-        "help": "A markdown file you write that contains stable facts about your channel — recurring bits, current arcs, inside jokes. The AI prepends it to extraction prompts so it stops 'hallucinating' things you've corrected. Default path is data/streamer_facts.md. Create the file with anything you want the AI to know.",
+        "help": "A markdown file you write that contains stable facts about your channel — recurring bits, current arcs, inside jokes. The AI prepends it to extraction prompts so it stops 'hallucinating' things you've corrected. Default path is data/streamer_facts.md. Edit the contents directly from Settings → Prompts → Channel facts.",
         "type": "text",
         "placeholder": "data/streamer_facts.md",
+    },
+    "insights_modal_prewarm_top_n": {
+        "label": "Pre-warm modal answers (top N)",
+        "tooltip": "Eagerly generate AI bullets for the top N panel entries so first modal-open is instant.",
+        "help": "When the engaging-subjects or open-questions panel refreshes, the dashboard can pre-generate the modal contents for the top N entries so opening any of them feels instant instead of spinning while the LLM thinks. 0 disables; 3 is a good default. Higher values spend more LLM cost on entries you might not click.",
+        "type": "number",
+        "min": 0, "max": 8, "step": 1,
     },
     "live_widget_enabled": {
         "label": "Show live chat widget",
@@ -1055,7 +1062,7 @@ SECTIONS: list[dict[str, Any]] = [
                     "subjects so it stops 'hallucinating' things you "
                     "don't actually do."
                 ),
-                "fields": ["streamer_facts_path"],
+                "fields": ["streamer_facts_path", "insights_modal_prewarm_top_n"],
             },
         ],
     },

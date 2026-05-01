@@ -1,0 +1,56 @@
+{# Chatter pill with lazy hover-preview popover.
+
+   Usage:
+     {% from "components/_chatter_pill.html" import chatter_pill %}
+     {{ chatter_pill(user_id, name) }}
+
+   Behavior:
+     - Click → /users/<id> (same as the bare-link version it replaces).
+     - Hover → 200ms after mouseenter, popover slides in below the
+       pill. Content is HTMX-loaded once per page from
+       /users/<id>/preview and cached in the DOM, so repeat hovers
+       are free.
+     - The inner anchor calls stopPropagation so a pill click inside
+       a parent that has its own click handler (e.g. a clickable
+       insight card) doesn't bubble up.
+
+   Variants are passed through `variant`:
+     - 'accent' (default) — the standard accent-tinted pill used in
+       drivers / talking-to-you / etc.
+     - 'subtle'           — lower-emphasis variant for dense lists. #}
+{% macro chatter_pill(user_id, name, variant='accent') -%}
+{% set _classes = (
+  'inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full border border-accent/30 bg-accent/15 text-accent hover:bg-accent/25 transition-all duration-150 ease-out'
+  if variant == 'accent' else
+  'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-subtle bg-canvas hover:bg-surface-raised text-[11px] text-accent hover:underline'
+) %}
+<span class="relative inline-block"
+      x-data="{ open: false }"
+      @mouseenter="open = true"
+      @mouseleave="open = false">
+  <a href="/users/{{ user_id }}"
+     onclick="event.stopPropagation()"
+     class="{{ _classes }}">
+    {% with name=name, size='sm' %}{% include "components/_avatar.html" %}{% endwith %}
+    {{ name }}
+  </a>
+  {# Popover. `x-show` toggles display; HTMX fetches the preview
+     once on first hover (delay=200ms so a quick mouse-pass doesn't
+     trigger). The content area starts as a spinner; the response
+     replaces innerHTML. z-50 sits above modals + the chat dock. #}
+  <span x-show="open" x-cloak
+        x-transition.opacity.duration.100ms
+        hx-get="/users/{{ user_id }}/preview"
+        hx-trigger="mouseenter once delay:200ms from:closest [x-data]"
+        hx-target="find .chatter-preview-content"
+        hx-swap="innerHTML"
+        class="absolute left-0 top-full mt-1 z-50 pointer-events-auto"
+        @click.stop>
+    <div class="chatter-preview-content">
+      <div class="rounded-lg border border-subtle bg-surface shadow-lg p-3 text-xs text-muted italic w-72 sm:w-80">
+        <i class="fa-solid fa-spinner fa-spin mr-1"></i> loading preview…
+      </div>
+    </div>
+  </span>
+</span>
+{%- endmacro %}

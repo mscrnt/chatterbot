@@ -1,0 +1,84 @@
+{# Chatter-pill hover preview — replaces the spinner inside the
+   chatter_pill macro's popover via HTMX innerHTML swap.
+
+   Context:
+     user: User | None  (None = couldn't resolve the pill's id)
+     notes: list[Note]  (last 0-2 LLM-extracted notes)
+     messages: list[Message]  (last 0-2 messages)
+
+   Surfaced on hover so the streamer can decide whether to click
+   through without leaving the modal / current view. Stays inside
+   the popover wrapper (which has `pointer-events-auto` so the
+   preview itself is interactable — clicking "open profile" navigates
+   to /users/<id>). #}
+<div class="rounded-lg border border-subtle bg-surface shadow-lg p-3 text-xs space-y-2 w-72 sm:w-80">
+{% if user is none %}
+  <p class="text-muted italic">Couldn't load this chatter — they may have been merged or removed.</p>
+{% else %}
+  {# Header row — avatar + display name + role badges + recency #}
+  <div class="flex items-center gap-2">
+    {% with name=user.name, size='md' %}{% include "components/_avatar.html" %}{% endwith %}
+    <div class="min-w-0 flex-1">
+      <p class="font-semibold text-primary truncate inline-flex items-baseline gap-1">
+        {{ user.name }}
+        {% if user.is_starred %}<i class="fa-solid fa-star text-warning text-[10px]" title="starred"></i>{% endif %}
+      </p>
+      <p class="text-[10px] text-muted">
+        {% if user.is_mod %}<span class="text-success">mod</span> · {% endif %}
+        {% if user.is_vip %}<span class="text-accent">vip</span> · {% endif %}
+        {% if user.sub_tier %}<span>sub T{{ user.sub_tier }}</span> · {% endif %}
+        last seen {{ user.last_seen | short_ts }}
+      </p>
+    </div>
+  </div>
+
+  {# Soft profile (LLM-extracted, sparse) — only render when we
+     actually have something so the popover stays compact. #}
+  {% if user.pronouns or user.location or user.demeanor %}
+    <p class="text-[11px] text-muted">
+      {% if user.pronouns %}{{ user.pronouns }}{% endif %}
+      {% if user.pronouns and (user.location or user.demeanor) %} · {% endif %}
+      {% if user.location %}{{ user.location }}{% endif %}
+      {% if user.location and user.demeanor %} · {% endif %}
+      {% if user.demeanor %}<em>{{ user.demeanor }}</em>{% endif %}
+    </p>
+  {% endif %}
+
+  {# Last 1-2 LLM-extracted notes — what the AI knows #}
+  {% if notes %}
+    <div>
+      <p class="text-[10px] uppercase tracking-wider text-muted mb-0.5">last note{{ '' if notes|length == 1 else 's' }}</p>
+      <ul class="space-y-1">
+        {% for n in notes %}
+          <li class="text-primary leading-snug flex items-start gap-1">
+            <i class="fa-solid fa-circle text-accent text-[5px] mt-1.5 shrink-0"></i>
+            <span>{{ n.text }}</span>
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  {# Last 1-2 messages — what they just said #}
+  {% if messages %}
+    <div>
+      <p class="text-[10px] uppercase tracking-wider text-muted mb-0.5">recent</p>
+      <ul class="space-y-0.5">
+        {% for m in messages %}
+          <li class="text-muted leading-snug">
+            <span class="text-primary">{{ m.content }}</span>
+            <span class="text-[10px] text-muted">· {{ m.ts | short_ts }}</span>
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  <div class="pt-1 border-t border-subtle">
+    <a href="/users/{{ user.twitch_id }}"
+       class="text-accent hover:underline text-[11px] inline-flex items-center gap-1">
+      Open profile <i class="fa-solid fa-arrow-right text-[9px]"></i>
+    </a>
+  </div>
+{% endif %}
+</div>
