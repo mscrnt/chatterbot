@@ -92,13 +92,20 @@
       const header = p.querySelector(':scope > header.panel-header');
       if (!header || header._wired) return;
       header._wired = true;
+      // Resolve the live container at click time, NOT at wire time.
+      // Preserved panels (hx-preserve, e.g. the Stream timeline)
+      // keep their listener across body swaps; capturing `container`
+      // in the closure would point at the now-detached container
+      // and applyCollapsed wouldn't see any panels — visible state
+      // would only update once the streamer touched another panel.
       const toggle = () => {
         const id = p.dataset.panelId;
         const collapsed = new Set(readJson(COLLAPSED_KEY, []));
         if (collapsed.has(id)) collapsed.delete(id);
         else collapsed.add(id);
         writeJson(COLLAPSED_KEY, Array.from(collapsed));
-        applyCollapsed(container);
+        const liveContainer = p.closest('[data-insights-panels]') || container;
+        applyCollapsed(liveContainer);
       };
       header.addEventListener('click', toggle);
       header.addEventListener('keydown', (e) => {
