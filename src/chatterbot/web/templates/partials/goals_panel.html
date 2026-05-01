@@ -1,94 +1,94 @@
-{# Stream goals — set, track, clear. Self-contained: every form posts
-   to /insights/goals and the panel re-renders. Goals reset when the
-   streamer hits the explicit clear button (and ideally on stream-end
-   transition, future).
+{# Stream goals — set, track, clear. Wraps the standard panel
+   macro so it participates in the /insights drag-to-reorder +
+   collapse-to-localStorage system, just like every other panel.
 
-   Dismiss state is per-streamer + persisted in localStorage. When
-   hidden, a tiny "show stream goals" pill renders in place so the
-   streamer can bring it back. #}
-<div id="goals-panel"
-     x-data="{ hidden: localStorage.getItem('chatterbot.goalsHidden') === '1' }">
-  {# Hidden state — one-line opt-in to bring the panel back. #}
-  <div x-show="hidden" x-cloak class="flex justify-end">
-    <button type="button"
-            class="tap text-[11px] text-muted hover:text-primary inline-flex items-center gap-1 px-2 py-0.5"
-            @click="hidden = false; localStorage.removeItem('chatterbot.goalsHidden')"
-            title="show stream goals panel">
-      <i class="fa-solid fa-bullseye text-[10px]"></i> show stream goals
-    </button>
-  </div>
-  {# Visible state — full panel. #}
-  <div x-show="!hidden" x-cloak class="rounded-xl border border-subtle bg-surface p-3">
-  <header class="flex items-baseline justify-between gap-2 mb-2">
-    <h3 class="text-sm font-semibold text-primary inline-flex items-center gap-2">
-      <i class="fa-solid fa-bullseye text-accent"></i> Stream goals
-    </h3>
-    <div class="inline-flex items-center gap-2">
-      {% if goals.targets %}
-        <form hx-post="/insights/goals" hx-target="#goals-panel" hx-swap="outerHTML"
-              class="inline-flex">
-          <input type="hidden" name="kind" value="clear">
-          <button class="text-[11px] text-muted hover:text-danger" title="reset all goals">
-            clear
-          </button>
-        </form>
-      {% endif %}
-      <button type="button"
-              class="text-[11px] text-muted hover:text-primary"
-              @click="hidden = true; localStorage.setItem('chatterbot.goalsHidden', '1')"
-              title="hide stream goals — preference saved locally">
-        <i class="fa-solid fa-xmark"></i>
-      </button>
+   The +button row at the bottom is rendered from `goal_meta` —
+   adding a new built-in kind only requires extending _GOAL_META
+   in app.py, no template change.
+
+   Each goal's progress is computed in _build_goals_state, scoped
+   to the insight kind it cares about (newcomer, chat_question,
+   etc.) so two goals don't both increment off one event.
+
+   `goal_meta` mirrors the dict in app.py: kind → { label,
+   default_count, ... }. Provided as a template context var so a
+   later HTMX swap that re-renders just this partial doesn't lose
+   the button row. #}
+{% from "partials/_panel.html" import panel %}
+{% set _has_goals = goals and goals.targets %}
+{% call panel('stream-goals', 'Stream goals', icon='fa-bullseye',
+              count=(goals.targets | length) if _has_goals else None,
+              subtitle='per-stream tracker · drag to reorder · click header to collapse') %}
+<div id="goals-panel-body">
+  {# Header sub-row — clear-all + count summary. The panel macro
+     handles the title; this is just goal-management actions. #}
+  {% if _has_goals %}
+    <div class="flex items-baseline justify-end gap-2 mb-2">
+      <form hx-post="/insights/goals" hx-target="#goals-panel-body"
+            hx-swap="outerHTML" class="inline-flex">
+        <input type="hidden" name="kind" value="clear">
+        <button type="submit"
+                class="text-[11px] text-muted hover:text-danger inline-flex items-center gap-1"
+                title="reset all goals">
+          <i class="fa-solid fa-rotate-left text-[9px]"></i> clear all
+        </button>
+      </form>
     </div>
-  </header>
+  {% endif %}
 
-  {% if goals.targets %}
+  {% if _has_goals %}
     <ul class="space-y-1.5">
       {% for g in goals.targets %}
-        {% set _label = {
-          'address_first_timers': 'address first-timers',
-          'clear_due_snoozes': 'clear due snoozes',
-          'address_returning_regulars': 'address returning regulars',
-        }.get(g.kind, g.kind) %}
         <li class="flex items-center gap-3 text-xs">
-          <span class="text-muted shrink-0 w-44 truncate">{{ _label }}</span>
+          <span class="text-muted shrink-0 w-44 truncate">{{ g.label }}</span>
           <span class="text-primary tabular-nums shrink-0">{{ g.done }}/{{ g.target }}</span>
           <span class="flex-1 h-1.5 rounded-full bg-surface-raised overflow-hidden">
             <span class="block h-full {% if g.pct >= 100 %}bg-success{% else %}bg-accent{% endif %}"
                   style="width: {{ g.pct }}%"></span>
           </span>
           {% if g.pct >= 100 %}
-            <i class="fa-solid fa-check text-success text-[10px]"></i>
+            <i class="fa-solid fa-check text-success text-[10px]"
+               title="goal met"></i>
           {% endif %}
+          <form hx-post="/insights/goals" hx-target="#goals-panel-body"
+                hx-swap="outerHTML" class="inline-flex"
+                title="remove this goal">
+            {# Remove this kind: count=0 tells set_goals to drop the
+               row instead of replacing it. clear-all is a separate
+               kind='clear' submission in the header above. #}
+            <input type="hidden" name="kind" value="{{ g.kind }}">
+            <input type="hidden" name="count" value="0">
+            <button type="submit"
+                    class="text-[10px] text-muted hover:text-danger px-1">
+              <i class="fa-solid fa-xmark"></i>
+            </button>
+          </form>
         </li>
       {% endfor %}
     </ul>
   {% else %}
-    <p class="text-[11px] text-muted italic">No goals set. Stay loose, or pick one below to track.</p>
+    <p class="text-[11px] text-muted italic">No goals set. Pick one below to track.</p>
   {% endif %}
 
-  <div class="mt-2 pt-2 border-t border-subtle flex flex-wrap gap-1.5 text-[11px]">
-    <form hx-post="/insights/goals" hx-target="#goals-panel" hx-swap="outerHTML" class="inline-flex">
-      <input type="hidden" name="kind" value="address_first_timers">
-      <input type="hidden" name="count" value="3">
-      <button class="px-2 py-0.5 rounded-full bg-surface-raised hover:bg-accent hover:text-white">
-        + 3 first-timers
-      </button>
-    </form>
-    <form hx-post="/insights/goals" hx-target="#goals-panel" hx-swap="outerHTML" class="inline-flex">
-      <input type="hidden" name="kind" value="clear_due_snoozes">
-      <input type="hidden" name="count" value="1">
-      <button class="px-2 py-0.5 rounded-full bg-surface-raised hover:bg-accent hover:text-white">
-        + clear all due
-      </button>
-    </form>
-    <form hx-post="/insights/goals" hx-target="#goals-panel" hx-swap="outerHTML" class="inline-flex">
-      <input type="hidden" name="kind" value="address_returning_regulars">
-      <input type="hidden" name="count" value="2">
-      <button class="px-2 py-0.5 rounded-full bg-surface-raised hover:bg-accent hover:text-white">
-        + 2 returning regulars
-      </button>
-    </form>
-  </div>
-  </div>{# /visible-state wrapper #}
-</div>{# /goals-panel root with dismiss state #}
+  {# +Button row — generated from goal_meta so adding a new built-in
+     kind doesn't require touching this template. Each button POSTs
+     the kind + a sensible default count; the streamer can re-add to
+     replace the count. #}
+  {% if goal_meta %}
+    <div class="mt-2 pt-2 border-t border-subtle flex flex-wrap gap-1.5 text-[11px]">
+      {% for kind, meta in goal_meta.items() %}
+        <form hx-post="/insights/goals" hx-target="#goals-panel-body"
+              hx-swap="outerHTML" class="inline-flex">
+          <input type="hidden" name="kind" value="{{ kind }}">
+          <input type="hidden" name="count" value="{{ meta.default_count }}">
+          <button type="submit"
+                  class="px-2 py-0.5 rounded-full bg-surface-raised hover:bg-accent hover:text-white"
+                  title="track {{ meta.label }} (default goal: {{ meta.default_count }})">
+            + {{ meta.default_count }} {{ meta.label }}
+          </button>
+        </form>
+      {% endfor %}
+    </div>
+  {% endif %}
+</div>
+{% endcall %}

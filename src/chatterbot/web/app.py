@@ -2616,6 +2616,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             ),
             # Per-stream goals + computed progress.
             "goals_state": _build_goals_state(),
+            "goal_meta": _GOAL_META,
             # Live transcript strip — what whisper just heard.
             "transcript_chunks": repo.list_transcript_chunks(limit=15),
             "transcript_groups": repo.list_transcript_groups(limit=15),
@@ -3091,9 +3092,31 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             },
         )
 
+    # Built-in goal kinds. Each entry is mapped to a progress
+    # tracker in _build_goals_state below. Adding a new kind here
+    # also requires wiring its progress count + button copy.
     _GOAL_KINDS = (
-        "address_first_timers", "clear_due_snoozes", "address_returning_regulars",
+        "address_first_timers",
+        "address_returning_regulars",
+        "address_lurkers",
+        "answer_chat_questions",
+        "address_engaging_subjects",
+        "address_high_impact",
+        "clear_due_snoozes",
     )
+
+    # Map each goal kind → (insight kind to filter on, label, default
+    # count). Used by both the progress counter and the +button row
+    # in the panel template so they stay in sync.
+    _GOAL_META = {
+        "address_first_timers":      {"insight_kinds": ("newcomer",),         "label": "address first-timers",       "default_count": 3},
+        "address_returning_regulars": {"insight_kinds": ("regular",),         "label": "address returning regulars",  "default_count": 2},
+        "address_lurkers":           {"insight_kinds": ("neglected_lurker", "lurker"), "label": "address lurkers", "default_count": 2},
+        "answer_chat_questions":     {"insight_kinds": ("chat_question",),    "label": "answer chat questions",       "default_count": 3},
+        "address_engaging_subjects": {"insight_kinds": ("engaging_subject",), "label": "address engaging subjects",   "default_count": 2},
+        "address_high_impact":       {"insight_kinds": ("high_impact",),      "label": "pivot to high-impact topics", "default_count": 2},
+        "clear_due_snoozes":         {"insight_kinds": (),                    "label": "clear due snoozes",           "default_count": 1},
+    }
 
     @app.post("/insights/goals", response_class=HTMLResponse)
     async def set_goals(
@@ -3102,31 +3125,38 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         count: Annotated[int, Form()] = 1,
     ):
         """Set/update the current stream's goal targets. Append-only — each
-        new POST adds another goal to the list. POST kind='clear' to reset."""
+        new POST adds another goal to the list. POST kind='clear' to reset
+        all; POST kind='<known>' with count<=0 to remove just that one."""
         if kind == "clear":
             repo.clear_stream_goals()
         elif kind in _GOAL_KINDS:
             cur = repo.get_stream_goals()
             targets = list(cur.get("targets") or [])
-            # Replace any existing goal of the same kind.
+            # Replace-or-remove this kind's existing entry.
             targets = [t for t in targets if t.get("kind") != kind]
-            targets.append({"kind": kind, "count": max(1, int(count))})
+            if int(count) > 0:
+                targets.append({"kind": kind, "count": int(count)})
             repo.set_stream_goals(targets)
         # Re-render the goals panel partial.
         return TEMPLATES.TemplateResponse(
             request, "partials/goals_panel.html",
-            {"goals": _build_goals_state()},
+            {"goals": _build_goals_state(), "goal_meta": _GOAL_META},
         )
 
     def _build_goals_state() -> dict:
-        """Compute current progress against each goal target."""
+        """Compute current progress against each goal target.
+
+        Counts state→addressed transitions since the goals were last
+        set, scoped to the insight `kind` for that goal so two goals
+        targeting different card types don't both increment off the
+        same event."""
         goals = repo.get_stream_goals()
         targets = goals.get("targets") or []
         if not targets:
             return {"targets": [], "set_at": None}
         from datetime import datetime, timezone, timedelta
-        # Goals scoped to "since the goals were set" so they reset each
-        # time the streamer hits the start-of-stream button.
+        # Goals scoped to "since the goals were set" so they reset
+        # each time the streamer hits the start-of-stream button.
         since = goals.get("set_at") or (
             datetime.now(timezone.utc) - timedelta(hours=24)
         ).isoformat(timespec="seconds")
@@ -3134,21 +3164,24 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         for t in targets:
             kind = t.get("kind")
             target = max(1, int(t.get("count") or 1))
-            # progress count depends on the goal kind.
             done = 0
-            if kind == "address_first_timers":
-                # Count first-timers (newcomers) the streamer has marked
-                # addressed since `since`.
-                done = repo.count_state_changes_since(since, state="addressed")
-                # The above includes ALL kinds; filter to newcomers via
-                # a follow-up check in repo.
-            elif kind == "clear_due_snoozes":
-                # 1 means "all clear right now", target == count of due.
+            if kind == "clear_due_snoozes":
+                # Inverse: 0 due = goal met. target = count to clear.
                 done = max(0, target - repo.count_due_snoozes())
-            elif kind == "address_returning_regulars":
-                done = repo.count_state_changes_since(since, state="addressed")
+            else:
+                meta = _GOAL_META.get(kind)
+                if meta and meta["insight_kinds"]:
+                    insight_kinds = list(meta["insight_kinds"])
+                    done = repo.count_state_changes_since(
+                        since,
+                        state="addressed",
+                        kind=insight_kinds[0] if len(insight_kinds) == 1 else None,
+                        kinds=insight_kinds if len(insight_kinds) > 1 else None,
+                    )
+            label = (_GOAL_META.get(kind) or {}).get("label", kind)
             out.append({
                 "kind": kind,
+                "label": label,
                 "target": target,
                 "done": min(done, target),
                 "pct": min(100, int(100 * done / target)) if target else 0,

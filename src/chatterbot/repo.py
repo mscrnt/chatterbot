@@ -2262,19 +2262,37 @@ class ChatterRepo:
             )
             return [dict(r) for r in cur.fetchall()]
 
-    def count_state_changes_since(self, since: str, *, state: str | None = None) -> int:
+    def count_state_changes_since(
+        self,
+        since: str,
+        *,
+        state: str | None = None,
+        kind: str | None = None,
+        kinds: list[str] | None = None,
+    ) -> int:
         """How many state transitions happened since `since`. Optional
-        `state` filter (e.g. 'addressed') so the recap can cite "you
-        addressed N items this stream"."""
+        `state` filter (e.g. 'addressed') and `kind` / `kinds` filter
+        so the goals tracker can scope to a specific card type
+        ('newcomer', 'chat_question', etc.) rather than counting
+        every state-change globally — without that filter, two
+        goals targeting different kinds would both increment off the
+        same event."""
         with self._cursor() as cur:
             params: list[Any] = [since]
-            extra = ""
+            clauses = ["ts >= ?"]
             if state:
-                extra = " AND state = ?"
+                clauses.append("state = ?")
                 params.append(state)
+            if kind is not None:
+                clauses.append("kind = ?")
+                params.append(kind)
+            elif kinds:
+                placeholders = ",".join("?" for _ in kinds)
+                clauses.append(f"kind IN ({placeholders})")
+                params.extend(kinds)
             cur.execute(
                 f"SELECT COUNT(*) AS c FROM insight_state_history "
-                f"WHERE ts >= ? {extra}",
+                f"WHERE {' AND '.join(clauses)}",
                 params,
             )
             return int(cur.fetchone()["c"])
