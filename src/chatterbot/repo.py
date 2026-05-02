@@ -3382,6 +3382,80 @@ class ChatterRepo:
                 for r in cur.fetchall()
             ]
 
+    def transcript_chunks_before_id(
+        self, chunk_id: int, *, limit: int = 10,
+    ) -> list[TranscriptChunk]:
+        """N chunks immediately preceding `chunk_id`, oldest-first.
+        Used by the perfect-pass refine judge for surrounding-
+        conversation grounding. Returns at most `limit` rows."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, ts, duration_ms, text,
+                       matched_kind, matched_item_key, similarity,
+                       avg_logprob, audio_path, transcribed_v2_at
+                FROM transcript_chunks WHERE id < ?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (int(chunk_id), int(limit)),
+            )
+            rows = list(cur.fetchall())
+        rows.reverse()
+        return [
+            TranscriptChunk(
+                id=int(r["id"]), ts=r["ts"],
+                duration_ms=int(r["duration_ms"] or 0),
+                text=r["text"],
+                matched_kind=r["matched_kind"],
+                matched_item_key=r["matched_item_key"],
+                similarity=float(r["similarity"]) if r["similarity"] is not None else None,
+                avg_logprob=(
+                    float(r["avg_logprob"])
+                    if r["avg_logprob"] is not None else None
+                ),
+                audio_path=r["audio_path"],
+                transcribed_v2_at=r["transcribed_v2_at"],
+            )
+            for r in rows
+        ]
+
+    def transcript_chunks_after_id(
+        self, chunk_id: int, *, limit: int = 10,
+    ) -> list[TranscriptChunk]:
+        """N chunks immediately following `chunk_id`, oldest-first.
+        By the time the perfect-pass loop runs, several more chunks
+        have typically been captured — the judge gets to see how
+        the conversation actually continued past the chunk being
+        judged."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, ts, duration_ms, text,
+                       matched_kind, matched_item_key, similarity,
+                       avg_logprob, audio_path, transcribed_v2_at
+                FROM transcript_chunks WHERE id > ?
+                ORDER BY id ASC LIMIT ?
+                """,
+                (int(chunk_id), int(limit)),
+            )
+            return [
+                TranscriptChunk(
+                    id=int(r["id"]), ts=r["ts"],
+                    duration_ms=int(r["duration_ms"] or 0),
+                    text=r["text"],
+                    matched_kind=r["matched_kind"],
+                    matched_item_key=r["matched_item_key"],
+                    similarity=float(r["similarity"]) if r["similarity"] is not None else None,
+                    avg_logprob=(
+                        float(r["avg_logprob"])
+                        if r["avg_logprob"] is not None else None
+                    ),
+                    audio_path=r["audio_path"],
+                    transcribed_v2_at=r["transcribed_v2_at"],
+                )
+                for r in cur.fetchall()
+            ]
+
     def list_transcripts_after_id(
         self, after_id: int, *, limit: int = 200,
     ) -> list[TranscriptChunk]:

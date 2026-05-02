@@ -436,3 +436,30 @@ class HighImpactOpenersResponse(BaseModel):
     streamer's dashboard."""
 
     openers: list[OpenerText] = Field(default_factory=list, max_length=5)
+
+
+# ---- transcript refine judge (slice 14) ----
+
+JudgeReason = Annotated[
+    str,
+    StringConstraints(max_length=200, strip_whitespace=True),
+]
+
+
+class RefineJudgeResponse(BaseModel):
+    """Reply for `transcript.refine_judge`. The judge sees a
+    first-pass whisper transcription, the perfect-pass refinement,
+    surrounding chunks (before + after), screenshots of the
+    streamer's screen during the chunk's window, and the chat
+    that overlapped the audio — and decides whether the refine is
+    GENUINE SPEECH (accept) or a WHISPER HALLUCINATION (reject,
+    keep first-pass text). Used as a fallback when a fast block-list
+    check has flagged the refine as potentially-suspect.
+
+    `keep_refined` is the actionable bit; `confidence` and `reason`
+    are surfaced in logs / the audit trail so the streamer can spot-
+    check what the judge has been doing."""
+
+    keep_refined: bool
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: JudgeReason = ""

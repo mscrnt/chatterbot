@@ -41,6 +41,7 @@ def test_registry_has_expected_call_sites():
         "insights.thread_recaps",
         "summarizer.topics_snapshot",
         "transcript.group_summary",
+        "transcript.refine_judge",
     }
     found = {p.call_site for p in P.all_prompt_defs()}
     assert found == expected

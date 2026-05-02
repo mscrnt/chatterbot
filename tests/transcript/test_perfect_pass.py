@@ -22,6 +22,7 @@ from chatterbot.repo import ChatterRepo
 from chatterbot.transcript import (
     _looks_like_whisper_hallucination,
     _persist_audio_clip,
+    _refine_introduces_suspect_phrase,
     _should_defer_group_summary,
 )
 
@@ -324,6 +325,72 @@ def test_persist_audio_clip_dedups_identical(tmp_path: Path):
 ])
 def test_hallucination_filter(orig: str, refined: str, expected: bool):
     assert _looks_like_whisper_hallucination(orig, refined) is expected
+
+
+# ---- _refine_introduces_suspect_phrase (slice 14) ----
+#
+# Pre-filter that gates the LLM judge. When the perfect-pass refine
+# introduces one of these phrases that wasn't in the original, the
+# judge is asked to decide accept-vs-reject with full conversation
+# context. Cheap substring check so we don't burn an LLM call on
+# every refine.
+
+@pytest.mark.parametrize("orig,refined,expected", [
+    # Outros / CTAs trigger the judge.
+    (
+        "alright let's keep going",
+        "Thanks for watching everybody!",
+        True,
+    ),
+    (
+        "I think that's the move",
+        "Subscribe to my channel for more",
+        True,
+    ),
+    (
+        "moving on",
+        "I'll see you in the next video. Bye bye.",
+        True,
+    ),
+    (
+        "alright that's the round",
+        "Smash that like button",
+        True,
+    ),
+    # Already-present phrases — refine repeating them isn't a NEW
+    # suspect introduction, judge skipped.
+    (
+        "thanks for watching everybody",
+        "thanks for watching everybody — appreciate it",
+        False,
+    ),
+    # Genuine refines with no suspect content — judge skipped.
+    (
+        "purry deployed",
+        "Pulse deployed",
+        False,
+    ),
+    (
+        "muffled gameplay sounds",
+        "muffled gameplay continues",
+        False,
+    ),
+    # Case-insensitivity sanity.
+    (
+        "alright let's keep going",
+        "THANKS FOR WATCHING",
+        True,
+    ),
+    # Substring boundary: "subscribe to" alone in normal speech
+    # doesn't trigger — only the canonical CTAs do.
+    (
+        "I subscribe to that take",
+        "I subscribe to that opinion",
+        False,
+    ),
+])
+def test_refine_introduces_suspect_phrase(orig, refined, expected):
+    assert _refine_introduces_suspect_phrase(orig, refined) is expected
 
 
 # ---- _should_defer_group_summary (slice 15) ----

@@ -517,6 +517,13 @@ FIELDS: dict[str, dict[str, Any]] = {
         "type": "bool",
         "depends_on": ("whisper_perfect_pass_hallucination_filter", True),
     },
+    "whisper_perfect_pass_judge_enabled": {
+        "label": "LLM judge for ambiguous refines",
+        "tooltip": "Use the LLM to decide accept-vs-reject when a refine introduces a suspect phrase.",
+        "help": "When the perfect pass produces text that introduces a known-suspect phrase (YouTube outros, CTAs, \"thanks for watching\"), an LLM judge gets called with real conversation context — neighbor chunks before AND after, screenshots from the chunk's window, and chat that overlapped the audio. Real context the whisper model itself never sees. Only fires when the suspect-phrase pre-filter triggers (~5-10% of refines), so cost is bounded. Default on. Disable for pure-blocklist behavior.",
+        "type": "bool",
+        "depends_on": ("whisper_perfect_pass_enabled", True),
+    },
     "whisper_perfect_pass_grace_seconds": {
         "label": "Defer group summaries until refines catch up",
         "tooltip": "Wait up to N seconds before summarising a window so refines complete first.",
@@ -1052,6 +1059,7 @@ SECTIONS: list[dict[str, Any]] = [
                     "whisper_perfect_pass_confidence_threshold",
                     "whisper_perfect_pass_interval_seconds",
                     "whisper_perfect_pass_grace_seconds",
+                    "whisper_perfect_pass_judge_enabled",
                     "whisper_perfect_pass_hallucination_filter",
                 ],
             },

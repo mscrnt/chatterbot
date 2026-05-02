@@ -685,6 +685,54 @@ def _build_registry() -> None:
             ),
         ),
 
+        "transcript.refine_judge": PromptDef(
+            call_site="transcript.refine_judge",
+            section="transcripts",
+            title="Whisper refine judge",
+            description=(
+                "Decides whether a perfect-pass whisper refinement "
+                "is genuine speech or a hallucination — given the "
+                "first-pass text, the refined text, the surrounding "
+                "transcripts, screenshots, and chat that overlapped "
+                "the audio. Used only on suspect refines (a fast "
+                "block-list check is the first line of defense)."
+            ),
+            factory=TranscriptService.REFINE_JUDGE_SYSTEM,
+            guided_template=(
+                TranscriptService.REFINE_JUDGE_SYSTEM
+                + _injection_block(
+                    "refine-judge strictness",
+                    "Strictness — {strictness}.\n"
+                    "Bias when uncertain — {bias}.\n"
+                    "When the audio context is silent / mumbled and "
+                    "the refine introduces a YouTube-canon phrase, "
+                    "always lean toward HALLUCINATION."
+                )
+            ),
+            guided_slots=(
+                GuidedSlot(
+                    name="strictness",
+                    question="How strict should the judge be?",
+                    default="balanced — accept refines with clear conversational grounding, reject ones that look like YouTube-prior pulls",
+                    options=(
+                        "strict — only accept refines I can clearly tie to the surrounding utterances + visuals",
+                        "balanced — accept refines with clear conversational grounding, reject ones that look like YouTube-prior pulls",
+                        "permissive — accept the refine unless it's an obvious caption-track artifact",
+                    ),
+                ),
+                GuidedSlot(
+                    name="bias",
+                    question="When you can't tell, which way do you lean?",
+                    default="prefer first-pass text — it's already plausible to the streamer",
+                    options=(
+                        "prefer first-pass text — it's already plausible to the streamer",
+                        "prefer refined text — perfect-pass settings are accuracy-tuned",
+                    ),
+                    advanced=True,
+                ),
+            ),
+        ),
+
     }
 
 

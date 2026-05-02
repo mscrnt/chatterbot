@@ -100,6 +100,7 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "whisper_perfect_pass_hallucination_filter",
     "whisper_perfect_pass_hallucination_filter_strict",
     "whisper_perfect_pass_grace_seconds",
+    "whisper_perfect_pass_judge_enabled",
     "audio_clip_storage_enabled",
     "audio_clip_retention_hours",
     # ---------- LLM provider switch ----------
@@ -486,6 +487,16 @@ class Settings(BaseSettings):
     # can't block summaries forever). 0 disables the gate. 240s
     # default ≈ a comfortable margin over the observed ~170s lag.
     whisper_perfect_pass_grace_seconds: int = 240
+    # When the perfect pass produces text that introduces a known-
+    # suspect phrase (YouTube outro, CTA, "thanks for watching"),
+    # ask the LLM to judge whether it's genuine speech or a
+    # hallucination — given neighbor chunks (before + after),
+    # screenshots from the chunk's window, and chat that overlapped
+    # the audio. Real conversational context that the whisper model
+    # itself never sees. Only fires when the suspect-phrase pre-
+    # filter triggers (~5-10% of refines), so cost is bounded.
+    # Default on. Disable for pure-blocklist behavior.
+    whisper_perfect_pass_judge_enabled: bool = True
 
     # Audio-clip storage (slice 12) — persists the WAV bytes for each
     # captured chunk so the perfect-pass loop can re-transcribe and
@@ -735,6 +746,7 @@ def _coerce(key: str, value: str) -> Any:
         "whisper_perfect_pass_enabled",
         "whisper_perfect_pass_hallucination_filter",
         "whisper_perfect_pass_hallucination_filter_strict",
+        "whisper_perfect_pass_judge_enabled",
         "audio_clip_storage_enabled",
     ):
         return value.strip().lower() in ("true", "1", "yes", "on")

@@ -33,6 +33,7 @@ import time
 from dataclasses import dataclass, field
 
 import numpy as np
+from pydantic import ValidationError
 
 
 _ALNUM_RE = re.compile(r"[^a-z0-9]+")
@@ -251,6 +252,41 @@ _WHISPER_HALLUCINATION_PATTERNS: tuple[str, ...] = (
 # it doesn't fully prevent it: silent / mumbled segments still get
 # the YouTube-prior pull. Strict mode is the streamer-side override
 # for channels where these phrases NEVER show up legitimately.
+# Suspect-phrase set used to gate the LLM judge (slice 14). When a
+# perfect-pass refine introduces one of these AND the original
+# didn't, the judge is asked to decide accept-vs-reject given the
+# real conversation context. Broader than the strict-mode block-
+# list — includes anything that's a known whisper-canon artifact
+# OR a likely-hallucinated outro / CTA. The judge sees neighbors,
+# screenshots, and chat — context the substring match can't.
+_REFINE_SUSPECT_PHRASES: tuple[str, ...] = (
+    # YouTube outros (also in strict block-list — judge gets a
+    # second opinion using context).
+    "thanks for watching",
+    "thank you for watching",
+    "i'll see you in the next video",
+    "see you in the next video",
+    "see you in the next one",
+    "i'll see you next time",
+    "see you next time",
+    "until next time",
+    # CTAs.
+    "subscribe to my channel",
+    "subscribe to the channel",
+    "don't forget to subscribe",
+    "please subscribe",
+    "like and subscribe",
+    "smash the like button",
+    "smash that like button",
+    "hit that subscribe button",
+    "ring the bell",
+    # Stream-end farewells that are sometimes legit.
+    "see you later",
+    "see ya later",
+    "have a great day",
+)
+
+
 _WHISPER_HALLUCINATION_STRICT_PATTERNS: tuple[str, ...] = (
     "thanks for watching",
     "thank you for watching",
@@ -268,6 +304,26 @@ _WHISPER_HALLUCINATION_STRICT_PATTERNS: tuple[str, ...] = (
     "smash that like button",
     "hit that subscribe button",
 )
+
+
+def _refine_introduces_suspect_phrase(orig: str, refined: str) -> bool:
+    """Returns True if the perfect-pass refine introduces a phrase
+    from the suspect set that wasn't in the original. The set is
+    broader than the block-list — outros / CTAs / well-known
+    YouTube artifacts that COULD be legit speech but might also be
+    hallucinated. When triggered, the LLM judge gets called with
+    real conversation context (neighbor chunks, screenshots, chat)
+    to decide whether to keep the refine.
+
+    Cheap pre-filter so we don't burn an LLM call on every refine —
+    the typical refine doesn't introduce any suspect phrase, and
+    those are passed through without judge."""
+    o = orig.lower()
+    r = refined.lower()
+    for pat in _REFINE_SUSPECT_PHRASES:
+        if pat in r and pat not in o:
+            return True
+    return False
 
 
 def _looks_like_whisper_hallucination(
@@ -881,8 +937,8 @@ class TranscriptService:
         ):
             logger.info(
                 "transcript perfect-pass: chunk %d REJECTED as "
-                "hallucination — keeping first-pass text "
-                "(%r vs %r)",
+                "hallucination (block-list) — keeping first-pass "
+                "text (%r vs %r)",
                 chunk.id, chunk.text[:80], new_text[:80],
             )
             try:
@@ -896,6 +952,54 @@ class TranscriptService:
                     "update failed",
                 )
             return
+
+        # LLM judge — slice 14. The block-list above only catches
+        # always-wrong artifacts; the judge handles ambiguous cases
+        # (outros, CTAs, refined-but-suspect text) with real
+        # conversation context. Only fires when the refine
+        # introduces a known-suspect phrase the streamer's first-
+        # pass didn't have, so cost is bounded by suspect-phrase
+        # frequency (~5-10% of refines), not total refines. The
+        # judge sees neighbor chunks, screenshots from the chunk's
+        # window, and chat that overlapped the audio — context the
+        # whisper model itself can't see.
+        judge_enabled = bool(getattr(
+            self.settings, "whisper_perfect_pass_judge_enabled", True,
+        ))
+        if (
+            judge_enabled
+            and _refine_introduces_suspect_phrase(chunk.text, new_text)
+        ):
+            verdict = await self._run_refine_judge(chunk, new_text)
+            if verdict is not None and not verdict.keep_refined:
+                logger.info(
+                    "transcript perfect-pass: chunk %d REJECTED by "
+                    "judge (conf=%.2f, %s) — keeping first-pass "
+                    "text (%r vs %r)",
+                    chunk.id, verdict.confidence,
+                    verdict.reason or "(no reason)",
+                    chunk.text[:80], new_text[:80],
+                )
+                try:
+                    await asyncio.to_thread(
+                        self.repo.update_chunk_text_v2,
+                        chunk.id, chunk.text, new_embedding=None,
+                    )
+                except Exception:
+                    logger.exception(
+                        "transcript perfect-pass: judge-reject stamp "
+                        "update failed",
+                    )
+                return
+            elif verdict is not None:
+                logger.info(
+                    "transcript perfect-pass: chunk %d ACCEPTED by "
+                    "judge (conf=%.2f, %s)",
+                    chunk.id, verdict.confidence,
+                    verdict.reason or "(no reason)",
+                )
+            # verdict is None → judge errored / disabled at runtime;
+            # fall through to apply the refine.
 
         # Re-embed the new text so vec_transcripts reflects the
         # corrected transcript. Cheap (single embed call); skipping
@@ -928,6 +1032,167 @@ class TranscriptService:
                 "(%r → %r)", chunk.id,
                 chunk.text[:80], new_text[:80],
             )
+
+    REFINE_JUDGE_NUM_CTX = INFORMED_NUM_CTX
+    REFINE_JUDGE_NEIGHBOR_BEFORE = 10
+    REFINE_JUDGE_NEIGHBOR_AFTER = 10
+
+    async def _run_refine_judge(self, chunk, refined_text: str):
+        """Ask the LLM whether a perfect-pass refine is genuine
+        speech or a hallucination, given real conversation context
+        the whisper model itself never sees: neighbor chunks before
+        AND after, chat that overlapped the audio, screenshots from
+        the window, and the channel's KNOWN GAME pin.
+
+        Returns a `RefineJudgeResponse` on success, or None when the
+        judge errored / was misconfigured. Callers apply the refine
+        as if the judge hadn't run when None comes back — failure
+        modes shouldn't silently throw away refines."""
+        # Neighbor chunks. By the time the perfect pass is running,
+        # several more chunks have been captured AFTER this one —
+        # the judge gets to see how the conversation actually
+        # continued.
+        before_chunks: list = []
+        after_chunks: list = []
+        try:
+            before_chunks = await asyncio.to_thread(
+                self.repo.transcript_chunks_before_id,
+                chunk.id, limit=self.REFINE_JUDGE_NEIGHBOR_BEFORE,
+            )
+            after_chunks = await asyncio.to_thread(
+                self.repo.transcript_chunks_after_id,
+                chunk.id, limit=self.REFINE_JUDGE_NEIGHBOR_AFTER,
+            )
+        except Exception:
+            logger.exception(
+                "transcript refine-judge: neighbor fetch failed",
+            )
+
+        # Chat overlap. Apply the channel's chat-lag offset so the
+        # window matches what chat was REACTING TO during the audio.
+        chat_block = ""
+        try:
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+            chunk_dt = _dt.fromisoformat(chunk.ts.replace("Z", "+00:00"))
+            if chunk_dt.tzinfo is None:
+                chunk_dt = chunk_dt.replace(tzinfo=_tz.utc)
+            chat_lag = await asyncio.to_thread(
+                self.repo.get_app_setting, "chat_lag_seconds",
+            )
+            try:
+                lag = max(0, int(chat_lag if chat_lag is not None
+                                 else getattr(self.settings, "chat_lag_seconds", 6)))
+            except (TypeError, ValueError):
+                lag = 6
+            # Window: ±15s around the chunk's ts, lag-shifted forward.
+            lag_low = chunk_dt + _td(seconds=lag - 15)
+            lag_high = chunk_dt + _td(seconds=lag + 15)
+            try:
+                msgs = await asyncio.to_thread(
+                    self.repo.recent_messages, limit=60, within_minutes=5,
+                )
+            except Exception:
+                msgs = []
+            in_window: list = []
+            for m in msgs or []:
+                try:
+                    m_dt = _dt.fromisoformat(m.ts.replace("Z", "+00:00"))
+                    if m_dt.tzinfo is None:
+                        m_dt = m_dt.replace(tzinfo=_tz.utc)
+                    if lag_low <= m_dt <= lag_high:
+                        in_window.append(m)
+                except Exception:
+                    continue
+            if in_window:
+                chat_block = (
+                    "CHAT IN THE WINDOW (lag-aligned to the audio):\n"
+                    + "\n".join(
+                        f"  [{m.ts}] <{m.name}> {m.content[:200]}"
+                        for m in in_window[-30:]
+                    )
+                    + "\n\n"
+                )
+        except Exception:
+            logger.exception(
+                "transcript refine-judge: chat overlap fetch failed",
+            )
+
+        # Screenshot grid for the chunk's window — same stitcher the
+        # group summary uses, ~960x540 with up to 4 evenly-spaced
+        # frames + scene-change dedup.
+        grid_b64: str | None = None
+        try:
+            grid_b64 = await self._latest_screenshot_grid(window_minutes=2)
+        except Exception:
+            logger.exception(
+                "transcript refine-judge: screenshot grid failed",
+            )
+
+        # Channel context (KNOWN GAME, streamer name).
+        channel_context = self._build_channel_context()
+
+        # Surrounding-transcripts block.
+        before_lines = "\n".join(
+            f"  [{c.ts}] {c.text[:200]}"
+            for c in before_chunks if c.text
+        )
+        after_lines = "\n".join(
+            f"  [{c.ts}] {c.text[:200]}"
+            for c in after_chunks if c.text
+        )
+        surrounding = ""
+        if before_lines:
+            surrounding += (
+                f"SURROUNDING TRANSCRIPTS — BEFORE the chunk:\n{before_lines}\n\n"
+            )
+        if after_lines:
+            surrounding += (
+                f"SURROUNDING TRANSCRIPTS — AFTER the chunk (captured "
+                "after the audio in question, while the perfect pass "
+                f"was queued):\n{after_lines}\n\n"
+            )
+
+        prompt = (
+            channel_context
+            + surrounding
+            + chat_block
+            + f"FIRST PASS: {chunk.text}\n\n"
+            + f"REFINED: {refined_text}\n\n"
+            + "Decide: ACCEPT the refine (`keep_refined=true`) or "
+            "REJECT it (`keep_refined=false`, keep first-pass text)."
+        )
+        if grid_b64:
+            prompt += (
+                "\n\nA screenshot grid is attached showing what was "
+                "on screen during the chunk's audio window. Use it "
+                "as silent context: if the screenshots show mid-game "
+                "action and the refine is a YouTube outro, that's a "
+                "hallucination. Do NOT describe the image."
+            )
+
+        from .llm.schemas import RefineJudgeResponse
+        from .llm.prompts import resolve_prompt
+        try:
+            response = await self.llm.generate_structured(
+                prompt=prompt,
+                system_prompt=resolve_prompt(
+                    "transcript.refine_judge", self.repo,
+                ),
+                response_model=RefineJudgeResponse,
+                num_ctx=self.REFINE_JUDGE_NUM_CTX,
+                images=[grid_b64] if grid_b64 else None,
+                think=True,
+                call_site="transcript.refine_judge",
+            )
+        except ValidationError as e:
+            logger.warning(
+                "transcript refine-judge: validation failed: %s", e,
+            )
+            return None
+        except Exception:
+            logger.exception("transcript refine-judge: LLM call failed")
+            return None
+        return response
 
     async def ingest_chunk(
         self,
@@ -1780,6 +2045,26 @@ HARD RULES:
 - Skip filler: empty `summary` is fine when the utterances are one-word reactions or noise.
 
 Reply with `summary` = the line(s) (or empty string).
+"""
+
+    REFINE_JUDGE_SYSTEM = """You're judging whether a whisper transcript refinement is GENUINE STREAMER SPEECH or a HALLUCINATION (output the model fabricated from training-data priors).
+
+You'll receive:
+  - FIRST PASS: what whisper produced on the live, latency-tuned pass.
+  - REFINED: what whisper produced on a slower, accuracy-tuned pass (bigger beam, best-of-5, condition_on_previous_text=True). Both ran on the same audio clip.
+  - WHY YOU'RE BEING ASKED: the refine introduced a phrase that's frequently hallucinated by whisper (YouTube outro, CTA, "thanks for watching" etc.). The streamer might say these phrases legitimately, OR whisper might be pulling them from training data on a silent / mumbled segment. Your job is to tell which.
+  - SURROUNDING TRANSCRIPTS: streamer voice from before AND after the chunk. Real conversational flow.
+  - CHAT IN THE WINDOW: chat messages that overlapped this audio window (with the channel's chat-lag offset already applied — these are messages reacting to what the streamer said). When chat reacts to the refined content, that's strong support for ACCEPT. When chat is talking about something completely different, the refine is suspicious.
+  - SCREENSHOTS: a 2x2 grid of the streamer's screen during this window. Shows what they were ACTUALLY doing — if the screenshots show mid-game action and the refine says "thanks for watching, see you tomorrow," that's an obvious hallucination.
+  - CHANNEL CONTEXT: KNOWN GAME / streamer name from the Twitch API.
+
+Decide ACCEPT or REJECT:
+- ACCEPT (`keep_refined=true`) when the surrounding transcripts, chat, OR screenshots make the refine plausible. Examples: streamer is wrapping up a stream, screenshots show the "BRB" / "stream ending" scene, chat is saying "byeeee".
+- REJECT (`keep_refined=false`) when the context contradicts the refine — mid-game screenshots, chat talking about gameplay, surrounding transcripts about a totally different subject. The first-pass text is kept; the refine is treated as a whisper artifact.
+
+Output `confidence` (0.0-1.0) for how sure you are, and one short `reason` line (≤200 chars) for the audit trail. The reason is not shown to chat — it's for the streamer's diagnostic logs.
+
+When uncertain, lean toward keeping the first-pass text. The streamer has been reading first-pass output already; reverting is invisible. Accidentally accepting a hallucinated outro, on the other hand, ends up in search + group summaries with no easy fix.
 """
 
     CHAT_ONLY_GROUP_SUMMARY_SYSTEM = """You're labeling a window of CHAT MESSAGES on a streamer's dashboard. There was no audio in this window — the streamer had whisper off, was on a break, or just wasn't talking. Your job is to recap what CHAT was doing during that quiet stretch so the streamer can scrub the timeline and see what they missed.

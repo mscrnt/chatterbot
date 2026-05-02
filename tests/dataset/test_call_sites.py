@@ -83,6 +83,7 @@ EXPECTED_CALL_SITES = {
     "insights.subject_talking_points",
     "transcript.llm_match",
     "transcript.group_summary",
+    "transcript.refine_judge",
 }
 
 
