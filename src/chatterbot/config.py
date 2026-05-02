@@ -531,6 +531,22 @@ class Settings(BaseSettings):
     # spends more LLM cost for snappier modal opens.
     insights_modal_prewarm_top_n: int = 3
 
+    # ---------- int8 vector-storage pilot ----------
+    # When True, ranking-only RAG reads target the int8-quantized
+    # mirrors (`vec_messages_q8`, `vec_notes_q8`, `vec_threads_q8`,
+    # `vec_transcripts_q8`) instead of their FLOAT[768] originals.
+    # Writes always dual-populate both tables so the flag can be
+    # flipped on/off without losing data. Per-table quantization
+    # scales are auto-computed and persisted to `app_settings` on
+    # first startup with the flag on. Threshold-bound reads
+    # (find_near_duplicate_flood, count_transcripts_matching_embedding,
+    # find_recent_transcript_for_message) intentionally stay on
+    # float32 because their distance thresholds are tuned to the
+    # float32 metric scale. Env-only — not exposed in the dashboard
+    # form. ~4x storage reduction, ~99% top-10 recall in our eval
+    # (see scripts/bench_embedding_quantization.py).
+    use_int8_embeddings: bool = False
+
     # Moderation mode — opt-in. When enabled, the bot batches recent
     # messages through a strict-rubric LLM classifier and persists
     # flagged ones as incidents for streamer review. Advisory only —

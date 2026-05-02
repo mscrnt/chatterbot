@@ -85,7 +85,11 @@ def _open_repo(settings):
     at module import time) so `chatterbot dataset --help` doesn't require
     the full project to spin up."""
     from ..repo import ChatterRepo
-    return ChatterRepo(settings.db_path, embed_dim=settings.ollama_embed_dim)
+    return ChatterRepo(
+        settings.db_path,
+        embed_dim=settings.ollama_embed_dim,
+        use_int8_embeddings=settings.use_int8_embeddings,
+    )
 
 
 def _prompt_passphrase(prompt: str = "passphrase: ", *, confirm: bool = False) -> str:

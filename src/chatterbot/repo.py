@@ -23,6 +23,7 @@ Hard rule reminder:
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import struct
 import threading
@@ -33,7 +34,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+import numpy as np
 import sqlite_vec
+
+logger = logging.getLogger(__name__)
 
 
 # ------------------------------- dataclasses -------------------------------
@@ -415,13 +419,76 @@ def _blob_to_vec(blob: bytes) -> list[float]:
     return list(struct.unpack(f"{n}f", blob))
 
 
+# ---- int8 quantization helpers (vec_*_q8 tables) -------------------
+# Used by the int8-storage pilot. Each source vec_* table gets a
+# parallel `_q8` mirror with INT8[768] vectors. The per-table scale is
+# global within a channel DB and persisted in `app_settings` under
+# `vec_<table>_q8_scale`. With nomic-embed-text vectors, p99.5 of
+# |component| / 127 gives ~99% top-10 recall vs the float32 baseline
+# at exactly 4x storage. See scripts/bench_embedding_quantization.py
+# for the eval harness.
+
+
+@dataclass(frozen=True)
+class _Int8VecSpec:
+    """One row per (source vec_* table) we're quantizing."""
+    key: str               # short id used in app_settings + caches
+    src: str               # source FLOAT[768] table
+    dst: str               # parallel INT8[768] table
+    pk: str                # primary key column shared by both
+    distance: str | None   # 'cosine' or None (None = vec0 default = L2)
+
+    @property
+    def scale_key(self) -> str:
+        return f"{self.dst}_scale"
+
+
+# IMPORTANT: keep `distance` matching the source table's CREATE so the
+# int8 mirror ranks the same way. Threshold-bound callers (e.g.
+# find_near_duplicate_flood, count_transcripts_matching_embedding) stay
+# on the float32 source — only pure-ranking reads flip to int8.
+INT8_SPECS: tuple[_Int8VecSpec, ...] = (
+    _Int8VecSpec("messages",    "vec_messages",    "vec_messages_q8",    "message_id", None),
+    _Int8VecSpec("notes",       "vec_notes",       "vec_notes_q8",       "note_id",    None),
+    _Int8VecSpec("threads",     "vec_threads",     "vec_threads_q8",     "thread_id",  "cosine"),
+    _Int8VecSpec("transcripts", "vec_transcripts", "vec_transcripts_q8", "chunk_id",   "cosine"),
+)
+INT8_SPECS_BY_KEY: dict[str, _Int8VecSpec] = {s.key: s for s in INT8_SPECS}
+
+# Back-compat constant that other modules / scripts may still import.
+INT8_SCALE_KEY_MESSAGES = INT8_SPECS_BY_KEY["messages"].scale_key
+
+
+def _vec_to_int8_blob(vec: list[float], scale: float) -> bytes:
+    """Quantize a float32 vector to a tightly-packed int8 BLOB. Caller
+    binds it through `vec_int8(?)` — sqlite-vec rejects raw INT8 BLOBs
+    inserted via `?` because it can't tell them apart from float32."""
+    arr = np.asarray(vec, dtype=np.float32) / scale
+    return np.round(arr).clip(-128, 127).astype(np.int8).tobytes()
+
+
 # ------------------------------- repo --------------------------------------
 
 
 class ChatterRepo:
-    def __init__(self, db_path: str, embed_dim: int = 768):
+    def __init__(
+        self,
+        db_path: str,
+        embed_dim: int = 768,
+        *,
+        use_int8_embeddings: bool = False,
+    ):
         self.db_path = db_path
         self.embed_dim = embed_dim
+        # int8-storage pilot. When True, ranking-only RAG reads target
+        # the `vec_*_q8` mirrors instead of the FLOAT[768] sources.
+        # Writes always dual-populate both tables once a scale exists,
+        # regardless of the flag, so flipping it on/off doesn't strand
+        # data. Per-table scales are cached lazily; missing scales
+        # force a graceful float32 fallback (with a one-shot warning).
+        self._use_int8 = bool(use_int8_embeddings)
+        self._int8_scales: dict[str, float | None] = {s.key: None for s in INT8_SPECS}
+        self._int8_scale_warned: set[str] = set()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         # Thread-local connections so each `asyncio.to_thread` worker (and
         # the bot, summarizer, transcript service) get their own SQLite
@@ -450,6 +517,11 @@ class ChatterRepo:
         # so the hot capture-path is one attribute read.
         self._dataset_dek: bytes | None = None
         self._dataset_dek_lock = threading.Lock()
+        # Auto-migrate float32 vector tables to their int8 mirrors
+        # when the pilot flag is on. Must come AFTER the app_settings
+        # cache is initialised since the method calls
+        # self.get_app_setting(). Loops every spec in INT8_SPECS.
+        self._ensure_int8_migrated()
 
     def _init_conn(self) -> sqlite3.Connection:
         """Create + configure a SQLite connection for the current thread.
@@ -781,6 +853,15 @@ class ChatterRepo:
                 )
                 """
             )
+            # Parallel int8 mirror — populated by _ensure_int8_migrated.
+            cur.execute(
+                f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_threads_q8 USING vec0(
+                    thread_id INTEGER PRIMARY KEY,
+                    embedding INT8[{self.embed_dim}] distance_metric=cosine
+                )
+                """
+            )
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS summarization_state (
@@ -1061,6 +1142,15 @@ class ChatterRepo:
                 )
                 """
             )
+            # Parallel int8 mirror — populated by _ensure_int8_migrated.
+            cur.execute(
+                f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_transcripts_q8 USING vec0(
+                    chunk_id INTEGER PRIMARY KEY,
+                    embedding INT8[{self.embed_dim}] distance_metric=cosine
+                )
+                """
+            )
             # End-of-stream LLM-generated recaps. Triggered when OBS
             # transitions from streaming → not-streaming. One row per
             # detected stream session.
@@ -1120,6 +1210,22 @@ class ChatterRepo:
                     )
                     """
                 )
+                # Mirror the rebuild for the int8 table — otherwise a
+                # stale `vec_threads_q8` populated under the old metric
+                # would diverge from the rebuilt source.
+                cur.execute("DROP TABLE IF EXISTS vec_threads_q8")
+                cur.execute(
+                    f"""
+                    CREATE VIRTUAL TABLE vec_threads_q8 USING vec0(
+                        thread_id INTEGER PRIMARY KEY,
+                        embedding INT8[{self.embed_dim}] distance_metric=cosine
+                    )
+                    """
+                )
+                cur.execute(
+                    "DELETE FROM app_settings WHERE key = ?",
+                    (INT8_SPECS_BY_KEY["threads"].scale_key,),
+                )
                 cur.execute("DELETE FROM topic_thread_members")
                 cur.execute("DELETE FROM topic_threads")
                 cur.execute(
@@ -1176,6 +1282,15 @@ class ChatterRepo:
                 )
                 """
             )
+            # Parallel int8 mirror — populated by _ensure_int8_migrated.
+            cur.execute(
+                f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_notes_q8 USING vec0(
+                    note_id INTEGER PRIMARY KEY,
+                    embedding INT8[{self.embed_dim}]
+                )
+                """
+            )
             # Mirrors message embeddings for the dashboard RAG. Sparse: we only embed
             # messages on-demand, when they're surfaced via the Ask-Qwen feature.
             cur.execute(
@@ -1183,6 +1298,19 @@ class ChatterRepo:
                 CREATE VIRTUAL TABLE IF NOT EXISTS vec_messages USING vec0(
                     message_id INTEGER PRIMARY KEY,
                     embedding FLOAT[{self.embed_dim}]
+                )
+                """
+            )
+            # Parallel int8-quantized table for the storage pilot. Always
+            # created so writes can dual-populate; reads only target it
+            # when `use_int8_embeddings` is on AND the scale is
+            # populated in `app_settings`. ~4x smaller than the float32
+            # table, ~99% top-10 recall in our eval.
+            cur.execute(
+                f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_messages_q8 USING vec0(
+                    message_id INTEGER PRIMARY KEY,
+                    embedding INT8[{self.embed_dim}]
                 )
                 """
             )
@@ -1782,6 +1910,7 @@ class ChatterRepo:
                     "INSERT INTO vec_notes(note_id, embedding) VALUES (?, ?)",
                     (note_id, blob),
                 )
+                self._dual_insert_int8(cur, "notes", note_id, embedding)
             for mid in valid:
                 cur.execute(
                     "INSERT OR IGNORE INTO note_sources(note_id, message_id) "
@@ -2573,6 +2702,7 @@ class ChatterRepo:
                     "VALUES (?, ?)",
                     (chunk_id, blob),
                 )
+                self._dual_insert_int8(cur, "transcripts", chunk_id, embedding)
             return chunk_id
 
     def chunks_pending_perfect_pass(
@@ -2658,6 +2788,9 @@ class ChatterRepo:
                     "INSERT INTO vec_transcripts(chunk_id, embedding) "
                     "VALUES (?, ?)",
                     (int(chunk_id), blob),
+                )
+                self._dual_insert_int8(
+                    cur, "transcripts", int(chunk_id), new_embedding,
                 )
 
     def list_referenced_audio_paths(self) -> list[str]:
@@ -2759,25 +2892,39 @@ class ChatterRepo:
         summaries, engaging subjects) explicitly DO NOT pull from this
         method; they have their own time-windowed sources so historical
         utterances can't pollute current-stream context."""
-        blob = _vec_to_blob(query_embedding)
-        # Pull a wider window from the index than the requested k so
-        # post-filtering (when callers want it) still has matches.
+        # Pure-ranking retrieval — no thresholds. Safe to run against
+        # the int8 mirror when active. Threshold-bound counterparts
+        # (count_transcripts_matching_embedding,
+        # find_recent_transcript_for_message) stay on float32.
         ann_k = max(int(k) * 2, 40)
+        use_q8, scale = self._int8_active("transcripts")
+        if use_q8:
+            blob = _vec_to_int8_blob(query_embedding, scale)
+            sql = """
+                SELECT v.chunk_id, v.distance, t.id, t.ts,
+                       t.duration_ms, t.text,
+                       t.matched_kind, t.matched_item_key, t.similarity
+                FROM vec_transcripts_q8 v
+                JOIN transcript_chunks t ON t.id = v.chunk_id
+                WHERE v.embedding MATCH vec_int8(?) AND k = ?
+                ORDER BY v.distance ASC
+                LIMIT ?
+                """
+        else:
+            blob = _vec_to_blob(query_embedding)
+            sql = """
+                SELECT v.chunk_id, v.distance, t.id, t.ts,
+                       t.duration_ms, t.text,
+                       t.matched_kind, t.matched_item_key, t.similarity
+                FROM vec_transcripts v
+                JOIN transcript_chunks t ON t.id = v.chunk_id
+                WHERE v.embedding MATCH ? AND k = ?
+                ORDER BY v.distance ASC
+                LIMIT ?
+                """
         with self._cursor() as cur:
             try:
-                cur.execute(
-                    """
-                    SELECT v.chunk_id, v.distance, t.id, t.ts,
-                           t.duration_ms, t.text,
-                           t.matched_kind, t.matched_item_key, t.similarity
-                    FROM vec_transcripts v
-                    JOIN transcript_chunks t ON t.id = v.chunk_id
-                    WHERE v.embedding MATCH ? AND k = ?
-                    ORDER BY v.distance ASC
-                    LIMIT ?
-                    """,
-                    (blob, ann_k, int(k)),
-                )
+                cur.execute(sql, (blob, ann_k, int(k)))
                 rows = cur.fetchall()
             except sqlite3.OperationalError:
                 return []
@@ -2895,6 +3042,9 @@ class ChatterRepo:
                 "INSERT INTO vec_transcripts(chunk_id, embedding) "
                 "VALUES (?, ?)",
                 (int(chunk_id), blob),
+            )
+            self._dual_insert_int8(
+                cur, "transcripts", int(chunk_id), embedding,
             )
 
     def transcripts_embedding_coverage(self) -> tuple[int, int]:
@@ -5266,6 +5416,7 @@ class ChatterRepo:
                 (text, note_id),
             )
             cur.execute("DELETE FROM vec_notes WHERE note_id = ?", (note_id,))
+            self._dual_delete_int8(cur, "notes", note_id)
         # Streamer correcting an LLM-extracted note is the highest-
         # signal supervision example we have — fine-tuning gold.
         self._capture_streamer_action(
@@ -5276,6 +5427,7 @@ class ChatterRepo:
     def delete_note(self, note_id: int) -> None:
         with self._cursor() as cur:
             cur.execute("DELETE FROM vec_notes WHERE note_id = ?", (note_id,))
+            self._dual_delete_int8(cur, "notes", note_id)
             cur.execute("DELETE FROM notes WHERE id = ?", (note_id,))
         # Negative supervision: the streamer rejected this note.
         self._capture_streamer_action(
@@ -5510,6 +5662,10 @@ class ChatterRepo:
                 ids_set,
             )
             cur.execute(
+                f"DELETE FROM vec_notes_q8 WHERE note_id IN ({placeholders})",
+                ids_set,
+            )
+            cur.execute(
                 f"DELETE FROM note_sources WHERE note_id IN ({placeholders})",
                 ids_set,
             )
@@ -5525,6 +5681,7 @@ class ChatterRepo:
                         "INSERT INTO vec_notes(note_id, embedding) VALUES (?, ?)",
                         (new_id, _vec_to_blob(embedding)),
                     )
+                    self._dual_insert_int8(cur, "notes", new_id, embedding)
                 except Exception:
                     pass
 
@@ -5848,7 +6005,14 @@ class ChatterRepo:
     ) -> tuple[int, float] | None:
         """Nearest-neighbour search over thread title embeddings.
         Returns (thread_id, distance) of the closest, or None if empty.
-        sqlite-vec returns cosine distance — smaller = more similar."""
+        sqlite-vec returns cosine distance — smaller = more similar.
+
+        Stays on float32 deliberately — the threader gates this distance
+        against a hard `SIMILARITY_DISTANCE_MAX = 0.30` threshold (see
+        threader.py). Int8 cosine differs from float32 cosine by a few
+        % from quantization noise; over a 0.30 threshold that shifts
+        borderline thread merges. Calls here are infrequent (~once per
+        topic snapshot) so the storage/perf upside is negligible."""
         blob = _vec_to_blob(embedding)
         with self._cursor() as cur:
             try:
@@ -5927,6 +6091,7 @@ class ChatterRepo:
                 "INSERT INTO vec_threads(thread_id, embedding) VALUES (?, ?)",
                 (tid, blob),
             )
+            self._dual_insert_int8(cur, "threads", tid, embedding)
             cur.execute(
                 """
                 INSERT INTO topic_thread_members(
@@ -6934,6 +7099,18 @@ class ChatterRepo:
                 "(SELECT id FROM messages WHERE user_id = ?)",
                 (twitch_id,),
             )
+            # Mirror the cascades into the q8 mirrors so forget-user
+            # stays GDPR-clean regardless of which storage path is
+            # currently active.
+            cur.execute(
+                "DELETE FROM vec_notes_q8 WHERE note_id IN (SELECT id FROM notes WHERE user_id = ?)",
+                (twitch_id,),
+            )
+            cur.execute(
+                "DELETE FROM vec_messages_q8 WHERE message_id IN "
+                "(SELECT id FROM messages WHERE user_id = ?)",
+                (twitch_id,),
+            )
             cur.execute("DELETE FROM events WHERE user_id = ?", (twitch_id,))
             # ON DELETE CASCADE handles notes / messages / summarization_state.
             cur.execute("DELETE FROM users WHERE twitch_id = ?", (twitch_id,))
@@ -6949,6 +7126,147 @@ class ChatterRepo:
     # These power the dashboard "Ask Qwen about this user" feature. Both the
     # query and the answer render in the streamer's browser only.
 
+    # ---- int8 embedding scale per source table ----------------------
+    # Cached lazily after first read. Returns None when auto-migration
+    # hasn't populated the scale yet — caller falls back to float32
+    # (writes skip the q8 dual-insert; reads target the float32 source).
+
+    def _get_int8_scale(self, key: str) -> float | None:
+        """Cached lookup of the per-(DB, table) quantization scale.
+        `key` is one of the keys in `INT8_SPECS_BY_KEY`."""
+        cached = self._int8_scales.get(key)
+        if cached is not None:
+            return cached
+        spec = INT8_SPECS_BY_KEY[key]
+        raw = self.get_app_setting(spec.scale_key)
+        if raw:
+            try:
+                self._int8_scales[key] = float(raw)
+                return self._int8_scales[key]
+            except ValueError:
+                pass
+        if self._use_int8 and key not in self._int8_scale_warned:
+            logger.warning(
+                "use_int8_embeddings is on but %s is missing from "
+                "app_settings — falling back to float32 reads on %s.",
+                spec.scale_key, spec.src,
+            )
+            self._int8_scale_warned.add(key)
+        return None
+
+    def _int8_active(self, key: str) -> tuple[bool, float | None]:
+        """Returns (use_int8, scale) for one source table. True iff the
+        flag is on AND the scale has been populated. Caller branches
+        the SQL on this."""
+        if not self._use_int8:
+            return False, None
+        scale = self._get_int8_scale(key)
+        return (scale is not None), scale
+
+    def _dual_insert_int8(
+        self, cur, key: str, pk: int, embedding: list[float],
+    ) -> None:
+        """Mirror an INSERT into the q8 table when a scale exists. The
+        flag's state is irrelevant for the WRITE path — we always
+        dual-populate so flipping the flag on/off doesn't lose data.
+        Pre-emptive DELETE makes this safe to call after an
+        already-issued INSERT on the float32 source (idempotent
+        upsert)."""
+        scale = self._get_int8_scale(key)
+        if scale is None:
+            return
+        spec = INT8_SPECS_BY_KEY[key]
+        blob = _vec_to_int8_blob(embedding, scale)
+        cur.execute(f"DELETE FROM {spec.dst} WHERE {spec.pk} = ?", (pk,))
+        cur.execute(
+            f"INSERT INTO {spec.dst}({spec.pk}, embedding) "
+            f"VALUES (?, vec_int8(?))",
+            (pk, blob),
+        )
+
+    def _dual_delete_int8(self, cur, key: str, pk: int) -> None:
+        """Mirror a single-row DELETE on the q8 table. No-op when the
+        row isn't in q8 (e.g. pre-migration insert). Always safe —
+        doesn't depend on scale."""
+        spec = INT8_SPECS_BY_KEY[key]
+        cur.execute(f"DELETE FROM {spec.dst} WHERE {spec.pk} = ?", (pk,))
+
+    def _ensure_int8_migrated(self) -> None:
+        """Auto-migrate every `vec_*` source → its `_q8` mirror on
+        startup when the flag is on. Iterates `INT8_SPECS` so adding
+        a new table is a one-line change.
+
+        Per spec: no-op when the scale is already set or when the
+        source table is empty. Synchronous and one-shot. Each table
+        runs in its own transaction so a failure on one doesn't
+        rollback the others.
+        """
+        if not self._use_int8:
+            return
+        for spec in INT8_SPECS:
+            self._migrate_one_int8(spec)
+
+    def _migrate_one_int8(self, spec: _Int8VecSpec) -> None:
+        # Read the scale directly (not through `_get_int8_scale`) so
+        # the "scale missing → fall back" warning doesn't fire on
+        # first startup right before we self-heal it.
+        if self.get_app_setting(spec.scale_key):
+            return
+        with self._cursor() as cur:
+            n_float = cur.execute(
+                f"SELECT COUNT(*) AS c FROM {spec.src}"
+            ).fetchone()["c"]
+        if n_float == 0:
+            return  # Nothing to migrate yet; will retry on next startup.
+
+        logger.warning(
+            "auto-migrating %s float32 %s embeddings to int8 "
+            "(one-time; ~%.0fs estimated)…",
+            f"{n_float:,}", spec.key, max(1.0, n_float / 5000.0),
+        )
+        t0 = time.monotonic()
+        # Pull all float32 vectors. For very large tables this is
+        # ~3 KB/vec * N rows; still tractable in RAM at expected
+        # scales. Streaming would be cleaner but the bench overhead
+        # isn't worth it for one-shot migration.
+        with self._cursor() as cur:
+            rows = cur.execute(
+                f"SELECT {spec.pk} AS pk, embedding FROM {spec.src}"
+            ).fetchall()
+        ids = np.empty(len(rows), dtype=np.int64)
+        vecs = np.empty((len(rows), self.embed_dim), dtype=np.float32)
+        for i, r in enumerate(rows):
+            ids[i] = r["pk"]
+            vecs[i] = np.frombuffer(r["embedding"], dtype=np.float32)
+        # p99.5 scale — same heuristic the bench validated at 0.986
+        # recall@10. Clips ≤0.5% of components in exchange for ~5-10x
+        # finer resolution on the bulk of values.
+        abs_p995 = float(np.quantile(np.abs(vecs), 0.995))
+        scale = abs_p995 / 127.0
+        codes = np.round(vecs / scale).clip(-128, 127).astype(np.int8)
+        with self._cursor() as cur:
+            cur.execute(f"DELETE FROM {spec.dst}")
+            for i in range(len(ids)):
+                cur.execute(
+                    f"INSERT INTO {spec.dst}({spec.pk}, embedding) "
+                    f"VALUES (?, vec_int8(?))",
+                    (int(ids[i]), codes[i].tobytes()),
+                )
+            cur.execute(
+                "INSERT OR REPLACE INTO app_settings(key, value, updated_at) "
+                "VALUES (?, ?, ?)",
+                (spec.scale_key, str(scale), _now_iso()),
+            )
+        # Invalidate caches so subsequent calls see the new scale.
+        self._int8_scales[spec.key] = None
+        self._app_settings_cache_loaded_at = 0.0
+        logger.warning(
+            "auto-migration complete (%s): %d rows quantized in %.1fs, "
+            "scale=%.6f. %s is now ~4x smaller than %s.",
+            spec.key, len(ids), time.monotonic() - t0, scale,
+            spec.dst, spec.src,
+        )
+
     def upsert_message_embedding(
         self, message_id: int, embedding: list[float]
     ) -> None:
@@ -6961,6 +7279,7 @@ class ChatterRepo:
                 "INSERT INTO vec_messages(message_id, embedding) VALUES (?, ?)",
                 (message_id, blob),
             )
+            self._dual_insert_int8(cur, "messages", message_id, embedding)
 
     def find_near_duplicate_flood(
         self,
@@ -7103,12 +7422,31 @@ class ChatterRepo:
         """Semantic search across every embedded message in the channel.
         Returns (Message, distance) pairs sorted nearest-first. Distance is
         the vec0 KNN score (lower = closer match)."""
-        blob = _vec_to_blob(query_embedding)
         ann_k = max(k * 4, 80)
         emote_clause = "AND m.is_emote_only = 0 AND m.spam_score < 0.5" if exclude_emote_only else ""
-        with self._cursor() as cur:
-            cur.execute(
-                f"""
+        # int8 path: bind through `vec_int8(?)` and target the q8 table.
+        # The L2 distances live on a different scale than float32 ones,
+        # but ranking is preserved (per the recall@10 = 0.986 study) so
+        # the nearest-first ordering is the same.
+        use_q8, scale = self._int8_active("messages")
+        if use_q8:
+            blob = _vec_to_int8_blob(query_embedding, scale)
+            sql = f"""
+                SELECT m.id, m.user_id, u.name, u.source, m.ts, m.content,
+                       m.reply_parent_login, m.reply_parent_body,
+                       v.distance AS dist
+                FROM vec_messages_q8 v
+                JOIN messages m ON m.id = v.message_id
+                JOIN users u    ON u.twitch_id = m.user_id
+                WHERE v.embedding MATCH vec_int8(?) AND k = ?
+                  AND u.opt_out = 0
+                  {emote_clause}
+                ORDER BY v.distance
+                LIMIT ?
+                """
+        else:
+            blob = _vec_to_blob(query_embedding)
+            sql = f"""
                 SELECT m.id, m.user_id, u.name, u.source, m.ts, m.content,
                        m.reply_parent_login, m.reply_parent_body,
                        v.distance AS dist
@@ -7120,9 +7458,9 @@ class ChatterRepo:
                   {emote_clause}
                 ORDER BY v.distance
                 LIMIT ?
-                """,
-                (blob, ann_k, k),
-            )
+                """
+        with self._cursor() as cur:
+            cur.execute(sql, (blob, ann_k, k))
             return [
                 (
                     Message(
@@ -7187,14 +7525,26 @@ class ChatterRepo:
     def search_user_messages(
         self, user_id: str, query_embedding: list[float], k: int = 10
     ) -> list[Message]:
-        blob = _vec_to_blob(query_embedding)
         # vec0 KNN requires `k = ?` inside the MATCH clause; we then re-filter to
         # the requested user. Pull a wider window from the index so the per-user
         # filter still has matches when the user has few embedded messages.
         ann_k = max(k * 4, 40)
-        with self._cursor() as cur:
-            cur.execute(
+        use_q8, scale = self._int8_active("messages")
+        if use_q8:
+            blob = _vec_to_int8_blob(query_embedding, scale)
+            sql = """
+                SELECT m.id, m.user_id, u.name, m.ts, m.content, m.reply_parent_login, m.reply_parent_body
+                FROM vec_messages_q8 v
+                JOIN messages m ON m.id = v.message_id
+                JOIN users u    ON u.twitch_id = m.user_id
+                WHERE v.embedding MATCH vec_int8(?) AND k = ?
+                  AND m.user_id = ?
+                ORDER BY v.distance
+                LIMIT ?
                 """
+        else:
+            blob = _vec_to_blob(query_embedding)
+            sql = """
                 SELECT m.id, m.user_id, u.name, m.ts, m.content, m.reply_parent_login, m.reply_parent_body
                 FROM vec_messages v
                 JOIN messages m ON m.id = v.message_id
@@ -7203,9 +7553,9 @@ class ChatterRepo:
                   AND m.user_id = ?
                 ORDER BY v.distance
                 LIMIT ?
-                """,
-                (blob, ann_k, user_id, k),
-            )
+                """
+        with self._cursor() as cur:
+            cur.execute(sql, (blob, ann_k, user_id, k))
             return [
                 Message(
                     id=int(r["id"]),
@@ -7222,11 +7572,22 @@ class ChatterRepo:
     def search_user_notes(
         self, user_id: str, query_embedding: list[float], k: int = 5
     ) -> list[Note]:
-        blob = _vec_to_blob(query_embedding)
         ann_k = max(k * 4, 20)
-        with self._cursor() as cur:
-            cur.execute(
+        use_q8, scale = self._int8_active("notes")
+        if use_q8:
+            blob = _vec_to_int8_blob(query_embedding, scale)
+            sql = """
+                SELECT n.id, n.user_id, n.ts, n.text
+                FROM vec_notes_q8 v
+                JOIN notes n ON n.id = v.note_id
+                WHERE v.embedding MATCH vec_int8(?) AND k = ?
+                  AND n.user_id = ?
+                ORDER BY v.distance
+                LIMIT ?
                 """
+        else:
+            blob = _vec_to_blob(query_embedding)
+            sql = """
                 SELECT n.id, n.user_id, n.ts, n.text
                 FROM vec_notes v
                 JOIN notes n ON n.id = v.note_id
@@ -7234,9 +7595,9 @@ class ChatterRepo:
                   AND n.user_id = ?
                 ORDER BY v.distance
                 LIMIT ?
-                """,
-                (blob, ann_k, user_id, k),
-            )
+                """
+        with self._cursor() as cur:
+            cur.execute(sql, (blob, ann_k, user_id, k))
             return [
                 Note(id=int(r["id"]), user_id=r["user_id"], ts=r["ts"], text=r["text"])
                 for r in cur.fetchall()

@@ -174,7 +174,11 @@ async def run_bot(settings: Settings) -> None:
 
     _write_pid_file()
 
-    repo = ChatterRepo(settings.db_path, embed_dim=settings.ollama_embed_dim)
+    repo = ChatterRepo(
+        settings.db_path,
+        embed_dim=settings.ollama_embed_dim,
+        use_int8_embeddings=settings.use_int8_embeddings,
+    )
     # LLMClientHandle wraps the configured provider (Ollama by default,
     # Claude / OpenAI via `LLM_PROVIDER` setting). Embeddings always go
     # to a local Ollama regardless of provider. The handle stays as a
@@ -373,7 +377,11 @@ def run_dashboard(settings: Settings) -> None:
 
     from .web.app import create_app
 
-    repo = ChatterRepo(settings.db_path, embed_dim=settings.ollama_embed_dim)
+    repo = ChatterRepo(
+        settings.db_path,
+        embed_dim=settings.ollama_embed_dim,
+        use_int8_embeddings=settings.use_int8_embeddings,
+    )
     app = create_app(repo, settings)
     if not settings.dashboard_basic_auth_enabled and settings.dashboard_host not in (
         "127.0.0.1",
@@ -474,7 +482,11 @@ def main() -> None:
         except KeyboardInterrupt:
             pass
     elif mode == "tui":
-        repo = ChatterRepo(settings.db_path, embed_dim=settings.ollama_embed_dim)
+        repo = ChatterRepo(
+            settings.db_path,
+            embed_dim=settings.ollama_embed_dim,
+            use_int8_embeddings=settings.use_int8_embeddings,
+        )
         # Optional LLM client so manual notes added via the TUI can be embedded
         # for RAG. Failures inside the TUI are non-fatal — note still saves.
         from .llm.providers import make_llm_client

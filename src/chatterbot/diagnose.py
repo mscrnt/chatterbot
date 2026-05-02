@@ -581,7 +581,11 @@ def _anonymize_recent_activity(
 
     repo = None
     try:
-        repo = ChatterRepo(str(db_path), embed_dim=settings.ollama_embed_dim)
+        repo = ChatterRepo(
+            str(db_path),
+            embed_dim=settings.ollama_embed_dim,
+            use_int8_embeddings=settings.use_int8_embeddings,
+        )
         # The activity rows have name only — resolve to user_ids via
         # a small alias query so the redactor's user_aliases path can
         # cover renames.
