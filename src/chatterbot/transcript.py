@@ -217,6 +217,97 @@ def _encode_webp(jpeg_bytes: bytes, quality: int) -> bytes | None:
         return None
 
 
+# Always-on (default) hallucination patterns. Caption-track artifacts
+# and credits — phrases that bleed into the model from its training
+# set but real streamer speech never produces. Music / applause tags,
+# captioner credits, foreign-subtitle markers.
+_WHISPER_HALLUCINATION_PATTERNS: tuple[str, ...] = (
+    # Music / applause non-speech caption tags.
+    "[music]",
+    "[music playing]",
+    "[applause]",
+    "♪",
+    # Captioner / translator credits.
+    "captioned by",
+    "captions by",
+    "subtitles by",
+    "transcription by",
+    "translated by",
+    "korean subtitles",
+    "english subtitles",
+)
+# Strict-mode patterns. Outros + CTAs whisper hallucinates from its
+# YouTube training prior, but which streamers ALSO genuinely say.
+# Off by default since rejecting them silently throws away
+# legitimate refines for streamers who DO end with "thanks for
+# watching" / "see you next time" / "subscribe". Streamers whose
+# channel content never produces these phrases (or who notice
+# specific recurring whisper hallucinations of them) can opt in
+# via `whisper_perfect_pass_strict_filter=True`.
+#
+# condition_on_previous_text=True on the perfect pass DOES help
+# whisper resist these — when the previous chunks' text is genuine
+# conversation, the model is biased away from outro phrasing. But
+# it doesn't fully prevent it: silent / mumbled segments still get
+# the YouTube-prior pull. Strict mode is the streamer-side override
+# for channels where these phrases NEVER show up legitimately.
+_WHISPER_HALLUCINATION_STRICT_PATTERNS: tuple[str, ...] = (
+    "thanks for watching",
+    "thank you for watching",
+    "i'll see you in the next video",
+    "see you in the next video",
+    "see you in the next one",
+    "i'll see you next time",
+    "see you next time",
+    "subscribe to my channel",
+    "subscribe to the channel",
+    "don't forget to subscribe",
+    "please subscribe",
+    "like and subscribe",
+    "smash the like button",
+    "smash that like button",
+    "hit that subscribe button",
+)
+
+
+def _looks_like_whisper_hallucination(
+    orig: str, refined: str, *, strict: bool = False,
+) -> bool:
+    """Returns True if `refined` contains a hallucination signature
+    that `orig` doesn't.
+
+    Default (`strict=False`): caption-track artifacts only. "[Music]",
+    "Subtitles by ...", and similar non-speech tags that the model
+    emits from training-set captions. Real speech effectively never
+    produces these, so rejecting them is safe.
+
+    Strict mode (`strict=True`): also rejects YouTube outros / CTAs
+    ("thanks for watching", "subscribe to my channel", "see you in
+    the next video", etc). These are REAL THINGS STREAMERS SAY,
+    so default rejection would throw away legitimate refines —
+    strict mode is opt-in for channels whose content never produces
+    those phrases. condition_on_previous_text=True on the perfect
+    pass already helps whisper resist these mid-stream; strict
+    mode catches the remainder when context is weak (silent /
+    mumbled audio that gives whisper room to pull in the YouTube
+    prior).
+
+    The "not in orig" gate is consistent across both modes: a
+    streamer who already has the phrase in their first-pass text
+    has it for a real reason; the perfect pass repeating it isn't
+    a new hallucination."""
+    o = orig.lower()
+    r = refined.lower()
+    for pat in _WHISPER_HALLUCINATION_PATTERNS:
+        if pat in r and pat not in o:
+            return True
+    if strict:
+        for pat in _WHISPER_HALLUCINATION_STRICT_PATTERNS:
+            if pat in r and pat not in o:
+                return True
+    return False
+
+
 def _persist_audio_clip(
     audio_segment,
     sample_rate: int,
@@ -707,6 +798,45 @@ class TranscriptService:
             except Exception:
                 logger.exception(
                     "transcript perfect-pass: stamp-only update failed",
+                )
+            return
+
+        # Hallucination filter (slice 13). The perfect-pass settings
+        # (bigger beam + best_of + condition_on_previous_text) can
+        # MAKE certain confused chunks WORSE by pulling in higher-
+        # probability YouTube-prior phrases ("I'll see you in the
+        # next video", "Subscribe to my channel", music tags, etc.).
+        # When the refined text introduces one of these hallucination
+        # signatures that wasn't in the original, reject the refine
+        # and stamp v2_at anyway so the queue moves on. Streamers
+        # who genuinely use one of these phrases mid-stream aren't
+        # affected: the "not in orig" gate skips genuine usage.
+        filter_enabled = bool(getattr(
+            self.settings,
+            "whisper_perfect_pass_hallucination_filter", True,
+        ))
+        strict_filter = bool(getattr(
+            self.settings,
+            "whisper_perfect_pass_hallucination_filter_strict", False,
+        ))
+        if filter_enabled and _looks_like_whisper_hallucination(
+            chunk.text, new_text, strict=strict_filter,
+        ):
+            logger.info(
+                "transcript perfect-pass: chunk %d REJECTED as "
+                "hallucination — keeping first-pass text "
+                "(%r vs %r)",
+                chunk.id, chunk.text[:80], new_text[:80],
+            )
+            try:
+                await asyncio.to_thread(
+                    self.repo.update_chunk_text_v2,
+                    chunk.id, chunk.text, new_embedding=None,
+                )
+            except Exception:
+                logger.exception(
+                    "transcript perfect-pass: hallucination-stamp "
+                    "update failed",
                 )
             return
 

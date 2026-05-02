@@ -19,7 +19,10 @@ import pytest
 np = pytest.importorskip("numpy")
 
 from chatterbot.repo import ChatterRepo
-from chatterbot.transcript import _persist_audio_clip
+from chatterbot.transcript import (
+    _looks_like_whisper_hallucination,
+    _persist_audio_clip,
+)
 
 
 # ---- schema migration ----
@@ -231,6 +234,95 @@ def test_persist_audio_clip_dedups_identical(tmp_path: Path):
     # And only ONE file exists under audio_clips/
     files = list((tmp_path / "audio_clips").rglob("*.wav"))
     assert len(files) == 1
+
+
+# ---- _looks_like_whisper_hallucination (slice 13) ----
+#
+# The filter is INTENTIONALLY conservative — it only rejects refines
+# that introduce caption-track artifacts that real streamer speech
+# never produces. Outros and CTAs that streamers genuinely say
+# ("thanks for watching", "subscribe", "bye bye") are NOT filtered;
+# rejecting them would silently throw away legitimate refines.
+
+@pytest.mark.parametrize("orig,refined,expected", [
+    # Caption-track artifacts — refine is rejected.
+    (
+        "the next round is starting",
+        "Subtitles by the Amara.org community",
+        True,
+    ),
+    (
+        "you can hear the song faintly",
+        "[Music]",
+        True,
+    ),
+    (
+        "the audio is muffled here",
+        "[Applause]",
+        True,
+    ),
+    (
+        "nothing important",
+        "Captions by ChannelOne",
+        True,
+    ),
+    (
+        "we're moving on",
+        "Korean subtitles",
+        True,
+    ),
+    # Streamer-legit outros / CTAs — NOT filtered. These are real
+    # speech a streamer can say.
+    (
+        "alright that's the stream",
+        "Thanks for watching everybody!",
+        False,
+    ),
+    (
+        "alright let's keep going",
+        "Subscribe to my channel for more!",
+        False,
+    ),
+    (
+        "I'll see what you mean",
+        "I'll see you in the next video. Bye bye.",
+        False,
+    ),
+    (
+        "alright that's it",
+        "see you next time, bye!",
+        False,
+    ),
+    # Single-word refines — NOT filtered. "you", "bye", "thank you"
+    # are all real speech; rejecting them throws away legit short
+    # utterances.
+    ("a longer thought here", "Bye.", False),
+    ("a longer thought here", "you", False),
+    ("a longer thought here", "thank you", False),
+    # Caption-track artifact already in the original — refine
+    # repeating it isn't a NEW hallucination, allowed through.
+    (
+        "[Music] playing in the background",
+        "[Music] continues throughout",
+        False,
+    ),
+    # Genuine refine with no hallucination signature — allowed.
+    (
+        "purry deployed",
+        "Pulse deployed",
+        False,
+    ),
+    # Same text on both sides — allowed (passthrough refine).
+    ("nothing to refine here", "nothing to refine here", False),
+    # Case-insensitivity sanity on the artifacts that DO trigger.
+    (
+        "alright let's keep going",
+        "[MUSIC PLAYING]",
+        True,
+    ),
+])
+def test_hallucination_filter(orig: str, refined: str, expected: bool):
+    assert _looks_like_whisper_hallucination(orig, refined) is expected
 
 
 def test_persist_audio_clip_path_layout(tmp_path: Path):

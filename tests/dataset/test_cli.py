@@ -24,10 +24,15 @@ from chatterbot.dataset import capture, cipher, cli
 
 class _FakeSettings:
     """Minimum surface the CLI commands read off `settings`. The real
-    Settings has a hundred fields; this one has the two."""
+    Settings has a hundred fields; this one has just the ones the
+    dataset CLI actually reads."""
     def __init__(self, db_path: str):
         self.db_path = db_path
         self.ollama_embed_dim = 768
+        # ChatterRepo() reads this when present (added to Settings
+        # for an int8-embedding experiment); default False keeps
+        # the fake aligned with the production default.
+        self.use_int8_embeddings = False
 
 
 @pytest.fixture

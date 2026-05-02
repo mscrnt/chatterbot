@@ -503,6 +503,20 @@ FIELDS: dict[str, dict[str, Any]] = {
         "suffix": "seconds",
         "depends_on": ("whisper_perfect_pass_enabled", True),
     },
+    "whisper_perfect_pass_hallucination_filter": {
+        "label": "Filter caption-track artifacts",
+        "tooltip": "Reject refined text that introduces non-speech caption tags or credits.",
+        "help": "Whisper sometimes emits caption-track artifacts like \"[Music]\", \"Subtitles by the Amara.org community\", or \"Korean subtitles\" on silent / mumbled audio — these come from the model's training set, not from real speech. When on, the perfect-pass output is checked against a small block-list of these artifacts; if the refine introduces one that wasn't in the first-pass text, the refine is rejected and the first-pass text is kept. Genuine streamer speech (outros, CTAs, \"thanks for watching\", \"subscribe\", \"bye\") is NOT filtered. Default on.",
+        "type": "bool",
+        "depends_on": ("whisper_perfect_pass_enabled", True),
+    },
+    "whisper_perfect_pass_hallucination_filter_strict": {
+        "label": "Also filter YouTube outros / CTAs",
+        "tooltip": "Strict mode: reject outros + CTAs the model hallucinates (also rejects them when you say them legitimately).",
+        "help": "Strict mode adds YouTube outros and CTAs (\"thanks for watching\", \"subscribe to my channel\", \"see you in the next video\", \"like and subscribe\") to the filter. Off by default because real streamers say these legitimately and rejecting them silently throws away genuine refines. Opt in if your channel never produces those phrases (e.g. competitive / esports content where stream outros are silent or game-only). condition_on_previous_text=True on the perfect pass already helps mid-stream context resist these; strict mode catches the remainder when context is weak (silent / mumbled audio that gives whisper room to pull in the YouTube prior).",
+        "type": "bool",
+        "depends_on": ("whisper_perfect_pass_hallucination_filter", True),
+    },
     "screenshot_phash_distance": {
         "label": "Scene-change dedup strictness",
         "tooltip": "Hamming-distance cut for adjacent-frame dedup at stitch time.",
@@ -1028,6 +1042,7 @@ SECTIONS: list[dict[str, Any]] = [
                     "whisper_perfect_pass_best_of",
                     "whisper_perfect_pass_confidence_threshold",
                     "whisper_perfect_pass_interval_seconds",
+                    "whisper_perfect_pass_hallucination_filter",
                 ],
             },
             {

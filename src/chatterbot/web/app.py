@@ -1831,6 +1831,12 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             class _S:  # cmd_export reads .db_path / .ollama_embed_dim
                 db_path = repo.db_path
                 ollama_embed_dim = settings.ollama_embed_dim
+                # Pulled from the live Settings to keep cmd_export's
+                # ChatterRepo() construction in sync with whatever
+                # int8-embedding mode the dashboard is running in.
+                use_int8_embeddings = getattr(
+                    settings, "use_int8_embeddings", False,
+                )
 
             # cmd_export prompts for the passphrase via getpass —
             # patch it for this single invocation. The patch is

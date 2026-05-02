@@ -97,6 +97,8 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "whisper_perfect_pass_best_of",
     "whisper_perfect_pass_confidence_threshold",
     "whisper_perfect_pass_interval_seconds",
+    "whisper_perfect_pass_hallucination_filter",
+    "whisper_perfect_pass_hallucination_filter_strict",
     "audio_clip_storage_enabled",
     "audio_clip_retention_hours",
     # ---------- LLM provider switch ----------
@@ -454,6 +456,25 @@ class Settings(BaseSettings):
     # processes one chunk per tick + sleeps between, so this is
     # effectively "minimum seconds between perfect-pass GPU bursts."
     whisper_perfect_pass_interval_seconds: int = 5
+    # Filter perfect-pass output against a list of canonical whisper
+    # hallucinations ("I'll see you in the next video", "Thanks for
+    # watching", "[Music]", etc.). When the refined text introduces
+    # one of these phrases that wasn't in the first-pass text,
+    # the refine is rejected and the first-pass text is kept.
+    # Default on. Disable if your channel content genuinely uses
+    # those phrases (e.g. you DO end streams with "see you next
+    # time" and the filter is rejecting your refines).
+    whisper_perfect_pass_hallucination_filter: bool = True
+    # Strict mode adds outros / CTAs ("thanks for watching",
+    # "subscribe to my channel", "see you in the next video") to the
+    # filter. Off by default because real streamers say these
+    # legitimately and rejecting them throws away genuine refines.
+    # Opt in if your channel never produces those phrases (e.g.
+    # competitive / esports content where stream outros are silent).
+    # condition_on_previous_text=True on the perfect pass already
+    # helps mid-stream context resist these; strict mode is the
+    # streamer-side override for the remainder.
+    whisper_perfect_pass_hallucination_filter_strict: bool = False
 
     # Audio-clip storage (slice 12) — persists the WAV bytes for each
     # captured chunk so the perfect-pass loop can re-transcribe and
@@ -699,6 +720,8 @@ def _coerce(key: str, value: str) -> Any:
         "whisper_enabled", "whisper_llm_match_enabled",
         "whisper_initial_prompt_enabled",
         "whisper_perfect_pass_enabled",
+        "whisper_perfect_pass_hallucination_filter",
+        "whisper_perfect_pass_hallucination_filter_strict",
         "audio_clip_storage_enabled",
     ):
         return value.strip().lower() in ("true", "1", "yes", "on")
