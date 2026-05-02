@@ -1118,15 +1118,51 @@ class TranscriptService:
             )
 
         # Screenshot grid for the chunk's window — same stitcher the
-        # group summary uses, ~960x540 with up to 4 evenly-spaced
-        # frames + scene-change dedup.
+        # group summary uses, ~960x540 with up to 4-6 evenly-spaced
+        # frames + scene-change dedup. Window is ±15s around the
+        # chunk's ts (matches the chat-window padding above) so the
+        # judge sees what was on screen at the moment the audio was
+        # captured. Falls back to no-screenshots when:
+        #   - screenshots_in_range returns nothing (capture disabled
+        #     or no shots in the window)
+        #   - stitch fails (Pillow missing, file IO error)
+        # Judge still runs with just text context.
         grid_b64: str | None = None
         try:
-            grid_b64 = await self._latest_screenshot_grid(window_minutes=2)
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+            chunk_dt2 = _dt.fromisoformat(chunk.ts.replace("Z", "+00:00"))
+            if chunk_dt2.tzinfo is None:
+                chunk_dt2 = chunk_dt2.replace(tzinfo=_tz.utc)
+            win_start = (chunk_dt2 - _td(seconds=15)).isoformat(timespec="seconds")
+            win_end = (chunk_dt2 + _td(seconds=15)).isoformat(timespec="seconds")
+            shots = await asyncio.to_thread(
+                self.repo.screenshots_in_range,
+                win_start, win_end,
+                max_count=int(getattr(self.settings, "screenshot_grid_max", 4)),
+            )
         except Exception:
             logger.exception(
-                "transcript refine-judge: screenshot grid failed",
+                "transcript refine-judge: screenshots_in_range failed",
             )
+            shots = []
+        if shots:
+            try:
+                from pathlib import Path as _Path
+                data_dir = _Path(self.settings.db_path).parent
+                abs_paths = [str(data_dir / s.path) for s in shots]
+                phash_dist = int(getattr(
+                    self.settings, "screenshot_phash_distance", 6,
+                ))
+                grid_bytes = await asyncio.to_thread(
+                    _stitch_grid, abs_paths, phash_distance=phash_dist,
+                )
+                if grid_bytes:
+                    import base64 as _b64
+                    grid_b64 = _b64.b64encode(grid_bytes).decode("ascii")
+            except Exception:
+                logger.exception(
+                    "transcript refine-judge: stitch_grid failed",
+                )
 
         # Channel context (KNOWN GAME, streamer name).
         channel_context = self._build_channel_context()
