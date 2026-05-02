@@ -99,6 +99,7 @@ EDITABLE_SETTING_KEYS: tuple[str, ...] = (
     "whisper_perfect_pass_interval_seconds",
     "whisper_perfect_pass_hallucination_filter",
     "whisper_perfect_pass_hallucination_filter_strict",
+    "whisper_perfect_pass_grace_seconds",
     "audio_clip_storage_enabled",
     "audio_clip_retention_hours",
     # ---------- LLM provider switch ----------
@@ -475,6 +476,16 @@ class Settings(BaseSettings):
     # helps mid-stream context resist these; strict mode is the
     # streamer-side override for the remainder.
     whisper_perfect_pass_hallucination_filter_strict: bool = False
+    # Group summaries read transcript_chunks.text directly; if the
+    # summary fires before the perfect pass has refined the window's
+    # chunks, the LLM sees first-pass text (potentially with whisper
+    # hallucinations the perfect pass would have caught). This grace
+    # period defers the summary until refine-eligible chunks in the
+    # window are either refined OR the youngest chunk in the window
+    # is older than `grace` seconds (cap so a perfect-pass crash
+    # can't block summaries forever). 0 disables the gate. 240s
+    # default ≈ a comfortable margin over the observed ~170s lag.
+    whisper_perfect_pass_grace_seconds: int = 240
 
     # Audio-clip storage (slice 12) — persists the WAV bytes for each
     # captured chunk so the perfect-pass loop can re-transcribe and
@@ -669,6 +680,7 @@ def _coerce(key: str, value: str) -> Any:
         "whisper_perfect_pass_beam_size",
         "whisper_perfect_pass_best_of",
         "whisper_perfect_pass_interval_seconds",
+        "whisper_perfect_pass_grace_seconds",
         "audio_clip_retention_hours",
     ):
         try:
@@ -711,6 +723,7 @@ def _coerce(key: str, value: str) -> Any:
                 "whisper_perfect_pass_beam_size": 5,
                 "whisper_perfect_pass_best_of": 5,
                 "whisper_perfect_pass_interval_seconds": 5,
+                "whisper_perfect_pass_grace_seconds": 240,
                 "audio_clip_retention_hours": 0,
             }[key]
     if key in (

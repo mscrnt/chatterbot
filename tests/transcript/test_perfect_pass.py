@@ -22,6 +22,7 @@ from chatterbot.repo import ChatterRepo
 from chatterbot.transcript import (
     _looks_like_whisper_hallucination,
     _persist_audio_clip,
+    _should_defer_group_summary,
 )
 
 
@@ -323,6 +324,185 @@ def test_persist_audio_clip_dedups_identical(tmp_path: Path):
 ])
 def test_hallucination_filter(orig: str, refined: str, expected: bool):
     assert _looks_like_whisper_hallucination(orig, refined) is expected
+
+
+# ---- _should_defer_group_summary (slice 15) ----
+#
+# The gate's job: hold off the group-summary LLM call until the
+# perfect-pass loop has had a chance to refine chunks in the
+# window. The grace cap prevents indefinite blocking when refines
+# never arrive (loop crash, GPU starved, etc).
+
+class _StubChunk:
+    """Minimal duck-typed chunk for the deferral helper. Real
+    TranscriptChunk has more fields; the helper only reads three."""
+    def __init__(self, ts: str, audio_path=None, avg_logprob=None,
+                 transcribed_v2_at=None):
+        self.ts = ts
+        self.audio_path = audio_path
+        self.avg_logprob = avg_logprob
+        self.transcribed_v2_at = transcribed_v2_at
+
+
+def _now_iso(offset_seconds: float = 0.0) -> str:
+    """ISO-format timestamp `offset_seconds` away from now (negative
+    = past). Matches the format `transcript_chunks.ts` uses."""
+    from datetime import datetime, timedelta, timezone
+    dt = datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)
+    return dt.isoformat(timespec="seconds")
+
+
+def test_defer_when_pending_and_window_fresh():
+    """Recent unrefined chunk with low confidence + audio = defer."""
+    chunks = [
+        _StubChunk(
+            ts=_now_iso(-30),  # 30s old
+            audio_path="audio_clips/aa/bb/x.wav",
+            avg_logprob=-1.0,
+            transcribed_v2_at=None,
+        ),
+    ]
+    defer, count, _age = _should_defer_group_summary(
+        chunks, grace_seconds=240, confidence_threshold=-0.5,
+    )
+    assert defer is True
+    assert count == 1
+
+
+def test_no_defer_when_window_older_than_grace():
+    """Window crosses grace cap → fire even with pending chunks. The
+    perfect-pass loop has clearly had its time; one straggler
+    shouldn't block summaries forever."""
+    chunks = [
+        _StubChunk(
+            ts=_now_iso(-300),  # 5 min old
+            audio_path="audio_clips/aa/bb/x.wav",
+            avg_logprob=-1.0,
+            transcribed_v2_at=None,
+        ),
+    ]
+    defer, _count, _age = _should_defer_group_summary(
+        chunks, grace_seconds=240, confidence_threshold=-0.5,
+    )
+    assert defer is False
+
+
+def test_no_defer_when_all_refined():
+    """Every refine-eligible chunk has been refined → fire now."""
+    chunks = [
+        _StubChunk(
+            ts=_now_iso(-30),
+            audio_path="audio_clips/aa/bb/x.wav",
+            avg_logprob=-1.0,
+            transcribed_v2_at=_now_iso(-10),
+        ),
+    ]
+    defer, count, _age = _should_defer_group_summary(
+        chunks, grace_seconds=240, confidence_threshold=-0.5,
+    )
+    assert defer is False
+    assert count == 0
+
+
+def test_no_defer_for_high_confidence_chunks():
+    """Chunks with avg_logprob >= threshold never enter the perfect-
+    pass queue, so waiting for them would wait forever. The gate
+    must not block on high-confidence chunks even when they have
+    audio + no v2 stamp."""
+    chunks = [
+        _StubChunk(
+            ts=_now_iso(-30),
+            audio_path="audio_clips/aa/bb/x.wav",
+            avg_logprob=-0.1,  # well above -0.5 threshold
+            transcribed_v2_at=None,
+        ),
+    ]
+    defer, _count, _age = _should_defer_group_summary(
+        chunks, grace_seconds=240, confidence_threshold=-0.5,
+    )
+    assert defer is False
+
+
+def test_defer_for_null_logprob():
+    """NULL avg_logprob (legacy chunks or whisper didn't return
+    one) IS refine-eligible — `chunks_pending_perfect_pass` queues
+    them. The gate must reflect the same behavior."""
+    chunks = [
+        _StubChunk(
+            ts=_now_iso(-30),
+            audio_path="audio_clips/aa/bb/x.wav",
+            avg_logprob=None,
+            transcribed_v2_at=None,
+        ),
+    ]
+    defer, count, _age = _should_defer_group_summary(
+        chunks, grace_seconds=240, confidence_threshold=-0.5,
+    )
+    assert defer is True
+    assert count == 1
+
+
+def test_no_defer_when_grace_zero():
+    """grace_seconds=0 disables the gate — opt-out."""
+    chunks = [
+        _StubChunk(
+            ts=_now_iso(-1),  # 1s old, very fresh
+            audio_path="audio_clips/aa/bb/x.wav",
+            avg_logprob=-1.0,
+            transcribed_v2_at=None,
+        ),
+    ]
+    defer, _count, _age = _should_defer_group_summary(
+        chunks, grace_seconds=0, confidence_threshold=-0.5,
+    )
+    assert defer is False
+
+
+def test_no_defer_for_chunks_without_audio():
+    """A chunk without audio_path can't be refined no matter how
+    long we wait. Pre-slice-12 chunks AND post-slice-12 chunks
+    captured with audio storage off both fall in this bucket; the
+    gate must not block on them."""
+    chunks = [
+        _StubChunk(
+            ts=_now_iso(-30),
+            audio_path=None,
+            avg_logprob=-1.0,
+            transcribed_v2_at=None,
+        ),
+    ]
+    defer, _count, _age = _should_defer_group_summary(
+        chunks, grace_seconds=240, confidence_threshold=-0.5,
+    )
+    assert defer is False
+
+
+def test_no_defer_on_empty_chunks():
+    """Empty input — nothing to defer."""
+    defer, count, age = _should_defer_group_summary(
+        [], grace_seconds=240, confidence_threshold=-0.5,
+    )
+    assert defer is False
+    assert count == 0
+    assert age == 0.0
+
+
+def test_no_defer_on_malformed_timestamp():
+    """If the youngest chunk's timestamp won't parse, the gate
+    treats the window as old enough to fire (fail-open) rather than
+    blocking on bad data."""
+    chunks = [
+        _StubChunk(
+            ts="not-an-iso-timestamp",
+            audio_path="audio_clips/aa/bb/x.wav",
+            avg_logprob=-1.0,
+            transcribed_v2_at=None,
+        ),
+    ]
+    defer, _count, _age = _should_defer_group_summary(
+        chunks, grace_seconds=240, confidence_threshold=-0.5,
+    )
+    assert defer is False
 
 
 def test_persist_audio_clip_path_layout(tmp_path: Path):

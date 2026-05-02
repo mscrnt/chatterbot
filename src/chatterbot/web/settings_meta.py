@@ -517,6 +517,15 @@ FIELDS: dict[str, dict[str, Any]] = {
         "type": "bool",
         "depends_on": ("whisper_perfect_pass_hallucination_filter", True),
     },
+    "whisper_perfect_pass_grace_seconds": {
+        "label": "Defer group summaries until refines catch up",
+        "tooltip": "Wait up to N seconds before summarising a window so refines complete first.",
+        "help": "Group summaries fire on a window of recent transcripts every ~60s, but the perfect pass takes ~3 minutes to refine each chunk — so the summary's first run sees first-pass (potentially hallucinated) text, and the row never re-runs. This grace period defers the summary until either every refine-eligible chunk in the window is refined, OR the youngest chunk is older than the grace (cap so a perfect-pass crash can't block summaries forever). 0 disables the gate. Default 240s ≈ a margin over typical refine lag.",
+        "type": "number",
+        "min": 0, "max": 1800, "step": 5,
+        "suffix": "seconds (0 = no wait)",
+        "depends_on": ("whisper_perfect_pass_enabled", True),
+    },
     "screenshot_phash_distance": {
         "label": "Scene-change dedup strictness",
         "tooltip": "Hamming-distance cut for adjacent-frame dedup at stitch time.",
@@ -1042,6 +1051,7 @@ SECTIONS: list[dict[str, Any]] = [
                     "whisper_perfect_pass_best_of",
                     "whisper_perfect_pass_confidence_threshold",
                     "whisper_perfect_pass_interval_seconds",
+                    "whisper_perfect_pass_grace_seconds",
                     "whisper_perfect_pass_hallucination_filter",
                 ],
             },

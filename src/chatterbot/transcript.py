@@ -308,6 +308,63 @@ def _looks_like_whisper_hallucination(
     return False
 
 
+def _should_defer_group_summary(
+    chunks: list,
+    *,
+    grace_seconds: int,
+    confidence_threshold: float,
+) -> tuple[bool, int, float]:
+    """Decide whether `_run_group_summary` should defer this window
+    so perfect-pass refines have time to catch up. Returns
+    `(defer, pending_count, age_seconds)` so the caller can log the
+    decision for diagnostics.
+
+    Defer when ALL of:
+      - grace_seconds > 0 (gate active);
+      - at least one chunk in the window has audio + isn't refined +
+        is refine-eligible (NULL or below-threshold confidence);
+      - the youngest chunk in the window is younger than
+        grace_seconds (we haven't blown the grace cap yet).
+
+    The grace cap matters: if the perfect-pass loop crashed or the
+    GPU is starved, we still want summaries eventually rather than
+    blocking forever. Once the youngest chunk crosses the grace,
+    the gate gives up and the summary fires on whatever text is
+    available.
+
+    The "refine-eligible" check matters too: high-confidence chunks
+    with audio_path set never enter the perfect-pass queue, so
+    waiting for them is waiting for nothing.
+
+    Pure function — no DB / clock / settings access — so tests can
+    feed crafted chunk lists at arbitrary ages."""
+    if grace_seconds <= 0 or not chunks:
+        return False, 0, 0.0
+    pending = [
+        c for c in chunks
+        if getattr(c, "audio_path", None) is not None
+        and getattr(c, "transcribed_v2_at", None) is None
+        and (
+            getattr(c, "avg_logprob", None) is None
+            or getattr(c, "avg_logprob") < confidence_threshold
+        )
+    ]
+    if not pending:
+        return False, 0, 0.0
+    from datetime import datetime, timezone
+    try:
+        latest_ts = chunks[-1].ts.replace("Z", "+00:00")
+        latest_dt = datetime.fromisoformat(latest_ts)
+        if latest_dt.tzinfo is None:
+            latest_dt = latest_dt.replace(tzinfo=timezone.utc)
+        age_s = (datetime.now(timezone.utc) - latest_dt).total_seconds()
+    except Exception:
+        # Bad timestamp — be safe; treat as old enough so we don't
+        # block forever on a malformed row.
+        return False, len(pending), float(grace_seconds + 1)
+    return age_s < grace_seconds, len(pending), age_s
+
+
 def _persist_audio_clip(
     audio_segment,
     sample_rate: int,
@@ -2435,6 +2492,46 @@ Reply with `summary` = the line(s) (or empty string).
             )):
                 return 0
             return await self._run_chat_only_group_summary()
+
+        # Slice 15 — defer the summary while the perfect-pass loop
+        # still has refine-eligible chunks in this window. The
+        # summary reads `transcript_chunks.text` directly; firing
+        # now would mean the LLM sees first-pass text (potentially
+        # with whisper hallucinations), and the resulting summary
+        # row never re-runs when refines complete later.
+        #
+        # Gate is bypassed when perfect pass is disabled / audio
+        # storage is off — there's no refine to wait for. Decision
+        # logic lives in `_should_defer_group_summary` so it's
+        # testable as a pure function.
+        if (
+            bool(getattr(
+                self.settings, "whisper_perfect_pass_enabled", True,
+            ))
+            and bool(getattr(
+                self.settings, "audio_clip_storage_enabled", True,
+            ))
+        ):
+            grace = max(0, int(getattr(
+                self.settings, "whisper_perfect_pass_grace_seconds", 240,
+            )))
+            threshold = float(getattr(
+                self.settings,
+                "whisper_perfect_pass_confidence_threshold", -0.5,
+            ))
+            defer, pending_count, age_s = _should_defer_group_summary(
+                chunks,
+                grace_seconds=grace,
+                confidence_threshold=threshold,
+            )
+            if defer:
+                logger.debug(
+                    "transcript group summary: deferring — %d "
+                    "chunks awaiting perfect-pass (window age "
+                    "%.0fs < grace %ds)",
+                    pending_count, age_s, grace,
+                )
+                return 0
 
         bundle = await self.build_group_summary_prompt(chunks)
         prompt = bundle["user_prompt"]
