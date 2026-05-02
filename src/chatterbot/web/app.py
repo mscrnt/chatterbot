@@ -335,6 +335,18 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         _bg_tasks.add(
             asyncio.create_task(insights.refresh_loop(), name="insights_refresh")
         )
+        # Engagement-aggregates refresher — keeps the regulars / lapsed /
+        # neglected-lurkers / mpm pulse / etc. lookups warm so /insights
+        # renders out of memory instead of firing ~25 sequential SQLite
+        # queries per page hit. Pre-this-loop, /insights took 5+ seconds
+        # under live-bot write contention because each repo call
+        # blocked the event loop in series.
+        _bg_tasks.add(
+            asyncio.create_task(
+                insights.engagement_aggregates_loop(),
+                name="engagement_aggregates_loop",
+            )
+        )
         # Optional OBS poller; no-op when OBS_ENABLED=false.
         _bg_tasks.add(
             asyncio.create_task(obs_status.poll_loop(), name="obs_poll")
@@ -2839,22 +2851,156 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
         ).hexdigest()[:16]
         return f"{tp.user_id}:{h}"
 
-    def _build_engagement_ctx(window: str) -> dict:
+    async def _build_engagement_ctx(window: str) -> dict:
+        """Assemble the engagement-view context dict.
+
+        Reads from `insights.engagement_aggregates_cache` when warm
+        and serving the default window — that case skips ~25 DB
+        round-trips entirely. Otherwise (cold cache, or a streamer
+        flipped the dropdown to a non-default window) falls back to
+        a one-shot parallel `gather` of all the same lookups via
+        `asyncio.to_thread`. Either path frees the event loop —
+        which used to block for 5+ seconds under live-bot write
+        contention because the original code ran every query
+        sequentially on the asyncio thread."""
         import time as _t
         if window not in _INSIGHT_WINDOW_LOOKUP:
             window = "7d"
         modifier, label = _INSIGHT_WINDOW_LOOKUP[window]
         cache = insights.cache
-        regulars = repo.list_regulars(since=modifier, limit=10)
-        lapsed = repo.list_lapsed_regulars(
-            active_since=modifier, lapsed_for="-7 days", limit=10
+
+        agg = insights.engagement_aggregates_cache
+        cache_hit = (
+            agg.refreshed_at is not None and agg.window == window
         )
-        newcomers = repo.list_first_timers_today(limit=20)
-        try:
-            anniversaries = repo.users_with_anniversary_today()
-        except Exception:
-            logger.exception("insights: anniversaries lookup failed")
-            anniversaries = []
+        if cache_hit:
+            regulars = agg.regulars
+            lapsed = agg.lapsed
+            newcomers = agg.newcomers
+            anniversaries = agg.anniversaries
+            pulse = agg.pulse
+            direct_mentions = agg.direct_mentions
+            starred_active = agg.starred_active
+            neglected_lurkers = agg.neglected_lurkers
+            transcript_chunks = agg.transcript_chunks
+            transcript_groups = agg.transcript_groups
+            recent_matches = agg.recent_matches
+            live_threads = agg.live_threads
+            high_impact_subjects = agg.high_impact_subjects
+            quiet_cohorts = agg.quiet_cohorts
+            latest_recap = agg.latest_recap
+            recent_recaps = agg.recent_recaps
+            states = agg.insight_states
+        else:
+            # Cold cache or non-default window. Run every lookup in
+            # parallel via to_thread so the event loop stays
+            # responsive while we wait. Same call set + same
+            # arguments as `_refresh_engagement_aggregates` —
+            # mirroring two implementations is a tradeoff against
+            # the alternative of always going through the cache
+            # (which would mean keeping six per-window caches warm
+            # for windows the streamer rarely visits).
+            kinds = insights._ENGAGEMENT_INSIGHT_KINDS
+            results = await asyncio.gather(
+                asyncio.to_thread(repo.list_regulars, since=modifier, limit=10),
+                asyncio.to_thread(
+                    repo.list_lapsed_regulars,
+                    active_since=modifier, lapsed_for="-7 days", limit=10,
+                ),
+                asyncio.to_thread(repo.list_first_timers_today, limit=20),
+                asyncio.to_thread(repo.users_with_anniversary_today),
+                asyncio.to_thread(repo.messages_per_minute, 60),
+                asyncio.to_thread(repo.recent_direct_mentions, limit=30),
+                asyncio.to_thread(
+                    repo.list_starred_active,
+                    within_minutes=30, limit=12,
+                ),
+                asyncio.to_thread(
+                    repo.list_neglected_lurkers,
+                    active_within_minutes=30,
+                    neglected_for_days=7,
+                    limit=30,
+                ),
+                asyncio.to_thread(repo.list_transcript_chunks, limit=15),
+                asyncio.to_thread(repo.list_transcript_groups, limit=15),
+                asyncio.to_thread(
+                    repo.list_recent_transcript_matches,
+                    limit=15, window_minutes=60,
+                ),
+                asyncio.to_thread(
+                    repo.list_threads,
+                    status_filter="active", query="", limit=12,
+                ),
+                asyncio.to_thread(
+                    repo.list_high_impact_subjects,
+                    active_within_minutes=int(getattr(
+                        settings, "high_impact_active_within_minutes", 30,
+                    )),
+                    lookback_days=int(getattr(
+                        settings, "high_impact_lookback_days", 14,
+                    )),
+                    min_overlap=int(getattr(
+                        settings, "high_impact_min_overlap", 2,
+                    )),
+                    limit=int(getattr(settings, "high_impact_limit", 6)),
+                ),
+                asyncio.to_thread(
+                    repo.list_quiet_thread_cohorts,
+                    silence_minutes=int(getattr(
+                        settings, "quiet_cohort_silence_minutes", 15,
+                    )),
+                    lookback_hours=int(getattr(
+                        settings, "quiet_cohort_lookback_hours", 24,
+                    )),
+                    min_drivers=int(getattr(
+                        settings, "quiet_cohort_min_drivers", 2,
+                    )),
+                    limit=int(getattr(settings, "quiet_cohort_limit", 6)),
+                ),
+                asyncio.to_thread(repo.list_stream_recaps, limit=5),
+                *[
+                    asyncio.to_thread(repo.get_insight_states, k)
+                    for k in kinds
+                ],
+                return_exceptions=True,
+            )
+            # Unpack with per-call exception handling — one slow /
+            # malformed query shouldn't sink the page. Mirrors the
+            # try/except the original sequential path had around
+            # `users_with_anniversary_today`.
+            def _ok(v, fallback):
+                if isinstance(v, BaseException):
+                    logger.exception(
+                        "insights cold-fallback: lookup failed",
+                        exc_info=v,
+                    )
+                    return fallback
+                return v
+            (regulars, lapsed, newcomers, anniversaries, pulse,
+             direct_mentions, starred_active, neglected_lurkers,
+             transcript_chunks, transcript_groups, recent_matches,
+             live_threads, high_impact_subjects, quiet_cohorts,
+             recent_recaps, *state_results) = results
+            regulars = _ok(regulars, [])
+            lapsed = _ok(lapsed, [])
+            newcomers = _ok(newcomers, [])
+            anniversaries = _ok(anniversaries, [])
+            pulse = _ok(pulse, None)
+            direct_mentions = _ok(direct_mentions, [])
+            starred_active = _ok(starred_active, [])
+            neglected_lurkers = _ok(neglected_lurkers, [])
+            transcript_chunks = _ok(transcript_chunks, [])
+            transcript_groups = _ok(transcript_groups, [])
+            recent_matches = _ok(recent_matches, [])
+            live_threads = _ok(live_threads, [])
+            high_impact_subjects = _ok(high_impact_subjects, [])
+            quiet_cohorts = _ok(quiet_cohorts, [])
+            recent_recaps = _ok(recent_recaps, [])
+            latest_recap = recent_recaps[0] if recent_recaps else None
+            states = {
+                k: _ok(v, {}) for k, v in zip(kinds, state_results)
+            }
+
         age = (
             int(_t.time() - cache.refreshed_at)
             if cache.refreshed_at is not None
@@ -2880,120 +3026,43 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
             "window": window,
             "window_label": label,
             "window_options": _INSIGHT_WINDOWS,
-            # Per-card state, keyed for each section.
-            "tp_states": repo.get_insight_states("talking_point"),
-            "anniv_states": repo.get_insight_states("anniversary"),
-            "newc_states": repo.get_insight_states("newcomer"),
-            "reg_states": repo.get_insight_states("regular"),
-            "lapsed_states": repo.get_insight_states("lapsed"),
-            # Per-row dismissal for the "Talking to you" + "Active but
-            # not engaged" panels. Keyed by user_id so snoozing once
-            # hides every entry from that chatter for the window.
-            "dm_states": repo.get_insight_states("direct_mention"),
-            "nl_states": repo.get_insight_states("neglected_lurker"),
-            # Activity pulse for the sparkline at the top.
-            "pulse": repo.messages_per_minute(60),
-            # Direct mentions (recent questions / @-style addresses).
-            # Pull a wider candidate list than we display by default —
-            # the template reveals 8, surfaces "show N more" so the
-            # streamer can audit the full queue without an extra round
-            # trip.
-            "direct_mentions": repo.recent_direct_mentions(limit=30),
+            "tp_states": states.get("talking_point", {}),
+            "anniv_states": states.get("anniversary", {}),
+            "newc_states": states.get("newcomer", {}),
+            "reg_states": states.get("regular", {}),
+            "lapsed_states": states.get("lapsed", {}),
+            "dm_states": states.get("direct_mention", {}),
+            "nl_states": states.get("neglected_lurker", {}),
+            "pulse": pulse,
+            "direct_mentions": direct_mentions,
             # General chat questions — LLM-curated OPEN questions
-            # only. The heuristic `recent_questions` pass clusters
-            # `?`-bearing chat by token overlap and excludes @-
-            # mentions / Twitch reply rows; the background
-            # `open_questions_loop` then runs that pool through the
-            # LLM with full chat + streamer-voice context to drop
-            # already-answered, rhetorical, or directed-at-another-
-            # chatter asks. The cache exposes the same dict shape
-            # the template was reading (question / count / drivers /
-            # latest_ts / last_msg_id), so no template change needed.
+            # only. The cache exposes the same dict shape the
+            # template was reading.
             "chat_questions": insights.open_questions_cache.questions,
-            # Per-cluster dismissal state — kind='chat_question',
-            # item_key=str(last_msg_id). When a fresh ask comes in
-            # the cluster's last_msg_id changes so the dismissal
-            # naturally stops applying and the question re-surfaces.
-            "cq_states": repo.get_insight_states("chat_question"),
-            # Most recent end-of-stream recap, if any.
-            "latest_recap": (repo.list_stream_recaps(limit=1) or [None])[0],
-            # Recap deltas — last 5 recaps for the cross-stream KPI strip.
-            "recent_recaps": repo.list_stream_recaps(limit=5),
-            # Streamer-personal favorites currently in chat.
-            "starred_active": repo.list_starred_active(within_minutes=30, limit=12),
-            # Active-now regulars the streamer hasn't engaged with
-            # recently. Same expansion pattern as direct_mentions —
-            # template renders 8, surfaces "show N more" to walk the
-            # rest of the queue.
-            "neglected_lurkers": repo.list_neglected_lurkers(
-                active_within_minutes=30, neglected_for_days=7, limit=30,
-            ),
-            # Per-stream goals + computed progress.
+            "cq_states": states.get("chat_question", {}),
+            "latest_recap": latest_recap,
+            "recent_recaps": recent_recaps,
+            "starred_active": starred_active,
+            "neglected_lurkers": neglected_lurkers,
             "goals_state": _build_goals_state(),
             "goal_meta": _GOAL_META,
-            # Live transcript strip — what whisper just heard.
-            "transcript_chunks": repo.list_transcript_chunks(limit=15),
-            "transcript_groups": repo.list_transcript_groups(limit=15),
+            "transcript_chunks": transcript_chunks,
+            "transcript_groups": transcript_groups,
             "transcript_status": transcript_service.status(),
-            # Recent LLM-transcript matches — feed of cards the matcher
-            # has flipped to auto_pending in the last hour, regardless of
-            # current state. Auto_pendings auto-confirm (default 5 min)
-            # so without this surface they vanish before you notice.
-            "recent_matches": repo.list_recent_transcript_matches(
-                limit=15, window_minutes=60,
-            ),
-            # Live conversation threads — surface "what's the room
-            # actually talking about right now" alongside the per-
-            # chatter hooks. Streamer feedback: thread summaries with
-            # participants are more useful than hallucinated per-
-            # chatter hooks; this panel grounds suggestions in actual
-            # clustered chat content.
-            "live_threads": repo.list_threads(
-                status_filter="active", query="", limit=12,
-            ),
-            "live_thread_states": repo.get_insight_states("thread"),
-            # Quiet cohorts — clusters of chatters who shared a topic
-            # thread but have all gone silent. Streamer can pivot back
-            # to a topic to re-engage that group of people. Same skip/
-            # addressed state machine as live threads (kind='thread').
-            # Engaging subjects — LLM-curated distinct conversation
-            # subjects from recent chat. Sensitive topics (religion /
-            # politics / controversy) filtered at the prompt level.
+            "recent_matches": recent_matches,
+            "live_threads": live_threads,
+            "live_thread_states": states.get("thread", {}),
+            # Engaging subjects — already cached on its own loop, so
+            # we read the property directly (cheap dataclass access).
             "engaging_subjects": insights.subjects_cache.subjects,
             "engaging_subjects_age_seconds": (
                 int(_t.time() - insights.subjects_cache.refreshed_at)
                 if insights.subjects_cache.refreshed_at is not None else None
             ),
             "engaging_subjects_error": insights.subjects_cache.error,
-            # High-impact subjects — cross-references currently-active
-            # chatters against topic_thread driver history. Identifies
-            # which subject would re-engage the most of THIS audience.
-            "high_impact_subjects": repo.list_high_impact_subjects(
-                active_within_minutes=int(getattr(
-                    settings, "high_impact_active_within_minutes", 30,
-                )),
-                lookback_days=int(getattr(
-                    settings, "high_impact_lookback_days", 14,
-                )),
-                min_overlap=int(getattr(
-                    settings, "high_impact_min_overlap", 2,
-                )),
-                limit=int(getattr(
-                    settings, "high_impact_limit", 6,
-                )),
-            ),
-            # Per-thread state for the high-impact panel — kind=
-            # 'high_impact', item_key=str(thread_id). Lets the streamer
-            # mark a suggestion as "brought it up" / "skip" / "snooze"
-            # so it stops showing without changing the underlying
-            # threading data.
-            "hi_states": repo.get_insight_states("high_impact"),
-            "quiet_cohorts": repo.list_quiet_thread_cohorts(
-                silence_minutes=int(getattr(settings, "quiet_cohort_silence_minutes", 15)),
-                lookback_hours=int(getattr(settings, "quiet_cohort_lookback_hours", 24)),
-                min_drivers=int(getattr(settings, "quiet_cohort_min_drivers", 2)),
-                limit=int(getattr(settings, "quiet_cohort_limit", 6)),
-            ),
+            "high_impact_subjects": high_impact_subjects,
+            "hi_states": states.get("high_impact", {}),
+            "quiet_cohorts": quiet_cohorts,
         }
 
     def _build_topics_ctx(status: str, q: str) -> dict:
@@ -3061,7 +3130,7 @@ def create_app(repo: ChatterRepo, settings: Settings | None = None) -> FastAPI:
 
         ctx: dict = {"view": view}
         if view == "engagement":
-            ctx.update(_build_engagement_ctx(window))
+            ctx.update(await _build_engagement_ctx(window))
             tpl_partial = "partials/insights_body.html"
         else:  # topics
             ctx.update(_build_topics_ctx(status, q))

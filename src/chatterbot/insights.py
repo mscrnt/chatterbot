@@ -197,6 +197,47 @@ class OpenQuestionsCache:
     error: str | None = None
 
 
+@dataclass
+class EngagementAggregatesCache:
+    """Snapshot of the repo lookups that feed the engagement view of
+    /insights. Without this cache, each page hit fired ~25 sequential
+    SQLite calls on the event loop — under live-bot write contention
+    that ballooned to 5+ seconds and blocked every other coroutine
+    (including /health and the SSE stream). Refreshed on a 30s tick
+    in the background; the page render reads it as a plain
+    dataclass, no DB hits.
+
+    `window` records which time-window the cached aggregates were
+    built for. The default `7d` is what the dashboard renders 99%
+    of the time; a streamer who flips the window dropdown to e.g.
+    `30d` falls through to the live-parallel path in the route, so
+    rare window switches stay responsive without keeping six caches
+    warm."""
+    window: str = "7d"
+    regulars: list = field(default_factory=list)
+    lapsed: list = field(default_factory=list)
+    newcomers: list = field(default_factory=list)
+    anniversaries: list = field(default_factory=list)
+    pulse: object = None
+    direct_mentions: list = field(default_factory=list)
+    starred_active: list = field(default_factory=list)
+    neglected_lurkers: list = field(default_factory=list)
+    transcript_chunks: list = field(default_factory=list)
+    transcript_groups: list = field(default_factory=list)
+    recent_matches: list = field(default_factory=list)
+    live_threads: list = field(default_factory=list)
+    high_impact_subjects: list = field(default_factory=list)
+    quiet_cohorts: list = field(default_factory=list)
+    latest_recap: object = None
+    recent_recaps: list = field(default_factory=list)
+    # kind → states dict, for the 10 insight kinds the engagement
+    # view reads. Fetched in the same gather so the dashboard
+    # doesn't fire 10 separate DB calls on render.
+    insight_states: dict[str, dict] = field(default_factory=dict)
+    refreshed_at: float | None = None
+    error: str | None = None
+
+
 class InsightsService:
     """Caches the LLM-derived talking points; refreshed by a background task."""
 
@@ -281,6 +322,15 @@ class InsightsService:
         self._screenshot_grid_cache: dict[
             int, tuple[float, str | None],
         ] = {}
+        # Engagement-view aggregates cache (regulars, lapsed,
+        # neglected lurkers, etc.). Refreshed by
+        # `engagement_aggregates_loop` on a short tick. The default
+        # is the empty/cold instance — `_build_engagement_ctx` falls
+        # through to a live-parallel path while `refreshed_at is
+        # None` so the page still renders correctly during the few
+        # seconds between dashboard boot and the first refresh.
+        self._engagement_aggregates_cache = EngagementAggregatesCache()
+        self._engagement_aggregates_lock = asyncio.Lock()
 
     @property
     def cache(self) -> InsightsCache:
@@ -293,6 +343,10 @@ class InsightsService:
     @property
     def open_questions_cache(self) -> OpenQuestionsCache:
         return self._questions_cache
+
+    @property
+    def engagement_aggregates_cache(self) -> EngagementAggregatesCache:
+        return self._engagement_aggregates_cache
 
     # Short TTL for the screenshot-grid cache. Longer than
     # screenshot_interval_seconds (default 10s) so the cache survives
@@ -409,6 +463,200 @@ class InsightsService:
             + groups[0].summary.strip()
             + "\n\n"
         )
+
+    # Engagement-aggregates refresh cadence. 30s is a sweet spot:
+    # fast enough that dropdown widgets (e.g. starred-active,
+    # neglected-lurkers, mpm pulse) feel current; slow enough that
+    # we don't re-fire the heavier aggregates (neglected_lurkers,
+    # high_impact_subjects) more than necessary. The page render
+    # only ever reads from the cache, so the freshness budget is
+    # entirely tunable here.
+    ENGAGEMENT_AGGREGATES_REFRESH_SECONDS = 30
+    # Insight-state kinds the engagement view reads. Captured here so
+    # the cache key set is one source of truth shared between the
+    # refresh fan-out and the route's fallback path.
+    _ENGAGEMENT_INSIGHT_KINDS: tuple[str, ...] = (
+        "talking_point", "anniversary", "newcomer", "regular", "lapsed",
+        "direct_mention", "neglected_lurker", "chat_question", "thread",
+        "high_impact",
+    )
+    # Window key → SQL date-modifier. Mirrors the dashboard's window
+    # selector (web/app.py: _INSIGHT_WINDOWS) — duplicated here
+    # rather than imported because the route's lookup lives inside
+    # build_app's closure. Update both when adding a window.
+    _ENGAGEMENT_WINDOW_MODIFIERS: dict[str, str | None] = {
+        "7d": "-7 days",
+        "30d": "-30 days",
+        "90d": "-90 days",
+        "ytd": "start of year",
+        "1y": "-365 days",
+        "lifetime": None,
+    }
+
+    async def engagement_aggregates_loop(
+        self, interval_seconds: int | None = None,
+    ) -> None:
+        """Periodically refresh the cached repo aggregates that feed
+        the engagement view of /insights. Runs unconditionally — the
+        underlying queries are cheap on a quiet DB, and on a busy DB
+        (live bot writes) skipping refreshes risks stale UI for the
+        streamer who's actively reading the dashboard."""
+        interval = interval_seconds or self.ENGAGEMENT_AGGREGATES_REFRESH_SECONDS
+        # First pass nearly immediately so a streamer hitting /insights
+        # right after dashboard boot still gets cached data after one
+        # tick rather than landing on the cold-cache fallback.
+        await asyncio.sleep(2)
+        while True:
+            try:
+                await self._refresh_engagement_aggregates(window="7d")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("engagement aggregates refresh failed")
+            await asyncio.sleep(interval)
+
+    async def _refresh_engagement_aggregates(self, *, window: str) -> None:
+        """Fan out the engagement-view DB lookups in parallel and swap
+        the cache atomically.
+
+        Pre-this-cache, `_build_engagement_ctx` ran ~25 of these
+        sequentially on the asyncio event loop. Even when each query
+        was a few ms on a quiet DB, the cumulative wall-clock under
+        live-bot write contention pushed `/insights` to 5+ seconds.
+        Fanning out via `asyncio.to_thread` lets sqlite-internal IO
+        overlap and frees the event loop for /health, the SSE
+        stream, and HTMX polls."""
+        repo = self.repo
+        settings = self.settings
+        modifier = self._ENGAGEMENT_WINDOW_MODIFIERS.get(window, "-7 days")
+        kinds = self._ENGAGEMENT_INSIGHT_KINDS
+
+        async with self._engagement_aggregates_lock:
+            try:
+                results = await asyncio.gather(
+                    asyncio.to_thread(repo.list_regulars, since=modifier, limit=10),
+                    asyncio.to_thread(
+                        repo.list_lapsed_regulars,
+                        active_since=modifier, lapsed_for="-7 days", limit=10,
+                    ),
+                    asyncio.to_thread(repo.list_first_timers_today, limit=20),
+                    asyncio.to_thread(repo.users_with_anniversary_today),
+                    asyncio.to_thread(repo.messages_per_minute, 60),
+                    asyncio.to_thread(repo.recent_direct_mentions, limit=30),
+                    asyncio.to_thread(
+                        repo.list_starred_active,
+                        within_minutes=30, limit=12,
+                    ),
+                    asyncio.to_thread(
+                        repo.list_neglected_lurkers,
+                        active_within_minutes=30,
+                        neglected_for_days=7,
+                        limit=30,
+                    ),
+                    asyncio.to_thread(repo.list_transcript_chunks, limit=15),
+                    asyncio.to_thread(repo.list_transcript_groups, limit=15),
+                    asyncio.to_thread(
+                        repo.list_recent_transcript_matches,
+                        limit=15, window_minutes=60,
+                    ),
+                    asyncio.to_thread(
+                        repo.list_threads,
+                        status_filter="active", query="", limit=12,
+                    ),
+                    asyncio.to_thread(
+                        repo.list_high_impact_subjects,
+                        active_within_minutes=int(getattr(
+                            settings, "high_impact_active_within_minutes", 30,
+                        )),
+                        lookback_days=int(getattr(
+                            settings, "high_impact_lookback_days", 14,
+                        )),
+                        min_overlap=int(getattr(
+                            settings, "high_impact_min_overlap", 2,
+                        )),
+                        limit=int(getattr(settings, "high_impact_limit", 6)),
+                    ),
+                    asyncio.to_thread(
+                        repo.list_quiet_thread_cohorts,
+                        silence_minutes=int(getattr(
+                            settings, "quiet_cohort_silence_minutes", 15,
+                        )),
+                        lookback_hours=int(getattr(
+                            settings, "quiet_cohort_lookback_hours", 24,
+                        )),
+                        min_drivers=int(getattr(
+                            settings, "quiet_cohort_min_drivers", 2,
+                        )),
+                        limit=int(getattr(settings, "quiet_cohort_limit", 6)),
+                    ),
+                    asyncio.to_thread(repo.list_stream_recaps, limit=5),
+                    *[
+                        asyncio.to_thread(repo.get_insight_states, k)
+                        for k in kinds
+                    ],
+                )
+            except Exception as e:
+                logger.exception(
+                    "engagement aggregates refresh: gather failed",
+                )
+                # Preserve any previously-cached data; just record the
+                # error so the dashboard surface knows refresh is
+                # failing (mirrors how InsightsCache handles errors).
+                prev = self._engagement_aggregates_cache
+                self._engagement_aggregates_cache = EngagementAggregatesCache(
+                    window=prev.window,
+                    regulars=prev.regulars,
+                    lapsed=prev.lapsed,
+                    newcomers=prev.newcomers,
+                    anniversaries=prev.anniversaries,
+                    pulse=prev.pulse,
+                    direct_mentions=prev.direct_mentions,
+                    starred_active=prev.starred_active,
+                    neglected_lurkers=prev.neglected_lurkers,
+                    transcript_chunks=prev.transcript_chunks,
+                    transcript_groups=prev.transcript_groups,
+                    recent_matches=prev.recent_matches,
+                    live_threads=prev.live_threads,
+                    high_impact_subjects=prev.high_impact_subjects,
+                    quiet_cohorts=prev.quiet_cohorts,
+                    latest_recap=prev.latest_recap,
+                    recent_recaps=prev.recent_recaps,
+                    insight_states=prev.insight_states,
+                    refreshed_at=prev.refreshed_at,
+                    error=str(e),
+                )
+                return
+
+            (regulars, lapsed, newcomers, anniversaries, pulse,
+             direct_mentions, starred_active, neglected_lurkers,
+             transcript_chunks, transcript_groups, recent_matches,
+             live_threads, high_impact, quiet_cohorts, recent_recaps,
+             *state_results) = results
+            states = dict(zip(kinds, state_results))
+            latest_recap = recent_recaps[0] if recent_recaps else None
+
+            self._engagement_aggregates_cache = EngagementAggregatesCache(
+                window=window,
+                regulars=regulars,
+                lapsed=lapsed,
+                newcomers=newcomers,
+                anniversaries=anniversaries,
+                pulse=pulse,
+                direct_mentions=direct_mentions,
+                starred_active=starred_active,
+                neglected_lurkers=neglected_lurkers,
+                transcript_chunks=transcript_chunks,
+                transcript_groups=transcript_groups,
+                recent_matches=recent_matches,
+                live_threads=live_threads,
+                high_impact_subjects=high_impact,
+                quiet_cohorts=quiet_cohorts,
+                latest_recap=latest_recap,
+                recent_recaps=recent_recaps,
+                insight_states=states,
+                refreshed_at=time.time(),
+                error=None,
+            )
 
     async def refresh_loop(self, interval_seconds: int | None = None) -> None:
         interval = interval_seconds or self.DEFAULT_REFRESH_SECONDS
